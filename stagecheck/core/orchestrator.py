@@ -25,6 +25,11 @@ from stagecheck.checks import (
     run_stage8_rerun,
     run_stage9_carry_forward,
 )
+from stagecheck.core.evidence import (
+    append_issue_history,
+    create_task_seal,
+    update_evidence_manifest,
+)
 from stagecheck.core.paths import find_workspace_root
 from stagecheck.core.utils import (
     canonical_json_dumps,
@@ -345,6 +350,28 @@ class AuditOrchestrator:
         task_root_dir.mkdir(parents=True, exist_ok=True)
         with open(task_root_dir / "verdict.json", "w", encoding="utf-8") as f:
             f.write(canonical_json_dumps(verdict_data) + "\n")
+
+        # Update evidence manifest with verdicts
+        update_evidence_manifest(self.workspace_root, [verdict_path, task_root_dir / "verdict.json"])
+
+        # Create task seal or append issue history
+        if overall_passed:
+            create_task_seal(
+                workspace_root=self.workspace_root,
+                task_id=ctx.task_id,
+                attempt=ctx.attempt,
+                verdict_data=verdict_data,
+                checked_heads=ctx.target_commits,
+                outcome="PASSED",
+            )
+        else:
+            append_issue_history(
+                workspace_root=self.workspace_root,
+                task_id=ctx.task_id,
+                attempt=ctx.attempt,
+                outcome="FAILED",
+                defects=formatted_defects,
+            )
 
         return overall_passed, verdict_data
 
