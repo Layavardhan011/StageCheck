@@ -69,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     # 7. resume
     p_resume = subparsers.add_parser("resume", help="Resume automation from AWAITING_HUMAN_DISPOSITION.")
     p_resume.add_argument("--task", required=True, help="Task identifier.")
+    p_resume.add_argument("--workspace", help="Explicit workspace root path.")
 
     # 8. reset-attempts
     p_reset = subparsers.add_parser("reset-attempts", help="Monotonically allocate Attempt 4 after circuit breaker.")
@@ -83,6 +84,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_disp_add.add_argument("--task", required=True, help="Task identifier.")
     p_disp_add.add_argument("--defect", required=True, help="Defect code.")
     p_disp_add.add_argument("--rationale", required=True, help="Justification rationale.")
+    p_disp_add.add_argument("--action", default="ACCEPT_AS_INTENTIONAL", choices=["ACCEPT_AS_INTENTIONAL", "WAIVE_TEMPORARY", "NOT_APPLICABLE"], help="Disposition action.")
+    p_disp_add.add_argument("--authorized-by", default="human-operator", help="Authorized owner identity.")
+    p_disp_add.add_argument("--yes", "-y", action="store_true", help="Bypass interactive confirmation prompt.")
+    p_disp_add.add_argument("--workspace", help="Explicit workspace root path.")
 
     # 10. sentinel
     p_sentinel = subparsers.add_parser("sentinel", help="Manage background continuous sentinel daemon.")
@@ -157,6 +162,28 @@ def main(argv: Optional[List[str]] = None) -> int:
             authorized_by=args.authorized_by,
             workspace=getattr(args, "workspace", None),
         )
+
+    if args.subcommand == "resume":
+        from stagecheck.cli.resume_cmd import run_resume
+        return run_resume(
+            task=args.task,
+            workspace=getattr(args, "workspace", None),
+        )
+
+    if args.subcommand == "disposition":
+        if getattr(args, "disposition_action", None) == "add":
+            from stagecheck.cli.disposition_cmd import run_disposition_add
+            return run_disposition_add(
+                task=args.task,
+                defect=args.defect,
+                rationale=args.rationale,
+                action=getattr(args, "action", "ACCEPT_AS_INTENTIONAL"),
+                authorized_by=getattr(args, "authorized_by", "human-operator"),
+                yes=getattr(args, "yes", False),
+                workspace=getattr(args, "workspace", None),
+            )
+        print("Usage: stagecheck disposition add ...", file=sys.stderr)
+        return 1
 
     if args.subcommand == "sentinel":
         from stagecheck.cli.sentinel_cmd import run_sentinel
