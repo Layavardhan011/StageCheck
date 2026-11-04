@@ -228,3 +228,4 @@ def validate_schema(data: Any, schema: Dict[str, Any]) -> None:
     elif expected_type == "boolean":
         if not isinstance(data, bool):
             raise SchemaValidationError(f"Expected boolean, got {type(data).__name__}.")
+

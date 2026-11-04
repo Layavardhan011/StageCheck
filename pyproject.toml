@@ -44,3 +44,4 @@ stagecheck = [
     "schemas/assets/*.json",
     "config/defaults/*.json",
 ]
+

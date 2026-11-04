@@ -10,3 +10,4 @@ def get_schema_path(schema_name: str) -> Path:
     if not path.is_file():
         raise FileNotFoundError(f"Embedded schema asset not found: {schema_name}")
     return path
+

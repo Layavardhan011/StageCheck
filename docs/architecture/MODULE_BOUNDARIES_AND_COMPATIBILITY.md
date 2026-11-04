@@ -158,3 +158,4 @@ To ensure zero regression for operators or CI scripts relying on legacy CLI synt
 | Compatibility shims defined | Section 4 provides shim implementations for legacy entrypoints | **SATISFIED** |
 | No duplicate source of truth | Domain logic centralized in `stagecheck/`; shims act as thin adapters | **SATISFIED** |
 | Compatibility risks & mitigations listed | Section 5 documents risks and mitigation protocols | **SATISFIED** |
+

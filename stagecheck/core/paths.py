@@ -159,3 +159,4 @@ def safe_resolve(
 def to_portable_posix(path: Union[str, Path]) -> str:
     """Convert any filesystem path to a standard forward-slash POSIX relative string."""
     return Path(path).as_posix()
+

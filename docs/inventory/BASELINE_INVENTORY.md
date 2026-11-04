@@ -124,3 +124,4 @@ The repository root includes `MANIFEST.sha256` containing 126 entries. All entri
 | Module, entrypoint, check, and schema inventory | Sections 2.1–2.5 map every file in repository | **SATISFIED** |
 | Existing test suite execution recorded | Section 3 records 164 tests, 161 errors, root cause | **SATISFIED** |
 | Existing files left unaltered | No source code altered; documented in dedicated inventory | **SATISFIED** |
+

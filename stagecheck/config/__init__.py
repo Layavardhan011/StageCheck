@@ -10,3 +10,4 @@ def get_config_path(config_name: str) -> Path:
     if not path.is_file():
         raise FileNotFoundError(f"Embedded configuration asset not found: {config_name}")
     return path
+

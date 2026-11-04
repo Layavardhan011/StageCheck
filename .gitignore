@@ -11,3 +11,4 @@ dist/
 htmlcov/
 .stagecheck-init.lock
 .stagecheck.lock
+
