@@ -161,3 +161,4 @@ def run_stage7_qual_naming(ctx: AuditContext) -> StageResult:
         defects=defects,
         errors=errors,
     )
+

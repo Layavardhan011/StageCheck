@@ -70,3 +70,4 @@ def run_stage6_secrets(ctx: AuditContext) -> StageResult:
 
     status = "FAIL" if any(d.blocking for d in defects) else "CLEAR"
     return StageResult(stage_id=stage_id, status=status, defects=defects, errors=errors)
+

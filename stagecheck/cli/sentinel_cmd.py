@@ -60,3 +60,4 @@ def run_sentinel(
     else:
         print(f"Unknown sentinel action '{action}'. Choices: start, stop, status, logs.", file=sys.stderr)
         return 1
+

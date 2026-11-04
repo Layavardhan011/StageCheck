@@ -331,3 +331,4 @@ def append_issue_history(
     # Index history file in evidence manifest
     update_evidence_manifest(workspace_root, [history_file])
     return history_file
+

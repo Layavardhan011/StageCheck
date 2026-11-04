@@ -210,3 +210,4 @@ def run_stage8_rerun(ctx: AuditContext) -> StageResult:
         defects=defects,
         errors=errors,
     )
+
