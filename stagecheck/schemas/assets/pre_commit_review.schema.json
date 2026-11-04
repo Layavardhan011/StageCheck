@@ -1,0 +1,90 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StageCheck Pre-Commit Review Ledger Schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "task_id",
+    "attempt",
+    "cycle",
+    "status",
+    "summary",
+    "pre_existing_issues_ignored",
+    "architectural_intents_approved",
+    "new_issues_found"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["2.0"]
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^task-[a-zA-Z0-9_-]+$"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "cycle": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "base_commit": {
+      "type": "string"
+    },
+    "base_commits": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "approved_snapshot_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "approved_diff_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "approved_diff_hashes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": ["REVISION_REQUIRED", "APPROVED"]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "pre_existing_issues_ignored": {
+      "type": "array"
+    },
+    "architectural_intents_approved": {
+      "type": "array"
+    },
+    "new_issues_found": {
+      "type": "array"
+    },
+    "code_quality_observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["metric", "severity", "description", "blocking"],
+        "properties": {
+          "metric": { "type": "string" },
+          "file": { "type": "string" },
+          "line": { "type": "integer" },
+          "severity": {
+            "type": "string",
+            "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+          },
+          "description": { "type": "string" },
+          "blocking": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}
