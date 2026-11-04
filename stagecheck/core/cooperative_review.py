@@ -218,6 +218,21 @@ def record_pre_commit_review(
 
     touched_repos = list(base_commits.keys())
     if status == "APPROVED":
+        # 1. Enforce staged secret scanning gate before commit authorization (Spec 08, Spec 14, SEC-M1)
+        from stagecheck.core.scanner import SecretScanner
+        scanner = SecretScanner()
+        for repo_name in touched_repos:
+            repo_path = root / "repos" / repo_name
+            if repo_path.is_dir():
+                staged_res = scanner.scan_staged_changes(repo_dir=repo_path, repo_name=repo_name)
+                if not staged_res.is_clear:
+                    error_msg = "; ".join(d.message for d in staged_res.defects)
+                    raise ReviewGateError(
+                        f"Pre-commit staged secret scan failed for repo '{repo_name}': {error_msg}. "
+                        "Commits cannot be authorized when secret scanning fails or leaks are detected."
+                    )
+
+        # 2. Compute approved diff hashes
         approved_diff_hashes, approved_snapshot_sha256 = compute_uncommitted_diff_hashes(
             workspace_root=root,
             touched_repos=touched_repos,

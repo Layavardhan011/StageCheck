@@ -54,48 +54,67 @@ def _get_secret_findings(ctx):
 
 
 def call_agent(ctx, agent, config, input_packet, out):
-    setting_path=ctx.tool/'settings/claude.settings.json'
-    settings=loads(ctx.read(setting_path))
-    sys.path.insert(0,str(ctx.tool/'checks'))
+    provider = config.get('provider') or agent.get('provider') or 'claude'
+    sys.path.insert(0, str(ctx.tool / 'checks'))
     input_secrets = _get_secret_findings(ctx)
-    if input_secrets('agent-input.json',encode(input_packet).decode()):
+    if input_secrets('agent-input.json', encode(input_packet).decode()):
         raise ToolError('credential-shaped model input was not sent')
-    if not config.get('binary') or not agent.get('model') or not settings.get('apiKeyHelper'):
-        raise ToolError('owner-selected Claude binary, apiKeyHelper and pinned model ID are required')
-    if not isinstance(config.get('budget_usd'),(int,float)) or config['budget_usd']<=0 or not isinstance(config.get('timeout_seconds'),int) or config['timeout_seconds']<=0:
+    if not config.get('binary') or not agent.get('model'):
+        raise ToolError('binary and pinned model ID are required')
+    if not isinstance(config.get('budget_usd'), (int, float)) or config['budget_usd'] <= 0 or not isinstance(config.get('timeout_seconds'), int) or config['timeout_seconds'] <= 0:
         raise ToolError('owner-selected positive call budget and timeout are required')
-    if agent['tools']!=['Read','Grep','Glob']:
-        raise ToolError('agent tools differ from the read-only tool set')
-    binary=canonical(config['binary'])
-    help_result=command([str(binary),'--help'],ctx.tool)
-    flags=['--bare','--print','--tools','--allowedTools','--output-format','--json-schema','--system-prompt-file','--settings','--model','--max-budget-usd','--no-session-persistence','--disable-slash-commands','--strict-mcp-config','--mcp-config','--setting-sources','--permission-mode']
-    # Installed 2.1.170 advertises the file form as --system-prompt[-file].
-    supported_help=help_result['stdout'].replace('--system-prompt[-file]','--system-prompt --system-prompt-file')
-    if help_result['exit_status'] or any(flag not in supported_help for flag in flags):
-        raise ToolError('installed Claude help does not establish every selected flag')
-    instruction_paths=[ctx.contract,ctx.tool/'agent_instructions/00_common.md',ctx.tool/'agent_instructions'/agent['instruction']]
-    instruction_bytes=[ctx.read(ctx.contract), validate_instruction(ctx,'common','00_common.md'),
-                       validate_instruction(ctx,agent['id'],agent['instruction'])]
-    prompt='\n\n'.join(x.decode() for x in instruction_bytes)
-    prompt_path=out/(agent['id']+'.instructions.md')
-    # Large manuals exceed Linux's per-argument limit. This file contains only
-    # the same three hashed sources, never an additional instruction source.
-    descriptor=os.open(prompt_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
-    with os.fdopen(descriptor,'wb') as stream:
+
+    instruction_paths = [ctx.contract, ctx.tool / 'agent_instructions/00_common.md', ctx.tool / 'agent_instructions' / agent['instruction']]
+    instruction_bytes = [
+        ctx.read(ctx.contract),
+        validate_instruction(ctx, 'common', '00_common.md'),
+        validate_instruction(ctx, agent['id'], agent['instruction']),
+    ]
+    prompt = '\n\n'.join(x.decode() for x in instruction_bytes)
+    prompt_path = out / (agent['id'] + '.instructions.md')
+    descriptor = os.open(prompt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, 'wb') as stream:
         stream.write(prompt.encode('utf-8'))
-    # Tool availability, not just permission allow rules, excludes shell/edit/MCP.
-    # Inputs remain untrusted subject bytes; they cannot alter tool configuration.
-    argv=[str(binary),'--bare','-p','--tools','Read,Grep,Glob','--allowedTools','Read,Grep,Glob',
-          '--permission-mode','dontAsk','--setting-sources','',
-          '--strict-mcp-config','--mcp-config','{"mcpServers":{}}',
-          '--disable-slash-commands','--no-session-persistence',
-          '--output-format','json','--json-schema',json.dumps(load(ctx.tool/'schemas/verdict.schema.json')),
-          '--system-prompt-file',str(prompt_path),'--settings',str(setting_path),
-          '--model',agent['model'],'--max-budget-usd',str(config['budget_usd'])]
-    env={k:v for k,v in os.environ.items() if not k.startswith(('ANTHROPIC_','CLAUDE_'))}
+
+    binary = canonical(config['binary'])
+
+    if provider == 'claude':
+        setting_path = ctx.tool / 'settings/claude.settings.json'
+        settings = loads(ctx.read(setting_path))
+        if not settings.get('apiKeyHelper'):
+            raise ToolError('owner-selected Claude binary, apiKeyHelper and pinned model ID are required')
+        if agent.get('tools') != ['Read', 'Grep', 'Glob']:
+            raise ToolError('agent tools differ from the read-only tool set')
+        help_result = command([str(binary), '--help'], ctx.tool)
+        flags = ['--bare', '--print', '--tools', '--allowedTools', '--output-format', '--json-schema', '--system-prompt-file', '--settings', '--model', '--max-budget-usd', '--no-session-persistence', '--disable-slash-commands', '--strict-mcp-config', '--mcp-config', '--setting-sources', '--permission-mode']
+        supported_help = help_result['stdout'].replace('--system-prompt[-file]', '--system-prompt --system-prompt-file')
+        if help_result['exit_status'] or any(flag not in supported_help for flag in flags):
+            raise ToolError('installed Claude help does not establish every selected flag')
+        argv = [
+            str(binary), '--bare', '-p', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read,Grep,Glob',
+            '--permission-mode', 'dontAsk', '--setting-sources', '',
+            '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+            '--disable-slash-commands', '--no-session-persistence',
+            '--output-format', 'json', '--json-schema', json.dumps(load(ctx.tool / 'schemas/verdict.schema.json')),
+            '--system-prompt-file', str(prompt_path), '--settings', str(setting_path),
+            '--model', agent['model'], '--max-budget-usd', str(config['budget_usd'])
+        ]
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('ANTHROPIC_', 'CLAUDE_'))}
+    else:
+        # Universal / custom agent adapter interface
+        argv = [
+            str(binary),
+            '--system-prompt-file', str(prompt_path),
+            '--model', agent['model'],
+            '--schema', str(ctx.tool / 'schemas/verdict.schema.json'),
+        ]
+        if config.get('extra_args'):
+            argv.extend(config['extra_args'])
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('ANTHROPIC_', 'OPENAI_', 'GEMINI_', 'API_KEY'))}
+
     try:
-        execution=subprocess.run(argv,cwd=ctx.tool,env=env,input=encode(input_packet),capture_output=True,
-                                 timeout=config['timeout_seconds'],shell=False)
+        execution = subprocess.run(argv, cwd=ctx.tool, env=env, input=encode(input_packet), capture_output=True,
+                                   timeout=config['timeout_seconds'], shell=False)
     except subprocess.TimeoutExpired as exc:
         create(out/(agent['id']+'.fault.json'),{'id':agent['id'],'fault':'timeout',
             'stdout_sha256':digest(exc.stdout or b''),'stderr_sha256':digest(exc.stderr or b''),

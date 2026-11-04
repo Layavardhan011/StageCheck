@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from stagecheck.checks.base import AuditContext, Defect, StageResult
 from stagecheck.checks.stage1_preflight import run_stage1_preflight
@@ -175,24 +176,23 @@ class TestNineStageVerification(unittest.TestCase):
         self.assertTrue(res_pass.is_clear)
 
     def test_stage1_preflight_strict_scanners_fail_closed(self):
-        """Test Stage 1 fails closed in strict mode when Gitleaks is missing or unexecutable."""
+        """Test Stage 1 fails closed when Gitleaks is missing or unexecutable."""
         self._setup_valid_prompt_and_scope()
-        ctx_strict = AuditContext(
+        ctx = AuditContext(
             workspace_root=self.workspace_root,
             task_id=self.task_id,
             attempt=self.attempt,
             touched_repos=["app"],
             all_registered_repos=["app"],
-            strict_scanners=True,
         )
-        res = run_stage1_preflight(ctx_strict)
-        self.assertFalse(res.is_clear)
-        self.assertTrue(any(d.defect_id.startswith("preflight.gitleaks_") and d.blocking for d in res.defects))
+        with patch("shutil.which", return_value=None):
+            res = run_stage1_preflight(ctx)
+            self.assertFalse(res.is_clear)
+            self.assertTrue(any(d.defect_id.startswith("preflight.gitleaks_") and d.blocking for d in res.defects))
 
     def test_stage6_secrets_strict_and_report_only_modes(self):
-        """Test Stage 6 handles absent scanner: report-only in dev mode, fail-closed in strict mode."""
-        # 1. Dev / Permissive Mode: scanner missing -> CLEAR with report-only finding
-        ctx_dev = AuditContext(
+        """Test Stage 6 enforces fail-closed behavior when scanner is missing."""
+        ctx = AuditContext(
             workspace_root=self.workspace_root,
             task_id=self.task_id,
             attempt=self.attempt,
@@ -200,26 +200,11 @@ class TestNineStageVerification(unittest.TestCase):
             all_registered_repos=["app"],
             base_commits={"app": "HEAD~1"},
             target_commits={"app": "HEAD"},
-            strict_scanners=False,
         )
-        res_dev = run_stage6_secrets(ctx_dev)
-        self.assertTrue(res_dev.is_clear)
-        self.assertTrue(any(d.defect_id == "secrets.scanner_skipped" and not d.blocking for d in res_dev.defects))
-
-        # 2. Strict Mode: scanner missing -> FAIL closed with blocking defect
-        ctx_strict = AuditContext(
-            workspace_root=self.workspace_root,
-            task_id=self.task_id,
-            attempt=self.attempt,
-            touched_repos=["app"],
-            all_registered_repos=["app"],
-            base_commits={"app": "HEAD~1"},
-            target_commits={"app": "HEAD"},
-            strict_scanners=True,
-        )
-        res_strict = run_stage6_secrets(ctx_strict)
-        self.assertFalse(res_strict.is_clear)
-        self.assertTrue(any(d.defect_id == "secrets.scanner_unavailable" and d.blocking for d in res_strict.defects))
+        with patch("shutil.which", return_value=None):
+            res = run_stage6_secrets(ctx)
+            self.assertFalse(res.is_clear)
+            self.assertTrue(any(d.defect_id == "secrets.scanner_missing" and d.blocking for d in res.defects))
 
     def test_stage2_scope_paths_failure(self):
         """Test Stage 2 detects out-of-scope path modifications."""

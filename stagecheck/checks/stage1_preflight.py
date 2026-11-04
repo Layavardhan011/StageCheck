@@ -69,83 +69,12 @@ def run_stage1_preflight(ctx: AuditContext) -> StageResult:
                     except Exception:
                         pass
 
-    # 4. Gitleaks Version Check (SEC-L2)
-    gitleaks_bin = shutil.which("gitleaks")
-    strict_scanners = (
-        os.environ.get("STAGECHECK_STRICT_SECRETS") == "1"
-        or getattr(ctx, "strict_scanners", False)
-    )
-
-    if not gitleaks_bin or not os.access(gitleaks_bin, os.X_OK):
-        if strict_scanners:
-            defects.append(
-                Defect(
-                    defect_id="preflight.gitleaks_missing",
-                    message="Gitleaks scanner binary not found in PATH or not executable; required in strict governance mode.",
-                    stage=stage_id,
-                    severity="CRITICAL",
-                    blocking=True,
-                )
-            )
-        else:
-            defects.append(
-                Defect(
-                    defect_id="preflight.gitleaks_unavailable",
-                    message="Gitleaks scanner binary not found in PATH or not executable; secret scanning will be skipped.",
-                    stage=stage_id,
-                    severity="HIGH",
-                    blocking=False,
-                )
-            )
-    else:
-        try:
-            res = subprocess.run([gitleaks_bin, "version"], capture_output=True, text=True, check=False)
-            if res.returncode == 0:
-                match = re.search(r"v?([0-9]+)\.([0-9]+)\.([0-9]+)", res.stdout)
-                if match:
-                    major, minor = int(match.group(1)), int(match.group(2))
-                    if major != 8 or minor < 18:
-                        defects.append(
-                            Defect(
-                                defect_id="preflight.gitleaks_version_incompatible",
-                                message=f"Installed Gitleaks version '{res.stdout.strip()}' does not satisfy requirement (v8.18+).",
-                                stage=stage_id,
-                                severity="HIGH",
-                                blocking=True,
-                            )
-                        )
-            else:
-                if strict_scanners:
-                    defects.append(
-                        Defect(
-                            defect_id="preflight.gitleaks_execution_failed",
-                            message=f"Gitleaks version check failed with exit code {res.returncode}.",
-                            stage=stage_id,
-                            severity="CRITICAL",
-                            blocking=True,
-                        )
-                    )
-        except (FileNotFoundError, PermissionError, OSError) as e:
-            if strict_scanners:
-                defects.append(
-                    Defect(
-                        defect_id="preflight.gitleaks_execution_error",
-                        message=f"Failed to execute Gitleaks binary: {e}",
-                        stage=stage_id,
-                        severity="CRITICAL",
-                        blocking=True,
-                    )
-                )
-            else:
-                defects.append(
-                    Defect(
-                        defect_id="preflight.gitleaks_unavailable",
-                        message=f"Gitleaks binary execution error: {e}; secret scanning skipped.",
-                        stage=stage_id,
-                        severity="HIGH",
-                        blocking=False,
-                    )
-                )
+    # 4. Gitleaks Binary & Version Check (SEC-L2) - Fail Closed
+    from stagecheck.core.scanner import SecretScanner
+    scanner = getattr(ctx, "scanner", None) or SecretScanner()
+    is_valid, scanner_defects = scanner.verify_scanner_binary(stage=stage_id)
+    if not is_valid:
+        defects.extend(scanner_defects)
 
     status = "FAIL" if any(d.blocking for d in defects) else "CLEAR"
     return StageResult(stage_id=stage_id, status=status, defects=defects, errors=errors)
