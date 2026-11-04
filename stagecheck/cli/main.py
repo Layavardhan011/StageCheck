@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_init = subparsers.add_parser("init", help="Initialize a new governed workspace.")
     p_init.add_argument("--repos", help="Comma-separated target repository names.")
     p_init.add_argument("--workspace", help="Explicit workspace root path.")
-    p_init.add_argument("--force", action="store_true", help="Force re-initialization with owner grant.")
+    p_init.add_argument("--force", "--reinit", action="store_true", dest="force", help="Force re-initialization with owner grant.")
 
     # 2. start
     p_start = subparsers.add_parser("start", help="Activate a new task under exclusive lock.")
@@ -94,7 +94,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.print_help()
         return 0
 
-    # In Phase 1 foundation, subcommands acknowledge dispatch; full execution wired in Phase 2-4
+    if args.subcommand == "init":
+        from stagecheck.cli.init_cmd import run_init
+        return run_init(
+            workspace=getattr(args, "workspace", None),
+            repos=getattr(args, "repos", None),
+            force=getattr(args, "force", False),
+        )
+
+    # In Phase 2, subcommands acknowledge dispatch; full execution wired in Phase 3-4
     print(f"StageCheck v{stagecheck.__version__}: Dispatched subcommand '{args.subcommand}'")
     return 0
 
