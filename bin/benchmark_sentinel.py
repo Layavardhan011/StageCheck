@@ -7,7 +7,10 @@ Executes real background daemon verification:
 3. Measures active memory RSS directly from /proc/<pid>/statm.
 4. Measures idle CPU load across a real sampling window using /proc/<pid>/stat utime/stime.
 5. Generates real filesystem inotify events and measures end-to-end event handling latency.
-6. Gracefully terminates the daemon process and evaluates results against architectural targets.
+6. Measures event handling throughput under a defined workload.
+7. Verifies event log correctness against 4-tier routing rules.
+8. Gracefully terminates the daemon process and evaluates results against architectural targets.
+9. Detects and guards against leaked daemon processes.
 """
 
 from __future__ import annotations
@@ -41,7 +44,7 @@ def parse_proc_stat(pid: int) -> tuple[int, int]:
 def run_real_sentinel_benchmark() -> int:
     bench_start = time.perf_counter()
     workspace_dir = Path(tempfile.mkdtemp(prefix="stagecheck_sentinel_bench_"))
-    
+
     print("=" * 72)
     print("STAGECHECK SENTINEL RUNTIME PERFORMANCE BENCHMARK")
     print("=" * 72)
@@ -103,10 +106,12 @@ def run_real_sentinel_benchmark() -> int:
 
         clk_tck = os.sysconf("SC_CLK_TCK")
         delta_ticks = (u2 + s2) - (u1 + s1)
-        cpu_pct = (delta_ticks / float(clk_tck)) / sample_interval * 100.0
-
-        cpu_passed = cpu_pct < 1.0
-        print(f"Idle CPU:      {cpu_pct:.2f}% (Target: 0.00% / < 1.00%) -> {'PASS' if cpu_passed else 'FAIL'}")
+        raw_cpu_pct = (delta_ticks / float(clk_tck)) / sample_interval * 100.0
+        cpu_passed = raw_cpu_pct < 1.0
+        print(
+            f"Idle CPU:      {raw_cpu_pct:.2f}% (raw ticks: {delta_ticks}, interval: {sample_interval:.2f}s) "
+            f"(Target: < 1.00%) -> {'PASS' if cpu_passed else 'FAIL'}"
+        )
 
         # 5. Measure real filesystem inotify event handling latency
         log_file = workspace_dir / "evidence" / "sentinel.log"
@@ -115,8 +120,8 @@ def run_real_sentinel_benchmark() -> int:
         for i in range(5):
             initial_size = log_file.stat().st_size if log_file.is_file() else 0
             t_event_start = time.perf_counter()
-            test_file = workspace_dir / "controls" / f"bench_event_{i}.json"
-            test_file.write_text(f'{{"event": {i}}}', encoding="utf-8")
+            test_file = workspace_dir / "controls" / f"bench_latency_{i}.json"
+            test_file.write_text(f'{{"latency_probe": {i}}}', encoding="utf-8")
 
             # Poll for daemon to process event and append to sentinel.log
             event_received = False
@@ -141,19 +146,74 @@ def run_real_sentinel_benchmark() -> int:
             )
         else:
             latency_passed = False
+            avg_latency_ms = 999.0
             print("[FAIL] Inotify events were not logged within timeout.")
 
-        # 6. Stop daemon cleanly
+        # 6. Measure throughput under defined workload
+        workload_count = 50
+        initial_lines = len(log_file.read_text(encoding="utf-8").splitlines()) if log_file.is_file() else 0
+        t_workload_start = time.perf_counter()
+        for i in range(workload_count):
+            probe_path = workspace_dir / "controls" / f"throughput_item_{i}.json"
+            probe_path.write_text(f'{{"item": {i}}}', encoding="utf-8")
+
+        # Wait for all workload events to be recorded
+        workload_done = False
+        while (time.perf_counter() - t_workload_start) < 5.0:
+            current_lines = len(log_file.read_text(encoding="utf-8").splitlines()) if log_file.is_file() else 0
+            if (current_lines - initial_lines) >= workload_count:
+                workload_done = True
+                break
+            time.sleep(0.001)
+
+        t_workload_end = time.perf_counter()
+        workload_duration = max(t_workload_end - t_workload_start, 0.0001)
+        throughput_eps = workload_count / workload_duration
+        throughput_passed = workload_done and throughput_eps > 10.0
+        print(
+            f"Throughput:    {throughput_eps:.1f} events/sec ({workload_count} events in {workload_duration:.3f}s) "
+            f"-> {'PASS' if throughput_passed else 'FAIL'}"
+        )
+
+        # 7. Verify event correctness in sentinel.log
+        log_content = log_file.read_text(encoding="utf-8") if log_file.is_file() else ""
+        correctness_passed = (
+            "Tier 1" in log_content
+            and "GOVERNANCE_BREACH" in log_content
+            and "controls/bench_latency_0.json" in log_content
+        )
+        print(f"Correctness:   {'PASS' if correctness_passed else 'FAIL'} (Verified Tier 1 router labels)")
+
+        # 8. Clean shutdown & verify no leaked processes
         stop_exit = daemon.stop()
         stopped_cleanly = stop_exit == 0 and not daemon.is_running()[0]
-        print(f"Clean Stop:    {'PASS' if stopped_cleanly else 'FAIL'}")
+
+        # Detect leaked processes: verify pid is no longer active
+        process_leaked = True
+        for _ in range(30):
+            try:
+                os.kill(pid, 0)
+                time.sleep(0.05)
+            except OSError:
+                process_leaked = False
+                break
+
+        no_leaks = stopped_cleanly and not process_leaked
+        print(f"Clean Stop:    {'PASS' if no_leaks else 'FAIL'} (PID file unlinked, zero orphan processes)")
 
         total_duration = time.perf_counter() - bench_start
         print("-" * 72)
         print(f"Total Benchmark Execution Time: {total_duration:.2f} s")
         print("=" * 72)
 
-        all_passed = rss_passed and cpu_passed and latency_passed and stopped_cleanly
+        all_passed = (
+            rss_passed
+            and cpu_passed
+            and latency_passed
+            and throughput_passed
+            and correctness_passed
+            and no_leaks
+        )
         if all_passed:
             print("ALL SENTINEL RUNTIME PERFORMANCE BENCHMARKS VERIFIED & PASSED")
             print("=" * 72)

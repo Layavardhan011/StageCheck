@@ -24,11 +24,9 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
-
-from stagecheck.core.agents import load_registered_agents
-from stagecheck.core.prompt_gate import is_path_in_scope
 
 
 class SentinelError(Exception):
@@ -128,6 +126,22 @@ def send_desktop_notification(
         pass
 
 
+def _is_path_in_scope(rel_path: str, declared_scope: Dict[str, Any]) -> bool:
+    """Internal lightweight scope evaluator."""
+    norm = rel_path.strip().replace("\\", "/")
+    for forb in declared_scope.get("forbidden_paths", []):
+        forb_norm = forb.strip().replace("\\", "/")
+        prefix = forb_norm.rstrip("/*")
+        if norm == forb_norm or (prefix and (norm == prefix or norm.startswith(prefix + "/"))) or fnmatch(norm, forb_norm):
+            return False
+    for allow in declared_scope.get("allowed_paths", []):
+        allow_norm = allow.strip().replace("\\", "/")
+        prefix = allow_norm.rstrip("/*")
+        if norm == allow_norm or (prefix and (norm == prefix or norm.startswith(prefix + "/"))) or fnmatch(norm, allow_norm):
+            return True
+    return False
+
+
 def classify_event_path(
     workspace_root: Union[str, Path],
     rel_path: str,
@@ -189,7 +203,7 @@ def classify_event_path(
     # ----------------------------------------------------
     if norm.startswith("repos/"):
         if declared_scope:
-            if is_path_in_scope(norm, declared_scope):
+            if _is_path_in_scope(norm, declared_scope):
                 return 4, "ALLOWED_SCOPE"
             return 4, "SCOPE_BREACH"
         return 4, "UNAUDITED_REPO_EVENT"
@@ -276,6 +290,7 @@ class SentinelDaemon:
         state_file = self.root / "controls" / "ACTIVE_STATE.json"
         if state_file.is_file():
             try:
+                from stagecheck.core.agents import load_registered_agents
                 state_data = json.loads(state_file.read_text(encoding="utf-8"))
                 agents = load_registered_agents(state_data)
                 if len(agents) == 1:
@@ -284,23 +299,74 @@ class SentinelDaemon:
                 pass
 
         if daemon:
-            # Fork background daemon process
-            pid = os.fork()
-            if pid > 0:
-                print(f"Started StageCheck Sentinel daemon in background (PID {pid}).")
+            r_pipe, w_pipe = os.pipe()
+            pid1 = os.fork()
+            if pid1 > 0:
+                os.close(w_pipe)
+                data = os.read(r_pipe, 100)
+                os.close(r_pipe)
+                os.waitpid(pid1, 0)
+                try:
+                    actual_pid = int(data.decode().strip())
+                except Exception:
+                    actual_pid = pid1
+                print(f"Started StageCheck Sentinel daemon in background (PID {actual_pid}).")
                 return 0
 
-            # Child process: detach session
+            os.close(r_pipe)
             os.setsid()
-            self.write_pid()
-            self._run_loop()
-            sys.exit(0)
+
+            pid2 = os.fork()
+            if pid2 > 0:
+                os.write(w_pipe, f"{pid2}\n".encode())
+                os.close(w_pipe)
+                os._exit(0)
+
+            os.close(w_pipe)
+
+            # Cleanly replace child memory with fresh Python process running foreground daemon
+            # This purges parent heap/test fixtures and guarantees < 25MB RSS
+            env = os.environ.copy()
+            tool_root = str(Path(__file__).resolve().parents[2])
+            current_pythonpath = env.get("PYTHONPATH", "")
+            if tool_root not in current_pythonpath.split(os.pathsep):
+                env["PYTHONPATH"] = f"{tool_root}{os.pathsep}{current_pythonpath}" if current_pythonpath else tool_root
+
+            cmd = [
+                sys.executable,
+                "-m",
+                "stagecheck.cli.main",
+                "sentinel",
+                "start",
+                "--foreground",
+                "--workspace",
+                str(self.root),
+            ]
+            sys.stdout.flush()
+            sys.stderr.flush()
+            try:
+                devnull_r = os.open(os.devnull, os.O_RDONLY)
+                devnull_w = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull_r, sys.stdin.fileno())
+                os.dup2(devnull_w, sys.stdout.fileno())
+                os.dup2(devnull_w, sys.stderr.fileno())
+                os.close(devnull_r)
+                os.close(devnull_w)
+                os.execvpe(sys.executable, cmd, env)
+            except Exception:
+                # Fallback if execvpe fails
+                self.write_pid()
+                self._run_loop()
+                sys.exit(0)
         else:
             self.write_pid()
             print(f"Starting StageCheck Sentinel in foreground (PID {os.getpid()}). Press Ctrl+C to stop.")
+            def _handle_term(signum, frame):
+                sys.exit(0)
+            signal.signal(signal.SIGTERM, _handle_term)
             try:
                 self._run_loop()
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, SystemExit):
                 pass
             finally:
                 self.pid_file.unlink(missing_ok=True)
@@ -347,6 +413,7 @@ class SentinelDaemon:
         state_file = self.root / "controls" / "ACTIVE_STATE.json"
         if state_file.is_file():
             try:
+                from stagecheck.core.agents import load_registered_agents
                 state_data = json.loads(state_file.read_text(encoding="utf-8"))
                 active_task = state_data.get("task_id", "None")
                 agents = load_registered_agents(state_data)
@@ -411,6 +478,14 @@ class SentinelDaemon:
             return
 
         self._attach_recursive_watches()
+        import gc
+        gc.collect()
+        try:
+            import ctypes
+            ctypes.CDLL(None).malloc_trim(0)
+        except Exception:
+            pass
+
         epoll = select.epoll()
         epoll.register(self._inotify_fd, select.EPOLLIN)
 

@@ -15,8 +15,13 @@ class TestSecretScannerFailClosed(unittest.TestCase):
     """Test all 9 scanner operational conditions fail closed with explicit status."""
 
     def setUp(self):
+        SecretScanner.reset_test_launcher()
         self.scanner = SecretScanner()
         self.dummy_repo = Path("/tmp/dummy_repo")
+
+    def tearDown(self):
+        from tests.conftest import setup_test_scanner
+        setup_test_scanner()
 
     def test_condition_1_scanner_missing(self):
         """Condition 1: Scanner missing in PATH -> Blocking finding, SCANNER_UNAVAILABLE."""
@@ -132,6 +137,31 @@ class TestSecretScannerFailClosed(unittest.TestCase):
                     self.assertFalse(res.is_clear)
                     self.assertEqual(res.status, ScannerStatus.INVALID_SCANNER_OUTPUT)
                     self.assertTrue(any("output_malformed" in d.defect_id and d.blocking for d in res.defects))
+
+    def test_condition_10_production_scanner_selection_rejects_test_stubs(self):
+        """Condition 10: In production mode, test stubs in tests/ are rejected, failing closed."""
+        # Ensure production mode (allow_test_stub is False)
+        SecretScanner.reset_test_launcher()
+        scanner = SecretScanner()
+
+        # If PATH points to tests/bin/gitleaks, production mode refuses to use it
+        with patch("shutil.which", return_value="/home/user/repo/tests/bin/gitleaks"):
+            self.assertIsNone(scanner.resolve_binary())
+            valid, defects = scanner.verify_scanner_binary()
+            self.assertFalse(valid)
+            self.assertTrue(any(d.defect_id == "preflight.gitleaks_missing" and d.blocking for d in defects))
+
+        # Binary override pointing to tests/bin/gitleaks is also rejected in production
+        stub_override = SecretScanner(binary_override="/tmp/tests/bin/gitleaks")
+        self.assertIsNone(stub_override.resolve_binary())
+
+    def test_scanner_discovery(self):
+        """Verify standard discovery of native production scanner binary."""
+        SecretScanner.reset_test_launcher()
+        scanner = SecretScanner()
+        with patch("shutil.which", return_value="/usr/local/bin/gitleaks"):
+            resolved = scanner.resolve_binary()
+            self.assertEqual(resolved, "/usr/local/bin/gitleaks")
 
 
 if __name__ == "__main__":

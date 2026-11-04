@@ -138,7 +138,7 @@ def create_test_fixture(
         tool_source,
         tool,
         ignore=shutil.ignore_patterns(
-            ".git", ".venv", "__pycache__", "*.pyc", ".pytest_cache", ".stagecheck.lock", "dist", "build", "*.egg-info"
+            ".git", ".venv", "__pycache__", "*.pyc", ".pytest_cache", ".stagecheck.lock", "dist", "build", "*.egg-info", "tests", "docs", "evals"
         ),
     )
 
@@ -274,7 +274,12 @@ if __name__ == "__main__":
         )
     )
 
-    # Compute manifest.sha256
+    copy = workspace / "instruction_fixture.txt"
+    paths = load(tool / "config/paths.json")
+    paths["instruction_copies"] = [str(copy)]
+    (tool / "config/paths.json").write_bytes(encode(paths))
+
+    # Compute manifest.sha256 after all tool configuration edits are complete
     manifest(tool)
     stagecheck_manifest_hash = digest((tool / "MANIFEST.sha256").read_bytes())
 
@@ -310,12 +315,7 @@ Historical citations
     contract = workspace / "contract.txt"
     contract.write_text(contract_text)
     (workspace / "AGENTS.md").write_text(contract_text)
-    copy = workspace / "instruction_fixture.txt"
     copy.write_text(contract_text)
-
-    paths = load(tool / "config/paths.json")
-    paths["instruction_copies"] = [str(copy)]
-    (tool / "config/paths.json").write_bytes(encode(paths))
 
     # Synthetic Git Repos
     repo = root / "build/product"

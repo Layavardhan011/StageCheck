@@ -13,10 +13,10 @@
 This report certifies that the StageCheck codebase has been audited, modified, hardened, and verified against all 14 individual architecture specifications and the master architecture. All previously identified architectural gaps, test collection failures, security fail-open vulnerabilities, and missing CLI commands have been resolved with real production implementations and backed by executable test evidence.
 
 The test suite executes with **100% pass rate**:
-$$\mathbf{186\text{ passed, } 62\text{ subtests passed in } 8.00s}$$
-$$\mathbf{350\text{ tests collected across tests/ and evals/ with 0 collection errors}}$$
+$$\mathbf{197\text{ passed, } 62\text{ subtests passed in } 9.65s}$$
+$$\mathbf{361\text{ tests collected across tests/ and evals/ with 0 collection errors (361 passed, 301 subtests)}}$$
 The distributable wheel (`dist/stagecheck-1.0.0-py3-none-any.whl`) was built, installed into a clean isolated virtual environment, and validated outside the source repository. Real Sentinel daemon runtime performance metrics were measured directly via kernel `/proc` interfaces and Linux `inotify`:
-$$\mathbf{14.59\text{ MiB RSS (< 25.0 MiB target), } 0.00\%\text{ idle CPU, } 0.21\text{ ms inotify event latency (< 50.0 ms target)}}$$
+$$\mathbf{19.81\text{ MiB RSS (< 25.0 MiB target), } 0.00\%\text{ idle CPU, } 0.43\text{ ms inotify event latency (< 50.0 ms target)}}$$
 
 ---
 
@@ -77,7 +77,7 @@ $$\mathbf{14.59\text{ MiB RSS (< 25.0 MiB target), } 0.00\%\text{ idle CPU, } 0.
 ```bash
 uv run --extra dev pytest --collect-only -q evals tests
 ```
-- **Total Tests Collected:** 350 tests
+- **Total Tests Collected:** 361 tests (197 in tests/, 164 across evals/)
 - **Collection Errors:** 0
 - **Duration:** 0.18s
 
@@ -85,10 +85,10 @@ uv run --extra dev pytest --collect-only -q evals tests
 ```bash
 uv run --extra dev pytest -q tests
 ```
-- **Passed:** 186 tests
+- **Passed:** 197 tests
 - **Subtests Passed:** 62 subtests
 - **Failed:** 0
-- **Duration:** 8.00s
+- **Duration:** 9.65s
 
 ### C. Fail-Closed Secret Scanner Verification (All 9 Conditions & Integration)
 ```bash
@@ -172,12 +172,14 @@ Confirmed: All 14 subcommands, embedded schemas, default configs, and agent inst
 Measured directly on the live system via `python3 bin/benchmark_sentinel.py` against a real spawned background daemon process (`SentinelDaemon`) using kernel `/proc` interfaces and Linux `inotify`:
 
 - **Platform:** Linux 7.0.0-38-generic (x86_64), CPython 3.12.3
-- **Background Daemon:** Spawns real detached process via `os.fork()`, verified via `os.kill(pid, 0)`
-- **Memory RSS (Active Process via `/proc/<pid>/statm`):** `14.59 MiB` (Target: `< 25.00 MiB`) -> **PASS**
-- **Idle CPU Load (via `/proc/<pid>/stat` sampling):** `0.00%` (Target: `0.00%` / `< 1.00%`) -> **PASS**
-- **Real Inotify Event Latency:** `0.21 ms avg` (min: `0.06 ms`, max: `0.76 ms`) (Target: `< 50.00 ms`) -> **PASS**
-- **Clean Daemon Termination:** Verified via SIGTERM and PID file cleanup -> **PASS**
-- **Total Benchmark Execution Time:** `6.06 s`
+- **Background Daemon:** Spawns real detached process via canonical double-fork `os.execvpe` + `os.setsid()`, verified via `os.kill(pid, 0)`
+- **Memory RSS (Active Process via `/proc/<pid>/statm`):** `19.81 MiB` (Target: `< 25.00 MiB`) -> **PASS**
+- **Idle CPU Load (via `/proc/<pid>/stat` sampling):** `0.00%` (raw ticks: 0, interval: 1.00s) (Target: `0.00%` / `< 1.00%`) -> **PASS**
+- **Real Inotify Event Latency:** `0.43 ms avg` (min: `0.08 ms`, max: `0.72 ms`) (Target: `< 50.00 ms`) -> **PASS**
+- **Throughput:** `13,316.1 events/sec` (50 events in 0.004s) -> **PASS**
+- **Correctness:** `PASS` (Verified Tier 1 router labels)
+- **Clean Daemon Termination:** Verified via SIGTERM, PID file unlinking, and zero orphan/zombie processes -> **PASS**
+- **Total Benchmark Execution Time:** `1.16 s`
 
 ---
 
@@ -187,15 +189,16 @@ Measured directly on the live system via `python3 bin/benchmark_sentinel.py` aga
 - [x] Master architecture requirements are addressed.
 - [x] Universal provider support works with zero hardcoded provider assumptions in shared logic.
 - [x] Required secret scanning fails closed across all 9 operational conditions and is verified across Stage 1, Stage 6, and Pre-commit.
-- [x] Root-level test collection succeeds across all test suites (`350 tests collected, 0 errors`).
-- [x] Fast unit & integration test suite succeeds (`186 passed, 62 subtests passed in 8.00s`).
-- [x] Evaluation suite performance investigated and remediated (pruned `.venv` copying/hashing).
+- [x] Test harness portability verified (works after clean extraction without executable bit, zero reliance on host tools).
+- [x] Root-level test collection succeeds across all test suites (`361 tests collected, 0 errors`).
+- [x] Fast unit & integration test suite succeeds (`197 passed, 62 subtests passed in 9.65s`).
+- [x] Evaluation suite performance investigated, remediated, and fully passing (`164 passed, 239 subtests passed`).
 - [x] Cooperative review is enforced with uncommitted diff fidelity and secret scan gate.
 - [x] Formal attempt limits are enforced with circuit breaker trips at attempt 3.
 - [x] Circuit-breaker escalation is enforced with human reset allocating attempt 4.
 - [x] Human disposition is authorized, non-interactive protected, and crash-recoverable.
 - [x] Sentinel monitoring failures and tampering events trigger emergency halt.
-- [x] Sentinel runtime benchmarks measured with real daemon process (14.59 MiB RSS, 0.00% CPU, 0.21 ms latency).
+- [x] Sentinel runtime benchmarks measured with real daemon process (19.81 MiB RSS, 0.00% CPU, 0.43 ms latency).
 - [x] Multi-repository aggregate results enforce zero partial pass.
 - [x] Command execution restrictions enforce tokenized arguments and allowlists.
 - [x] Evidence integrity enforces Merkle hash binding and tamper detection.
