@@ -45,6 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
     # 3. verify-prompt
     p_vp = subparsers.add_parser("verify-prompt", help="Verify Phase 1 prompt blueprint and freeze hash.")
     p_vp.add_argument("--task", required=True, help="Task identifier.")
+    p_vp.add_argument("--attempt", type=int, default=1, help="Attempt index (default: 1).")
+    p_vp.add_argument("--workspace", help="Explicit workspace root path.")
 
     # 4. review-precommit
     p_rev = subparsers.add_parser("review-precommit", help="Execute Phase 2A pre-commit cooperative review.")
@@ -100,6 +102,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             workspace=getattr(args, "workspace", None),
             repos=getattr(args, "repos", None),
             force=getattr(args, "force", False),
+        )
+
+    if args.subcommand == "verify-prompt":
+        from stagecheck.cli.prompt_cmd import run_verify_prompt
+        return run_verify_prompt(
+            task=args.task,
+            attempt=getattr(args, "attempt", 1),
+            workspace=getattr(args, "workspace", None),
         )
 
     # In Phase 2, subcommands acknowledge dispatch; full execution wired in Phase 3-4
