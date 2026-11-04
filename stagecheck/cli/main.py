@@ -74,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_reset = subparsers.add_parser("reset-attempts", help="Monotonically allocate Attempt 4 after circuit breaker.")
     p_reset.add_argument("--task", required=True, help="Task identifier.")
     p_reset.add_argument("--authorized-by", required=True, help="Authorized owner identity.")
+    p_reset.add_argument("--workspace", help="Explicit workspace root path.")
 
     # 9. disposition
     p_disp = subparsers.add_parser("disposition", help="Manage defect waivers and risk acceptances.")
@@ -146,6 +147,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         return run_audit_cmd(
             task=args.task,
             attempt=getattr(args, "attempt", 1),
+            workspace=getattr(args, "workspace", None),
+        )
+
+    if args.subcommand == "reset-attempts":
+        from stagecheck.cli.reset_cmd import run_reset_attempts
+        return run_reset_attempts(
+            task=args.task,
+            authorized_by=args.authorized_by,
             workspace=getattr(args, "workspace", None),
         )
 

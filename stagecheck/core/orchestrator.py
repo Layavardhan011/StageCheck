@@ -372,6 +372,24 @@ class AuditOrchestrator:
                 outcome="FAILED",
                 defects=formatted_defects,
             )
+            # Evaluate circuit breaker triggers
+            from stagecheck.core.circuit_breaker import evaluate_circuit_breaker, trip_circuit_breaker
+            active_state = _load_optional_json(self.workspace_root / "controls" / "ACTIVE_STATE.json")
+            cb_eval = evaluate_circuit_breaker(
+                workspace_root=self.workspace_root,
+                task_id=ctx.task_id,
+                attempt=ctx.attempt,
+                current_defects=formatted_defects,
+                active_state=active_state,
+            )
+            if cb_eval.tripped:
+                trip_circuit_breaker(
+                    workspace_root=self.workspace_root,
+                    task_id=ctx.task_id,
+                    attempt=ctx.attempt,
+                    evaluation=cb_eval,
+                    current_defects=formatted_defects,
+                )
 
         return overall_passed, verdict_data
 
