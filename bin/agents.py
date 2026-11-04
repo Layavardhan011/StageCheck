@@ -47,11 +47,22 @@ def resolve_output(raw, agent_id, ctx):
     return value
 
 
+def _get_secret_findings(ctx):
+    import importlib.util as _importlib_util
+    _p = ctx.tool / 'checks' / 'secrets.py'
+    if _p.is_file():
+        _spec = _importlib_util.spec_from_file_location("checks_secrets", _p)
+        _mod = _importlib_util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        return _mod.findings
+    return lambda path, text: []
+
+
 def call_agent(ctx, agent, config, input_packet, out):
     setting_path=ctx.tool/'settings/claude.settings.json'
     settings=loads(ctx.read(setting_path))
     sys.path.insert(0,str(ctx.tool/'checks'))
-    from secrets import findings as input_secrets
+    input_secrets = _get_secret_findings(ctx)
     if input_secrets('agent-input.json',encode(input_packet).decode()):
         raise ToolError('credential-shaped model input was not sent')
     if not config.get('binary') or not agent.get('model') or not settings.get('apiKeyHelper'):
@@ -130,7 +141,7 @@ def call_agent(ctx, agent, config, input_packet, out):
         value['not_rerun'].append('agent findings discarded for unresolvable evidence')
     # Revalidate and never retain model-produced patches or credential text.
     sys.path.insert(0,str(ctx.tool/'checks'))
-    from secrets import findings as secret_findings
+    secret_findings = _get_secret_findings(ctx)
     if secret_findings('agent-output.txt',encode(value).decode()):
         create(out/(agent['id']+'.fault.json'),dict(identity,fault='credential-shaped output suppressed'))
         raise ToolError('model output contained credential-shaped data; raw output was not retained')

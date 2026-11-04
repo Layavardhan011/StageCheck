@@ -35,13 +35,41 @@ def run_stage6_secrets(ctx: AuditContext) -> StageResult:
                     )
                 )
 
-        # 2. Invoke Gitleaks if available across commit range
+        # 2. Invoke Gitleaks across commit range
         base_commit = ctx.base_commits.get(repo_name)
         target_commit = ctx.target_commits.get(repo_name, "HEAD")
 
         if base_commit and target_commit:
             gitleaks_bin = shutil.which("gitleaks")
-            if gitleaks_bin and os.access(gitleaks_bin, os.X_OK):
+            strict_scanners = (
+                os.environ.get("STAGECHECK_STRICT_SECRETS") == "1"
+                or getattr(ctx, "strict_scanners", False)
+            )
+
+            if not gitleaks_bin or not os.access(gitleaks_bin, os.X_OK):
+                if strict_scanners:
+                    defects.append(
+                        Defect(
+                            defect_id="secrets.scanner_unavailable",
+                            message=f"Gitleaks scanner binary not found in PATH or not executable; secret scanning blocked for '{repo_name}'.",
+                            stage=stage_id,
+                            severity="CRITICAL",
+                            blocking=True,
+                            repo=repo_name,
+                        )
+                    )
+                else:
+                    defects.append(
+                        Defect(
+                            defect_id="secrets.scanner_skipped",
+                            message=f"Gitleaks scanner binary not available in environment; secret scanning skipped for '{repo_name}'.",
+                            stage=stage_id,
+                            severity="HIGH",
+                            blocking=False,
+                            repo=repo_name,
+                        )
+                    )
+            else:
                 cmd = [
                     gitleaks_bin,
                     "detect",
@@ -67,8 +95,41 @@ def run_stage6_secrets(ctx: AuditContext) -> StageResult:
                                 repo=repo_name,
                             )
                         )
-                except (FileNotFoundError, PermissionError, OSError):
-                    pass
+                    elif res.returncode != 0:
+                        if strict_scanners:
+                            defects.append(
+                                Defect(
+                                    defect_id="secrets.scanner_execution_failed",
+                                    message=f"Gitleaks scan failed with exit code {res.returncode} for repo '{repo_name}'.",
+                                    stage=stage_id,
+                                    severity="CRITICAL",
+                                    blocking=True,
+                                    repo=repo_name,
+                                )
+                            )
+                except (FileNotFoundError, PermissionError, OSError) as e:
+                    if strict_scanners:
+                        defects.append(
+                            Defect(
+                                defect_id="secrets.scanner_execution_error",
+                                message=f"Failed to execute Gitleaks scan on '{repo_name}': {e}",
+                                stage=stage_id,
+                                severity="CRITICAL",
+                                blocking=True,
+                                repo=repo_name,
+                            )
+                        )
+                    else:
+                        defects.append(
+                            Defect(
+                                defect_id="secrets.scanner_skipped",
+                                message=f"Gitleaks execution error on '{repo_name}': {e}; secret scanning skipped.",
+                                stage=stage_id,
+                                severity="HIGH",
+                                blocking=False,
+                                repo=repo_name,
+                            )
+                        )
 
     status = "FAIL" if any(d.blocking for d in defects) else "CLEAR"
     return StageResult(stage_id=stage_id, status=status, defects=defects, errors=errors)

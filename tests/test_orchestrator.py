@@ -174,6 +174,53 @@ class TestNineStageVerification(unittest.TestCase):
         res_pass = run_stage1_preflight(ctx)
         self.assertTrue(res_pass.is_clear)
 
+    def test_stage1_preflight_strict_scanners_fail_closed(self):
+        """Test Stage 1 fails closed in strict mode when Gitleaks is missing or unexecutable."""
+        self._setup_valid_prompt_and_scope()
+        ctx_strict = AuditContext(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            touched_repos=["app"],
+            all_registered_repos=["app"],
+            strict_scanners=True,
+        )
+        res = run_stage1_preflight(ctx_strict)
+        self.assertFalse(res.is_clear)
+        self.assertTrue(any(d.defect_id.startswith("preflight.gitleaks_") and d.blocking for d in res.defects))
+
+    def test_stage6_secrets_strict_and_report_only_modes(self):
+        """Test Stage 6 handles absent scanner: report-only in dev mode, fail-closed in strict mode."""
+        # 1. Dev / Permissive Mode: scanner missing -> CLEAR with report-only finding
+        ctx_dev = AuditContext(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            touched_repos=["app"],
+            all_registered_repos=["app"],
+            base_commits={"app": "HEAD~1"},
+            target_commits={"app": "HEAD"},
+            strict_scanners=False,
+        )
+        res_dev = run_stage6_secrets(ctx_dev)
+        self.assertTrue(res_dev.is_clear)
+        self.assertTrue(any(d.defect_id == "secrets.scanner_skipped" and not d.blocking for d in res_dev.defects))
+
+        # 2. Strict Mode: scanner missing -> FAIL closed with blocking defect
+        ctx_strict = AuditContext(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            touched_repos=["app"],
+            all_registered_repos=["app"],
+            base_commits={"app": "HEAD~1"},
+            target_commits={"app": "HEAD"},
+            strict_scanners=True,
+        )
+        res_strict = run_stage6_secrets(ctx_strict)
+        self.assertFalse(res_strict.is_clear)
+        self.assertTrue(any(d.defect_id == "secrets.scanner_unavailable" and d.blocking for d in res_strict.defects))
+
     def test_stage2_scope_paths_failure(self):
         """Test Stage 2 detects out-of-scope path modifications."""
         self._setup_valid_prompt_and_scope()

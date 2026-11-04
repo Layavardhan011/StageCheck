@@ -59,4 +59,5 @@ class AuditContext:
     target_commits: Dict[str, str] = field(default_factory=dict)
     dispositions: List[Dict[str, Any]] = field(default_factory=list)
     declared_scope: Dict[str, Any] = field(default_factory=dict)
+    strict_scanners: bool = False
 

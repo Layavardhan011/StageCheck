@@ -45,3 +45,6 @@ stagecheck = [
     "config/defaults/*.json",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

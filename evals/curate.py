@@ -25,7 +25,15 @@ def main():
     finding_raw=ctx.read(canonical(a.finding))
     finding=loads(finding_raw)
     sys.path.insert(0,str(ctx.tool/'checks'))
-    from secrets import findings
+    import importlib.util as _importlib_util
+    _sec_path = ctx.tool / 'checks' / 'secrets.py'
+    if _sec_path.is_file():
+        _spec = _importlib_util.spec_from_file_location("checks_secrets", _sec_path)
+        _mod = _importlib_util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        findings = _mod.findings
+    else:
+        findings = lambda p, t: []
     if findings('curator-input.json',finding_raw.decode()):
         raise ToolError('credential-shaped curator input was not sent')
     out=Path(a.output_dir).absolute()

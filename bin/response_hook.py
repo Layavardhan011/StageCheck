@@ -8,7 +8,15 @@ from pathlib import Path
 from common import ToolError,bindings,canonical,create,digest,encode,load,loads,symlink_component
 from response_tokens import needs_claims
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'checks'))
-from secrets import findings as secret_findings
+import importlib.util as _importlib_util
+_sec_path = Path(__file__).resolve().parents[1] / 'checks' / 'secrets.py'
+if _sec_path.is_file():
+    _sec_spec = _importlib_util.spec_from_file_location("checks_secrets", _sec_path)
+    _sec_mod = _importlib_util.module_from_spec(_sec_spec)
+    _sec_spec.loader.exec_module(_sec_mod)
+    secret_findings = _sec_mod.findings
+else:
+    secret_findings = None
 from preflight import manifest_entries
 from orchestrate import history_read,EXIT
 
