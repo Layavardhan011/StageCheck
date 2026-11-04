@@ -62,6 +62,10 @@ class TestCLIUX(unittest.TestCase):
             "reset-attempts",
             "disposition",
             "sentinel",
+            "plan",
+            "unlock",
+            "seal",
+            "log-quality",
         ]:
             self.assertIn(cmd, output)
 
@@ -101,6 +105,10 @@ class TestCLIUX(unittest.TestCase):
             "reset-attempts",
             "disposition",
             "sentinel",
+            "plan",
+            "unlock",
+            "seal",
+            "log-quality",
         }
         self.assertEqual(commands, expected)
 
@@ -114,6 +122,7 @@ class TestCLIUX(unittest.TestCase):
             "pre_commit_status.schema.json",
             "product_repositories.schema.json",
             "prompt_verified.schema.json",
+            "task_plan.schema.json",
             "verdict.schema.json",
         ]
         for s in schemas:

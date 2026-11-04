@@ -126,15 +126,8 @@ def record_shape(record):
         if not re.fullmatch('[0-9a-f]{64}',record['policy_sha256']) or not isinstance(record['evidence'],list):raise ToolError('invalid policy/evidence shape')
     if 'replaces' in record and not re.fullmatch('[0-9a-f]{64}',record['replaces']):raise ToolError('invalid replacement hash')
     if 'note' in record:
-        import importlib.util as _importlib_util
-        _sec_path = Path(__file__).resolve().parents[1] / 'checks' / 'secrets.py'
-        if _sec_path.is_file():
-            _spec = _importlib_util.spec_from_file_location("checks_secrets", _sec_path)
-            _mod = _importlib_util.module_from_spec(_spec)
-            _spec.loader.exec_module(_mod)
-            _sec_findings = _mod.findings
-        else:
-            _sec_findings = lambda p, t: []
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'checks'))
+        from secret_findings import findings as _sec_findings
         if not isinstance(record['note'],str) or '\n' in record['note'] or '\r' in record['note'] or _sec_findings('quality-note.txt',record['note']):raise ToolError('invalid or credential-shaped note')
 
 def read_chain(folder):

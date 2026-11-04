@@ -15,15 +15,7 @@ from render_report import render
 from agents import resolve_output,call_agent,validate_instruction
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'checks'))
 from citations import validate_citation
-import importlib.util as _importlib_util
-_sec_path = Path(__file__).resolve().parents[1] / 'checks' / 'secrets.py'
-if _sec_path.is_file():
-    _sec_spec = _importlib_util.spec_from_file_location("checks_secrets", _sec_path)
-    _sec_mod = _importlib_util.module_from_spec(_sec_spec)
-    _sec_spec.loader.exec_module(_sec_mod)
-    findings = _sec_mod.findings
-else:
-    findings = None
+from secret_findings import findings
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from improve import compare,resolve_evaluation
 

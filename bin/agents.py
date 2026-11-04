@@ -48,14 +48,9 @@ def resolve_output(raw, agent_id, ctx):
 
 
 def _get_secret_findings(ctx):
-    import importlib.util as _importlib_util
-    _p = ctx.tool / 'checks' / 'secrets.py'
-    if _p.is_file():
-        _spec = _importlib_util.spec_from_file_location("checks_secrets", _p)
-        _mod = _importlib_util.module_from_spec(_spec)
-        _spec.loader.exec_module(_mod)
-        return _mod.findings
-    return lambda path, text: []
+    sys.path.insert(0, str(ctx.tool / 'checks'))
+    from secret_findings import findings
+    return findings
 
 
 def call_agent(ctx, agent, config, input_packet, out):
