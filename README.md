@@ -137,16 +137,33 @@ StageCheck is developed across 5 modular phases (25 total tasks):
 * **P4-T4:** 3-attempt circuit breaker, defect progression ledger, and escalation reporting (`escalation_report.md`).
 * **P4-T5:** Human disposition CLI (`stagecheck disposition add`, `stagecheck resume`) and notification integration.
 
-### Phase 5 — Portability, Hardening, Integration & Release Readiness `[UPCOMING]`
-* **P5-T1:** Synthetic evaluation fixture factory replacing external dependencies.
-* **P5-T2:** Comprehensive hardcoded path audit and portability hardening.
-* **P5-T3:** End-to-end lifecycle verification and adversarial attack regressions.
-* **P5-T4:** Unified CLI packaging (`stagecheck`) and operational operator manuals.
-* **P5-T5:** Release gate verification, final three-pass audit, and release tagging.
+### Phase 5 — Portability, Hardening, Integration & Release Readiness `[IN PROGRESS]`
+* **P5-T1:** Synthetic evaluation fixture factory (`evals/fixtures.py`) replacing all machine-specific external dependencies.
+* **P5-T2:** Comprehensive hardcoded path decoupling, automated portability scanner (`stagecheck/core/portability.py`), and dual-mode asset resolution.
+* **P5-T3:** End-to-end integration test scenarios covering full lifecycle, adversarial tampering, scope escapes, multi-repo partial failure, and circuit-breaker resets (`tests/test_e2e_lifecycle.py`).
+* **P5-T4:** Unified CLI UX verification, POSIX exit codes, package metadata, and operator reference documentation (`tests/test_cli_ux.py`).
+* **P5-T5:** Release gate verification, final three-pass review, and release readiness.
 
 ---
 
 ## 6. Command-Line Interface (CLI) Reference
+
+StageCheck provides 10 unified CLI subcommands conforming strictly to POSIX / GNU command conventions:
+
+| Subcommand | Description | Exit Codes |
+|---|---|---|
+| `stagecheck init` | Scaffolds the 8 mandatory control files and binds git repositories | `0` (Success), `1` (Error) |
+| `stagecheck start` | Initializes a task in `PHASE_1_PLANNING` under transactional lock | `0` (Success), `1` (Error) |
+| `stagecheck verify-prompt` | Validates `prompt.md` + `declared_scope.json` and freezes SHA-256 digests | `0` (Success), `1` (Error) |
+| `stagecheck review-precommit` | Evaluates Phase 2A pre-commit working tree diff against quality targets | `0` (Success), `1` (Error) |
+| `stagecheck approve-review` | Records dual-agent review approval in `pre_commit_review.json` | `0` (Success), `1` (Error) |
+| `stagecheck audit` | Executes the independent 9-stage verification suite across all repos | `0` (CLEAR), `1` (BLOCKED) |
+| `stagecheck resume` | Resumes automated workflow from `AWAITING_HUMAN_DISPOSITION` | `0` (Success), `1` (Error) |
+| `stagecheck reset-attempts` | Human-authorized circuit breaker reset allocating monotonic Attempt 4+ | `0` (Success), `1` (Error) |
+| `stagecheck disposition add` | Records an explicit defect waiver in `controls/DISPOSITIONS.json` | `0` (Success), `1` (Error) |
+| `stagecheck sentinel` | Controls continuous event-driven background watchdog daemon | `0` (Success), `1` (Error) |
+
+### Operational Usage Examples
 
 ```bash
 # Initialize a new governed workspace across target repositories
@@ -175,10 +192,26 @@ stagecheck disposition add --task task-101 --defect SEC-01 --rationale "Approved
 
 # Monotonically allocate Attempt 4 after circuit breaker activation
 stagecheck reset-attempts --task task-101 --authorized-by owner@fincore.local
+
+# Background Sentinel continuous watchdog control
+stagecheck sentinel start
+stagecheck sentinel status
+stagecheck sentinel stop
 ```
 
 ---
 
-## 7. License & Compliance
+## 7. Security Model & Defense-in-Depth
+
+StageCheck enforces kernel-level and cryptographic security guarantees:
+- **At-Rest Read-Only Protection:** `controls/` directory is enforced at mode `0555` with contained descriptor files at `0444`. Modifying controls requires an explicit `controlled_write_transaction` elevation.
+- **Strict Merkle Bounding:** Every control file's SHA-256 digest is cryptographically bound inside the root `AGENTS.md` contract. Any out-of-band edit immediately trips Stage 1 (`preflight`).
+- **Secret & Token Leak Protection:** Stage 6 scans working tree and commit history using pinned Gitleaks rules, detecting high-entropy API keys, JWTs, and private keys.
+- **Anti-Prompt Injection Linter:** Stage 4 scans agent delivery reports against 10 regex evasion patterns (`ignore previous instructions`, `roleplay as owner`, etc.).
+- **Dual-Agent Non-Collusion:** Review approval in Phase 2A strictly binds the uncommitted diff. Committing altered code trips `authority.unreviewed_commit_divergence` during Stage 5.
+
+---
+
+## 8. License & Compliance
 
 Internal Enterprise Software Delivery Governance Harness. Built in accordance with StageCheck Architecture Specifications (Series 01–14).
