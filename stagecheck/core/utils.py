@@ -173,10 +173,41 @@ def validate_schema(data: Any, schema: Dict[str, Any]) -> None:
     """Lightweight built-in JSON schema validator for core structures.
 
     Validates types, required object fields, pattern regexes, enums,
-    minProperties, minItems, and additionalProperties.
+    minProperties, minItems, additionalProperties, const, oneOf, and anyOf.
     """
     if not isinstance(schema, dict):
         raise SchemaValidationError("Schema must be a dictionary.")
+
+    if "const" in schema:
+        if data != schema["const"]:
+            raise SchemaValidationError(f"Expected const value '{schema['const']}', got '{data}'.")
+
+    if "oneOf" in schema:
+        matches = 0
+        last_err = None
+        for sub in schema["oneOf"]:
+            try:
+                validate_schema(data, sub)
+                matches += 1
+            except SchemaValidationError as err:
+                last_err = err
+        if matches != 1:
+            raise SchemaValidationError(f"Expected exactly one matching schema in oneOf, matched {matches}: {last_err}")
+        return
+
+    if "anyOf" in schema:
+        matched = False
+        last_err = None
+        for sub in schema["anyOf"]:
+            try:
+                validate_schema(data, sub)
+                matched = True
+                break
+            except SchemaValidationError as err:
+                last_err = err
+        if not matched:
+            raise SchemaValidationError(f"No schemas matched in anyOf: {last_err}")
+        return
 
     expected_type = schema.get("type")
     if expected_type == "object":

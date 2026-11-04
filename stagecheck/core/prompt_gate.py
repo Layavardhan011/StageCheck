@@ -10,6 +10,7 @@ import datetime
 import json
 import os
 import re
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -327,14 +328,24 @@ def is_path_in_scope(
     forbidden_list = declared_scope.get("forbidden_paths", [])
     for forb in forbidden_list:
         forb_norm = forb.strip().replace("\\", "/")
-        if norm == forb_norm or norm.startswith(forb_norm.rstrip("/") + "/"):
+        prefix = forb_norm.rstrip("/*")
+        if (
+            norm == forb_norm
+            or (prefix and (norm == prefix or norm.startswith(prefix + "/")))
+            or fnmatch(norm, forb_norm)
+        ):
             return False
 
     # 2. Check allowed paths
     allowed_list = declared_scope.get("allowed_paths", [])
     for allow in allowed_list:
         allow_norm = allow.strip().replace("\\", "/")
-        if norm == allow_norm or norm.startswith(allow_norm.rstrip("/") + "/"):
+        prefix = allow_norm.rstrip("/*")
+        if (
+            norm == allow_norm
+            or (prefix and (norm == prefix or norm.startswith(prefix + "/")))
+            or fnmatch(norm, allow_norm)
+        ):
             return True
 
     return False

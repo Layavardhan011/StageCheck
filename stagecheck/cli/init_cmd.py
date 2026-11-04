@@ -129,3 +129,4 @@ def run_init(
     except Exception as err:
         print(f"ERROR: [init.unexpected_error] {err}", file=sys.stderr)
         return 1
+

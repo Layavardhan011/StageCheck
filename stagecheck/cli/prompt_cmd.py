@@ -58,3 +58,4 @@ def run_verify_prompt(
     except Exception as err:
         print(f"ERROR: [unexpected_prompt_error] {err}", file=sys.stderr)
         return 1
+

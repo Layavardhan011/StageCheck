@@ -362,3 +362,4 @@ def verify_committed_diff_fidelity(
                 f"'{repo_name}' ({committed_diff_hash[:12]}) differ from uncommitted diff "
                 f"approved in Phase 2A ({approved_hash[:12]})."
             )
+

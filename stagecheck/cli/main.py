@@ -63,6 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
     # 6. audit
     p_audit = subparsers.add_parser("audit", help="Run independent Phase 3 9-stage verification suite.")
     p_audit.add_argument("--task", required=True, help="Task identifier.")
+    p_audit.add_argument("--attempt", type=int, default=1, help="Attempt index (default: 1).")
+    p_audit.add_argument("--workspace", help="Explicit workspace root path.")
 
     # 7. resume
     p_resume = subparsers.add_parser("resume", help="Resume automation from AWAITING_HUMAN_DISPOSITION.")
@@ -134,6 +136,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.subcommand == "approve-review":
         from stagecheck.cli.review_cmd import run_approve_review
         return run_approve_review(
+            task=args.task,
+            attempt=getattr(args, "attempt", 1),
+            workspace=getattr(args, "workspace", None),
+        )
+
+    if args.subcommand == "audit":
+        from stagecheck.cli.audit_cmd import run_audit_cmd
+        return run_audit_cmd(
             task=args.task,
             attempt=getattr(args, "attempt", 1),
             workspace=getattr(args, "workspace", None),

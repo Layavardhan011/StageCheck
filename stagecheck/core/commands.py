@@ -309,3 +309,4 @@ def execute_secure_command(
         )
 
     return record
+
