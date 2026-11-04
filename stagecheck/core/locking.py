@@ -95,3 +95,4 @@ def acquire_runtime_lock(controls_dir: Path) -> Generator[int, None, None]:
         except OSError:
             pass
         os.close(fd)
+

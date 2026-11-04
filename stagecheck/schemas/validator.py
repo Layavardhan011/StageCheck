@@ -96,3 +96,4 @@ def validate_control_descriptor(descriptor_name: str, data: Dict[str, Any]) -> N
         raise SchemaValidationError(f"No schema definition found for: '{descriptor_name}'.")
 
     validate_schema(data, schema)
+

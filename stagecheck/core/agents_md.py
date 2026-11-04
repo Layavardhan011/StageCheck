@@ -131,3 +131,4 @@ def write_agents_contract(workspace_root: Path) -> Path:
     agents_md_path = root / "AGENTS.md"
     agents_md_path.write_text(contract_content, encoding="utf-8")
     return agents_md_path
+
