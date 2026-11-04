@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -39,34 +40,35 @@ def run_stage6_secrets(ctx: AuditContext) -> StageResult:
         target_commit = ctx.target_commits.get(repo_name, "HEAD")
 
         if base_commit and target_commit:
-            cmd = [
-                "gitleaks",
-                "detect",
-                f"--source={repo_dir}",
-                f"--log-opts={base_commit}..{target_commit}",
-                "--verbose",
-                "--no-banner",
-            ]
-            try:
-                env = os.environ.copy()
-                # Purge GITLEAKS ambient env vars (SEC-Q1)
-                env = {k: v for k, v in env.items() if not k.startswith("GITLEAKS_")}
-                res = subprocess.run(cmd, env=env, capture_output=True, text=True, check=False)
-                # Gitleaks exits with code 1 if leaks are found
-                if res.returncode == 1:
-                    defects.append(
-                        Defect(
-                            defect_id="secrets.detected_credential",
-                            message=f"Secret credentials detected in '{repo_name}' commit history:\n{res.stdout.strip()[:200]}",
-                            stage=stage_id,
-                            severity="CRITICAL",
-                            blocking=True,
-                            repo=repo_name,
+            gitleaks_bin = shutil.which("gitleaks")
+            if gitleaks_bin and os.access(gitleaks_bin, os.X_OK):
+                cmd = [
+                    gitleaks_bin,
+                    "detect",
+                    f"--source={repo_dir}",
+                    f"--log-opts={base_commit}..{target_commit}",
+                    "--verbose",
+                    "--no-banner",
+                ]
+                try:
+                    env = os.environ.copy()
+                    # Purge GITLEAKS ambient env vars (SEC-Q1)
+                    env = {k: v for k, v in env.items() if not k.startswith("GITLEAKS_")}
+                    res = subprocess.run(cmd, env=env, capture_output=True, text=True, check=False)
+                    # Gitleaks exits with code 1 if leaks are found
+                    if res.returncode == 1:
+                        defects.append(
+                            Defect(
+                                defect_id="secrets.detected_credential",
+                                message=f"Secret credentials detected in '{repo_name}' commit history:\n{res.stdout.strip()[:200]}",
+                                stage=stage_id,
+                                severity="CRITICAL",
+                                blocking=True,
+                                repo=repo_name,
+                            )
                         )
-                    )
-            except FileNotFoundError:
-                # Gitleaks binary not present in environment; skip or log error
-                pass
+                except (FileNotFoundError, PermissionError, OSError):
+                    pass
 
     status = "FAIL" if any(d.blocking for d in defects) else "CLEAR"
     return StageResult(stage_id=stage_id, status=status, defects=defects, errors=errors)
