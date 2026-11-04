@@ -106,9 +106,9 @@ When `stagecheck audit --task <task_id>` runs, StageCheck executes 9 determinist
 
 ## 5. Phased Implementation Roadmap
 
-StageCheck is developed across 5 modular phases (25 total tasks):
+StageCheck is developed across 5 modular phases (25 total tasks — **100% Complete**):
 
-### Phase 1 — Repository Baseline and Architecture Foundations
+### Phase 1 — Repository Baseline and Architecture Foundations `[COMPLETED]`
 * **P1-T0:** Comprehensive documentation update and architectural alignment (`README.md`).
 * **P1-T1:** Repository baseline capture and inventory of current behavior.
 * **P1-T2:** Canonical module boundaries and compatibility strategy (`stagecheck.core`, `stagecheck.cli`, etc.).
@@ -116,7 +116,7 @@ StageCheck is developed across 5 modular phases (25 total tasks):
 * **P1-T4:** Centralized schema validation, RFC 8785 JCS serialization, and provider-neutral agent slug utilities.
 * **P1-T5:** PEP 621 package skeleton (`pyproject.toml`) and baseline CI test harness.
 
-### Phase 2 — Workspace Scaffolding and Governance Contract
+### Phase 2 — Workspace Scaffolding and Governance Contract `[COMPLETED]`
 * **P2-T1:** Multi-repository discovery and baseline Git commit capture.
 * **P2-T2:** Schema v2 multi-repository registry (`PRODUCT_REPOSITORIES.json`) and control schemas.
 * **P2-T3:** Atomic generation and permission enforcement for all 8 workspace controls.
@@ -137,12 +137,12 @@ StageCheck is developed across 5 modular phases (25 total tasks):
 * **P4-T4:** 3-attempt circuit breaker, defect progression ledger, and escalation reporting (`escalation_report.md`).
 * **P4-T5:** Human disposition CLI (`stagecheck disposition add`, `stagecheck resume`) and notification integration.
 
-### Phase 5 — Portability, Hardening, Integration & Release Readiness `[IN PROGRESS]`
+### Phase 5 — Portability, Hardening, Integration & Release Readiness `[COMPLETED]`
 * **P5-T1:** Synthetic evaluation fixture factory (`evals/fixtures.py`) replacing all machine-specific external dependencies.
 * **P5-T2:** Comprehensive hardcoded path decoupling, automated portability scanner (`stagecheck/core/portability.py`), and dual-mode asset resolution.
 * **P5-T3:** End-to-end integration test scenarios covering full lifecycle, adversarial tampering, scope escapes, multi-repo partial failure, and circuit-breaker resets (`tests/test_e2e_lifecycle.py`).
 * **P5-T4:** Unified CLI UX verification, POSIX exit codes, package metadata, and operator reference documentation (`tests/test_cli_ux.py`).
-* **P5-T5:** Release gate verification, final three-pass review, and release readiness.
+* **P5-T5:** Release gate verification, final three-pass review, manifest verification, and release readiness.
 
 ---
 

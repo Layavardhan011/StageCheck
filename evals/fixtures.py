@@ -295,7 +295,7 @@ if __name__ == "__main__":
 The current state is protected and must reproduce SHA-256 `{protected_hash}`.
 
 Known excluded locations include:
-- `RWA/previous/`
+- `NewArc/3m/RWA/previous/`
 
 Historical citations
 - None
