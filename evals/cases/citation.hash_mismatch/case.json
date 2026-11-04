@@ -1,0 +1,14 @@
+{
+  "id": "citation.hash_mismatch",
+  "target": "citation.hash_mismatch",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "citation.hash_mismatch"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "citation.hash_mismatch"
+    ]
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "id": "no_progress",
+  "target": "orchestrate",
+  "expected": "fail closed or exact stated property"
+}

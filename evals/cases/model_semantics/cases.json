@@ -1,0 +1,37 @@
+[
+  {
+    "id": "quote_entailment",
+    "agent": "claim_support",
+    "source": "The required value is 7.",
+    "clean": "The required value is 7.",
+    "defective": "The required value is 8."
+  },
+  {
+    "id": "duplicate_native_mechanism",
+    "agent": "upstream_reuse",
+    "source": "The approved requirement adopts the native freeze mechanism. A separate freeze mechanism is not required.",
+    "clean": "Adopt the native freeze mechanism unchanged.",
+    "defective": "Introduce a second independently stored freeze mechanism for the same requirement."
+  },
+  {
+    "id": "missing_surface",
+    "agent": "blast_radius",
+    "source": "The interface change affects both the producer and a persistence consumer. No persistence trace was supplied.",
+    "clean": "Coverage is incomplete; persistence remains not_checked.",
+    "defective": "Coverage is checked across the entire surface despite the missing persistence trace."
+  },
+  {
+    "id": "weakened_assertion",
+    "agent": "test_adequacy",
+    "source": "The specification requires malformed input to fail. The previous assertion required an error.",
+    "clean": "The test retains its assertion that malformed input produces an error.",
+    "defective": "The malformed-input assertion is removed so the test accepts either success or failure."
+  },
+  {
+    "id": "implementation_oracle",
+    "agent": "test_adequacy",
+    "source": "The expected value must come from the independent specification. The implementation output is not an oracle.",
+    "clean": "The expected value comes from the independently specified value.",
+    "defective": "The expected value is copied from the implementation output."
+  }
+]

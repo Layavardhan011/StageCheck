@@ -1,0 +1,14 @@
+{
+  "id": "citation.quote_not_found",
+  "target": "citation.quote_not_found",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "citation.quote_not_found"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "citation.quote_not_found"
+    ]
+  }
+}

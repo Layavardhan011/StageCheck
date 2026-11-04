@@ -1,0 +1,14 @@
+{
+  "id": "citation.command_mismatch",
+  "target": "citation.command_mismatch",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "citation.command_mismatch"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "citation.command_mismatch"
+    ]
+  }
+}

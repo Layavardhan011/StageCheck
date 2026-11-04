@@ -1,0 +1,14 @@
+{
+  "id": "rerun.toolchain",
+  "target": "rerun.toolchain",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "rerun.toolchain"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "rerun.toolchain"
+    ]
+  }
+}

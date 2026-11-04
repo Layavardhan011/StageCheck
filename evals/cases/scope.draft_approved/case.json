@@ -1,0 +1,14 @@
+{
+  "id": "scope.draft_approved",
+  "target": "scope.draft_approved",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "scope.draft_approved"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "scope.draft_approved"
+    ]
+  }
+}

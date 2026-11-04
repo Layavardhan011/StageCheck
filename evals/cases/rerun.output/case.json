@@ -1,0 +1,14 @@
+{
+  "id": "rerun.output",
+  "target": "rerun.output",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "rerun.output"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "rerun.output"
+    ]
+  }
+}

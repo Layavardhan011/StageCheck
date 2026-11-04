@@ -1,0 +1,14 @@
+{
+  "id": "carry.not_landed",
+  "target": "carry.not_landed",
+  "pair": {
+    "clean": "routed CARRY_FORWARD whose row hand-off quotes text present in the fixture tracker row",
+    "defective": "carry.not_landed"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "carry.not_landed"
+    ]
+  }
+}

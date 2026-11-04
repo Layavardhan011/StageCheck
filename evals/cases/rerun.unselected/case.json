@@ -1,0 +1,14 @@
+{
+  "id": "rerun.unselected",
+  "target": "rerun.unselected",
+  "pair": {
+    "clean": "base fixture with scoped evidence",
+    "defective": "rerun.unselected"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "rerun.unselected"
+    ]
+  }
+}

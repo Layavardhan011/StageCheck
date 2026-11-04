@@ -1,0 +1,5 @@
+{
+  "id": "stable_defect_ids",
+  "target": "orchestrate",
+  "expected": "fail closed or exact stated property"
+}

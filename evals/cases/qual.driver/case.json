@@ -1,0 +1,14 @@
+{
+  "id": "qual.driver",
+  "target": "qual.driver",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "qual.driver"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "qual.driver"
+    ]
+  }
+}

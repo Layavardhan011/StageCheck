@@ -1,0 +1,14 @@
+{
+  "id": "authority.remote",
+  "target": "authority.remote",
+  "pair": {
+    "clean": "literal DISABLED with an empty approval list",
+    "defective": "authority.remote"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "authority.remote"
+    ]
+  }
+}

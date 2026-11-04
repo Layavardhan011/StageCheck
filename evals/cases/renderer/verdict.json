@@ -1,0 +1,10 @@
+{
+  "type": "verdict", "task_id": "fixture", "iteration": 1,
+  "contract_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "checked_head": "fixture",
+  "manifest_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "bound": false, "depth": "docs", "input_hashes": {}, "previous": {},
+  "checks": [], "agents": [], "defects": [], "not_run": [], "errors": [],
+  "result": "CLEAR", "questions": [],
+  "counts": {"blocking": 0, "report_only": 0, "not_run": 0}
+}

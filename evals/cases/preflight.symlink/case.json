@@ -1,0 +1,14 @@
+{
+  "id": "preflight.symlink",
+  "target": "preflight.symlink",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "preflight.symlink"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "preflight.symlink"
+    ]
+  }
+}

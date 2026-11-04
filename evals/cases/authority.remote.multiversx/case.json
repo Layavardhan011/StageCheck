@@ -1,0 +1,6 @@
+{
+  "id": "authority.remote.multiversx",
+  "target": "authority.remote",
+  "pair": {"clean": "literal DISABLED with empty approvals", "defective": "MultiversX HTTPS push URL"},
+  "expected": {"clean": [], "defective": ["authority.remote"]}
+}

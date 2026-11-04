@@ -1,0 +1,5 @@
+{
+  "id": "agent_invalid_json",
+  "target": "orchestrate",
+  "expected": "fail closed or exact stated property"
+}

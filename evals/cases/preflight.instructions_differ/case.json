@@ -1,0 +1,14 @@
+{
+  "id": "preflight.instructions_differ",
+  "target": "preflight.instructions_differ",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "preflight.instructions_differ"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "preflight.instructions_differ"
+    ]
+  }
+}

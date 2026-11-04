@@ -1,0 +1,14 @@
+{
+  "id": "report.completion.completed",
+  "target": "report.completion",
+  "pair": {
+    "clean": "base fixture with scoped evidence",
+    "defective": "report.completion.completed"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "report.completion"
+    ]
+  }
+}

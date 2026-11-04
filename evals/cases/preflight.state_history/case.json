@@ -1,0 +1,14 @@
+{
+  "id": "preflight.state_history",
+  "target": "preflight.state_history",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "preflight.state_history"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "preflight.state_history"
+    ]
+  }
+}

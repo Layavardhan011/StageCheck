@@ -1,0 +1,14 @@
+{
+  "id": "preflight.binding_mismatch",
+  "target": "preflight.binding_mismatch",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "preflight.binding_mismatch"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "preflight.binding_mismatch"
+    ]
+  }
+}

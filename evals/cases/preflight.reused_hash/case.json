@@ -1,0 +1,14 @@
+{
+  "id": "preflight.reused_hash",
+  "target": "preflight.reused_hash",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "preflight.reused_hash"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "preflight.reused_hash"
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "id": "preflight.agent_mapping",
+  "target": "preflight.agent_mapping",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "preflight.agent_mapping"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "preflight.agent_mapping"
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "id": "authority.upstream_endpoint",
+  "target": "authority.upstream_endpoint",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "authority.upstream_endpoint"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "authority.upstream_endpoint"
+    ]
+  }
+}

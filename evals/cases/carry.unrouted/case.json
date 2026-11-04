@@ -1,0 +1,14 @@
+{
+  "id": "carry.unrouted",
+  "target": "carry.unrouted",
+  "pair": {
+    "clean": "base fixture with a routed CARRY_FORWARD record",
+    "defective": "carry.unrouted"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "carry.unrouted"
+    ]
+  }
+}

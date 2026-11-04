@@ -1,0 +1,14 @@
+{
+  "id": "citation.missing_file",
+  "target": "citation.missing_file",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "citation.missing_file"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "citation.missing_file"
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "id": "report.table",
+  "target": "report.table",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "report.table"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "report.table"
+    ]
+  }
+}

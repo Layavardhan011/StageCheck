@@ -1,0 +1,14 @@
+{
+  "id": "scope.excluded",
+  "target": "scope.excluded",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "scope.excluded"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "scope.excluded"
+    ]
+  }
+}

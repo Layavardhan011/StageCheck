@@ -1,0 +1,14 @@
+{
+  "id": "qual.test_name",
+  "target": "qual.test_name",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "qual.test_name"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "qual.test_name"
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "id": "qual.file_name",
+  "target": "qual.file_name",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "qual.file_name"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "qual.file_name"
+    ]
+  }
+}

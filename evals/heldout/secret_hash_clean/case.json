@@ -1,0 +1,4 @@
+{
+  "id": "secret_hash_clean",
+  "expected": "independent boundary case; not used for agent tuning"
+}

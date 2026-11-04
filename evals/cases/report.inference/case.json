@@ -1,0 +1,14 @@
+{
+  "id": "report.inference",
+  "target": "report.inference",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "report.inference"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "report.inference"
+    ]
+  }
+}

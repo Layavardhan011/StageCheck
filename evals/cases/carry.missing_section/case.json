@@ -1,0 +1,14 @@
+{
+  "id": "carry.missing_section",
+  "target": "carry.missing_section",
+  "pair": {
+    "clean": "base fixture with a routed CARRY_FORWARD record",
+    "defective": "carry.missing_section"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "carry.missing_section"
+    ]
+  }
+}

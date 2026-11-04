@@ -1,0 +1,21 @@
+{
+  "apiKeyHelper": null,
+  "permissions": {
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob"
+    ],
+    "deny": [
+      "Bash",
+      "Edit",
+      "Write",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch",
+      "Agent",
+      "Skill"
+    ]
+  },
+  "disableAllHooks": true
+}

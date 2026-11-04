@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "properties": {
+    "kind": {"enum": ["finding_label", "coverage", "missed_defect", "missed_defect_closure", "prompt_outcome", "delivery_outcome", "carryover", "blocking_override", "confirmation", "policy_snapshot", "continuation"]},
+    "value": {"type": "string", "minLength": 1},
+    "subject": {"type": "object"},
+    "previous": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "actor": {"enum": ["owner", "claude"]},
+    "type": {"enum": ["proposal", "decision"]},
+    "policy_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "evidence": {"type": "array"},
+    "note": {"type": "string"},
+    "replaces": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "required": ["kind", "value", "subject", "previous"],
+  "additionalProperties": false
+}

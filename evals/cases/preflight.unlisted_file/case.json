@@ -1,0 +1,14 @@
+{
+  "id": "preflight.unlisted_file",
+  "target": "preflight.unlisted_file",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "preflight.unlisted_file"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "preflight.unlisted_file"
+    ]
+  }
+}

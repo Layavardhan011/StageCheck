@@ -1,0 +1,14 @@
+{
+  "id": "secret.keystore",
+  "target": "secret.keystore",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "secret.keystore"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "secret.keystore"
+    ]
+  }
+}

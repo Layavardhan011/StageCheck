@@ -1,0 +1,14 @@
+{
+  "id": "report.headers",
+  "target": "report.headers",
+  "pair": {
+    "clean": "three ordered headers",
+    "defective": "first two headers only; missing Enforcement Self-Check"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "report.headers"
+    ]
+  }
+}

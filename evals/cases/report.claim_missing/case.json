@@ -1,0 +1,14 @@
+{
+  "id": "report.claim_missing",
+  "target": "report.claim_missing",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "report.claim_missing"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "report.claim_missing"
+    ]
+  }
+}

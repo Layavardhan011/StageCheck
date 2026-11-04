@@ -1,0 +1,14 @@
+{
+  "id": "secret.pem",
+  "target": "secret.pem",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "secret.pem"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "secret.pem"
+    ]
+  }
+}

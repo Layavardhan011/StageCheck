@@ -1,0 +1,14 @@
+{
+  "id": "citation.upstream_identity",
+  "target": "citation.upstream_identity",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "citation.upstream_identity"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "citation.upstream_identity"
+    ]
+  }
+}

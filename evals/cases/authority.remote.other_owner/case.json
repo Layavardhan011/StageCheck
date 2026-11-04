@@ -1,0 +1,6 @@
+{
+  "id": "authority.remote.other_owner",
+  "target": "authority.remote",
+  "pair": {"clean": "literal DISABLED with empty approvals", "defective": "other-owner SSH push URL"},
+  "expected": {"clean": [], "defective": ["authority.remote"]}
+}

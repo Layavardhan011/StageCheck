@@ -1,0 +1,14 @@
+{
+  "id": "citation.line_range",
+  "target": "citation.line_range",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "citation.line_range"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "citation.line_range"
+    ]
+  }
+}

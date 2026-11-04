@@ -1,0 +1,5 @@
+{
+  "id": "recurrence",
+  "target": "orchestrate",
+  "expected": "fail closed or exact stated property"
+}

@@ -1,0 +1,14 @@
+{
+  "id": "scope.package_span",
+  "target": "scope.package_span",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "scope.package_span"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "scope.package_span"
+    ]
+  }
+}

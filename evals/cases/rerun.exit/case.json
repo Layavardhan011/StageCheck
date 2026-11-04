@@ -1,0 +1,14 @@
+{
+  "id": "rerun.exit",
+  "target": "rerun.exit",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "rerun.exit"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "rerun.exit"
+    ]
+  }
+}

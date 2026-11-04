@@ -1,0 +1,14 @@
+{
+  "id": "preflight.bound_hash",
+  "target": "preflight.bound_hash",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "preflight.bound_hash"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "preflight.bound_hash"
+    ]
+  }
+}

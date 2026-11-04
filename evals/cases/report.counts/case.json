@@ -1,0 +1,14 @@
+{
+  "id": "report.counts",
+  "target": "report.counts",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "report.counts"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "report.counts"
+    ]
+  }
+}

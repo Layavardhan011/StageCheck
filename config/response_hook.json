@@ -1,0 +1,17 @@
+{
+  "mode": "record",
+  "repairs_per_answer": 2,
+  "failed_answers_in_a_row": 3,
+  "session_backstop": 20,
+  "stagecheck_timeout_seconds": 60,
+  "claims_max_bytes": 65536,
+  "claims_folder": {"codex":"evidence/responses/codex/","claude":"evidence/responses/claude/"},
+  "records_folder": "evidence/stagecheck_responses/",
+  "send_back_rules": [
+    "citation.missing_file", "citation.hash_mismatch", "citation.line_range",
+    "citation.quote_not_found", "citation.upstream_identity", "citation.command_mismatch",
+    "report.unbacked_token", "report.headers", "report.label", "report.inference",
+    "report.claim_missing", "scope.excluded", "scope.draft_approved",
+    "secret.pem", "secret.keystore", "secret.assignment", "secret.filename"
+  ]
+}

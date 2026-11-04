@@ -1,0 +1,14 @@
+{
+  "id": "secret.filename",
+  "target": "secret.filename",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "secret.filename"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "secret.filename"
+    ]
+  }
+}

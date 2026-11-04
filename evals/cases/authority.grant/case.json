@@ -1,0 +1,14 @@
+{
+  "id": "authority.grant",
+  "target": "authority.grant",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "authority.grant"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "authority.grant"
+    ]
+  }
+}

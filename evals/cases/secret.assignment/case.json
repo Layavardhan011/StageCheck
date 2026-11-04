@@ -1,0 +1,14 @@
+{
+  "id": "secret.assignment",
+  "target": "secret.assignment",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "secret.assignment"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "secret.assignment"
+    ]
+  }
+}

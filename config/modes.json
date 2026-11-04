@@ -1,0 +1,23 @@
+{
+  "promotion_count": null,
+  "checks": {
+    "preflight": "report_only",
+    "scope_paths": "report_only",
+    "citations": "report_only",
+    "report_lint": "report_only",
+    "authority": "report_only",
+    "secrets": "report_only",
+    "qual_naming": "report_only",
+    "rerun": "report_only",
+    "carry_forward": "report_only"
+  },
+  "agents": {
+    "claim_support": "report_only",
+    "upstream_reuse": "report_only",
+    "blast_radius": "report_only",
+    "test_adequacy": "report_only",
+    "independent_rerun": "report_only",
+    "failure_class": "report_only",
+    "eval_curator": "report_only"
+  }
+}

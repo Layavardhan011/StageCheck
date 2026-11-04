@@ -1,0 +1,14 @@
+{
+  "id": "report.groups",
+  "target": "report.groups",
+  "pair": {
+    "clean": "base fixture",
+    "defective": "report.groups"
+  },
+  "expected": {
+    "clean": [],
+    "defective": [
+      "report.groups"
+    ]
+  }
+}
