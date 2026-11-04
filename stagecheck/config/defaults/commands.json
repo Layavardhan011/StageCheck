@@ -1,0 +1,221 @@
+{
+  "enabled": true,
+  "product_grant": {
+    "citation": {
+      "type": "document",
+      "path": "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/controls/OWNER_GRANTS.md",
+      "sha256": "bb823439858518ae537f52fc4b66665ed227cfb707480908ebd523f85a5a2c23",
+      "lines": [
+        91,
+        103
+      ],
+      "quote": "## SP2-LOCAL-FOUNDATION-001\n\n- Grant date: 2026-10-19, effective on owner installation. Grantor and accountable owner: project owner (decision verbatim in evidence/owner_rulings_2026-10-19/sp1_exit_sp2/DECISION_VERBATIM.txt SHA-256 6332dca82d347b3d2bf83b7190fcb529786bff0f07895746757b47ae4eeb1852: \"Also localnet launches now\"; \"Move into start/\"). Executors: Codex and Claude, with producer and non-producer roles disclosed per deliverable.\n- Machine: the current local machine, observed hostname `strix`. No remote runner or cloud resources.\n- Programme: fresh `NewArc/3m` only; SP2 of Plan \u00a74.2 L412 under the approved v4.2.8 working plan and its exact manifest. Working tracker: RWA/start/DRWA_SP2_Task_Tracker.md, placed there by this installation from the draft RWA/DRWA_SP2_Task_Tracker.md SHA-256 935cb2c1a6f2b0ba53e61d62f98251bba24210bfba165154fea17fddbe35750a; rows are taken in the dependency order of Plan \u00a74.4. Existing excluded work and unselected platform repositories remain excluded.\n- Expiry: end of SP2 or revocation, whichever occurs first. No automatic SP3, architecture-freeze or production-stage authority.\n- Permitted local development: after each row's source, model, authority and first-consumer prerequisites are satisfied, make SP2 source and test changes within the bound repository inventory and the row's plan work area; use adequate upstream facilities. Explicitly non-normative experiments may explore alternatives under Part A C.4; they cannot earn conforming model or profile acceptance.\n- Permitted execution: local offline builds, unit/integration/race/fuzz/static/benchmark checks and in-process test helpers, plus necessary read-only package dependency downloads to bounded caches. Smoke-check exact commands first. No public-network tests or upstream workflow execution. Inherited upstream packages run with `-short` unless the exact suite and configuration were inspected first. Test-owned temporary upstream integration tests, including multi-node libp2p tests and in-process chain-simulator tests, are permitted only with loopback-only network endpoints, bounded temporary state, and cleanup of every test-owned listener/process; no public-network or non-loopback access.\n- Permitted localnet launches (contract \u00a711): launching the SP2-13 localnet on this machine \u2014 seednode, validators, observers and proxy in one tmux session, MultiversX TermUI against the shard-1 observer in a second \u2014 only from an execution package with its own recorded identity, with every listener bound to loopback, local-only peer lists and no public network, MultiversX network, gateway or public API access (contract \u00a75). Every operational step (preflight, launch, health check, capture, shutdown) is a smoke-tested script with its SHA-256 recorded (contract \u00a78). Retain `tmux list-sessions`, both pane identities, the TermUI command and binary SHA-256 and a successful shard-1 status response; shut down through the operator entrypoint and confirm that no package-owned process remains. A changed package needs a new identity before it runs again.\n- Stagecheck: Codex and Claude may each invoke `stagecheck/bin/stagecheck.sh` in delivery mode, `--depth code`, all checks report-only and model agents off, for their own SP2 delivery and audit records. No stagecheck configuration change.\n- Prerequisites remain binding: affected expected-model acceptance waits for its independent review; first-consumer constructions are not waived. No arbitrary numeric defaults outside R7 (line 64), unsupported profile or new protocol semantics may be adopted; novel protocol, VM, gas, storage, P2P, cryptographic, transaction or shard behaviour still needs owner approval (contract \u00a75).\n- Excluded: signing and pushes, repository creation on GitHub, PRs/issues/comments, deployment, any public or MultiversX network, transaction submission (including to the localnet), fault injection, runtime or stage acceptance, architecture freeze, production-format freeze, release and qualification-file cleanup. A new bounded grant is required for those operations.\n- Evidence: retain exact inputs/commands/exits/results under the bound evidence root. Agents may update only the enumerated factual state fields under the installed instruction files' current-state update rule. Protected state fields, grants and acceptance remain owner-only. Completed tasks do not constitute sprint acceptance. Preserve before/after state bytes and append a linked update record under the evidence root. No producer can assign its own independent acceptance."
+    },
+    "expiry_stage": "SP2",
+    "commands": [
+      {
+        "argv": [
+          "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/.toolchains/go1.26.2/bin/go",
+          "test",
+          "-run=^$",
+          "./process/drwa"
+        ],
+        "cwd": "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go"
+      },
+      {
+        "argv": [
+          "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/.toolchains/go1.26.2/bin/go",
+          "test",
+          "-count=1",
+          "-json",
+          "-run=^TestQualDRWAAdminCarrier",
+          "./process/drwa"
+        ],
+        "cwd": "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go"
+      }
+    ]
+  },
+  "commands": [
+    {
+      "argv": [
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/.toolchains/go1.26.2/bin/go",
+        "test",
+        "-count=1",
+        "-json",
+        "-run=^TestQualDRWAAdminCarrier",
+        "./process/drwa"
+      ],
+      "cwd": "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go",
+      "environment": {
+        "GOMODCACHE": "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/.cache/gomod",
+        "GOCACHE": "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/.cache/gobuild",
+        "GOPATH": "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/.cache/gopath",
+        "GOTMPDIR": "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/.cache/tmp",
+        "GOTOOLCHAIN": "local",
+        "GOWORK": "off",
+        "GOENV": "off",
+        "GOFLAGS": "-mod=readonly",
+        "GOPROXY": "off",
+        "GOSUMDB": "sum.golang.org",
+        "GOMAXPROCS": "8",
+        "CGO_ENABLED": "1",
+        "CC": "/usr/bin/gcc",
+        "GOPRIVATE": "",
+        "GONOPROXY": "",
+        "GONOSUMDB": ""
+      },
+      "binary": "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/.toolchains/go1.26.2/bin/go",
+      "binary_sha256": "1a0f01bdb35c622c78bdc49f26f85dda53f9d7955f453f63c4c023b0dc7c754d",
+      "smoke_argv": [
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/.toolchains/go1.26.2/bin/go",
+        "test",
+        "-run=^$",
+        "./process/drwa"
+      ],
+      "smoke_timeout_seconds": 600,
+      "timeout_seconds": 600,
+      "inputs": {
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/adminCarrier.go": "fc36bd9203c4c3f9add843706be57b0b5092e9213a7a394a504f7c6e9bc299e0",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/authoritySignatures.go": "6d6fda7f5ea5f00945a283062399965c9e76e9b7cef89a5223bffffa8b6c6c81",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/burnForAllAbsence.go": "a6c171bc46c34a208a247a91235d3d00cd4d79aac6588e7d280eaab7d3db9603",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/burnForAllRegistrationProof.go": "c486ccc8475fe8cdccf886857a4f91f0659ff343681aa41ebe12c7df06c0c660",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/convergenceRecords.go": "6752893bc7d441bf479c84a8ef503a4865699ed5c6f718df5ee7cdea504e8164",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/creationBinding.go": "ba8fecd6b38e5e018cc94703b37691788056da991dd20112e419e855387fdb82",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/currentLocalDependencies.go": "f6eab2c7e5ce27d08c4721c7c076026c5b27f140db71555b231cb96a44388b75",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/evaluatedHeaderTime.go": "3d04e25e77ad1bc2f883d5bbcebe6611388af0551d239dce7b61a80ca8eaa512",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/genesisProtectedState.go": "cc9286befcc2e0c60452e5e92eac4518a33c6500edfbca4957b242fc52744042",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/governedActionRecords.go": "70d85d20d0dcf03ad4cb061a68e0422a90412aeefb596facd0451b6c97ff5adc",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/governedActionTime.go": "81134665c561da38dc1562e9c8639e95f858ca9f97547ea38cc4a382a15b24cf",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/membershipIndex.go": "9432247628185f4920b6e44af8cb6acb7c9f28af16b16f3675542a3c8693fddd",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/nativeMetaContext.go": "5c0646c60ca5a480df337f02712c8ebabfba97289c25f7bb0a70da4e1e819fd9",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/outcomeGasReservation.go": "714cb3e23507347158dcb9b3912b4ab00749c9d9da9c28d63550ad5a18057c3a",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/pendingFinalRecords.go": "24d880264640d2cb45623565713336a2526d7ff16692182a57cc02e0e58711d8",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/privilegedConsent.go": "04e3d3a34e09f476aec5eef6f315631282dd632dd9600defbaffb4d32a0216b2",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/privilegedConsentEvidence.go": "39dc7bd82aad5eb10d17c4683ab973dfe06ae18f4dd586bdb6276f4b84ad145e",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/privilegedConsentStorage.go": "eb9d78b527a2a6ac1ae1c9bcb204d762f48cf2609b314eebe06c483e283c3251",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/protectedState.go": "bae3c3ad8357d30efb704ffd27c1042de473ce48c986d709a846b03d2d6c7fb9",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_admin_carrier_callback_identity_test.go": "cf10c7603d71de6dcfb819e28e872166e828808ecf77a5c5b3be3dac152dcafa",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_admin_carrier_creator_handover_test.go": "8ec5553b85db0e75276203857fc946cf47c4b4891143d4620dcd25a03f083dfb",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_admin_carrier_native_roles_test.go": "4633f501ec2a2d3489b9e6fd4d74175e967a390020c1fe415ade5a65d33ef5e7",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_admin_carrier_test.go": "a785ef2dd6e277ee730a0fa2b45bef0c57ae3bb5e7c0bf4dc8959d4a8762d521",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_authority_admission_ordering_test.go": "305b00386134d0c6d15ebede09f3cb148957584903f368db8046964f0736f47a",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_authority_d03_certificate_codec_test.go": "fae0eb7e3ae29f59f74dc320090e4b11b49dd87ad9ca5120b4669033e6dea9f5",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_authority_d03_certificate_composition_test.go": "a34919b6323ada413f423a4e32e5ab6d55f834823d9b1b41eb25b3b5d646f7fd",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_authority_d03_storage_test.go": "754dd2da640fb67f3a027a290a10589d4bc2317baff105700926f6c24ee84615",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_authority_ng_codec_test.go": "aef9cd6344d0273773ccba4d0425a6117a463dab6aa9b1ffd6945a96b6a510f2",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_authority_ng_count_test.go": "bae64c7c039fe1d0c343fd57b65317c6a24e81183576ce4202d77ccf5cccfa63",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_authority_ng_fixture_test.go": "374864e1469a8bd2836b6f2a4c7c787c769cd1a2dae32baaa525c9ed4a7c389f",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_authority_scope_payload_codec_test.go": "65b5fb04d16cca12d2c79d2395dc430740cd005f575c827b34c807e2f5bd0fac",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_authority_signatures_test.go": "5c8594b2c634646a929a21279c43a867945160b6b0f9a1fb0edef0b0be3cc5be",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_burn_for_all_absence_test.go": "1d0e7d8865ea2629ce2bd63a3875d2284454f962b0545861acd609e9ce5a0130",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_candidate_fixture_test.go": "2acfd932a5ea98e5b3757330585380455e42dc634b57f5a4bbb71457c5b8e9cc",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_candidate_liquidity_test.go": "10804f7106afac994996c6f786a8c1bf45f42cc7c3c7b67e86160b16639810ef",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_convergence_callback_progress_test.go": "02f56211c8977701d600599175d081d18a01a533041719c233a396c868b279b6",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_convergence_disk_test.go": "225541036a65ef02be37d4b006118893f0c44b72d28784683677597950e17f61",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_convergence_records_test.go": "6758611e42483ee5ba7dd3d30af10b87a28c687bd4882672b90f46f2f04a386c",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_creation_binding_test.go": "b365a0bd41e216f8de8fcd9020e537b8776321567791d986bdeb015f47221b9c",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_current_local_dependencies_test.go": "17f5367e79b337bdcc891639c382001ccc61210b12071b51102484fdf8adeaa2",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_evaluated_header_time_test.go": "4ffa7ce3e55d15779687a7dbafadeedfb802c03dcd32fcb8cd4ee5a43e447e99",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_genesis_protected_state_test.go": "3f3112378124dba3c4db0f4632b8dfc6c4a1f97c2d3b296a4ffd3bc9aa15b839",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_governed_action_kat_test.go": "3b75609557b9a68cf9bef6f54e781e2585649c06f205f9134bc0f59f28d5e63a",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_governed_action_records_test.go": "d1e9be65f308ae317a4298bc86fc19fc6de602d455a3c6eccf627181ef838ba5",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_governed_action_time_test.go": "fbe3c82950379c26aa27bea22049b9ee9f49eaa3e423172d5f93cd2b89045ddd",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_head_write_pressure_test.go": "c99ddc7f54057b7b60c7958ff4ad9c728262e831a0ced06944b3f4eced09ba09",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_intent_resource_test.go": "46c90b718252177cad112b9f250f9c63d27987418b164cfb8f540594916f565e",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_manager_candidate_test.go": "0acffb8fec0e421b57de4b89fc7bb6a8eec4336f944627426fef34edef34cf98",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_manager_replacement_test.go": "3130998aef2efe17f83845d319931654f0c8e9493b9c4b0a88fa39fcc948ecd2",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_membership_index_test.go": "2d41bd2940c49a5c1641b6e00b05936b0c77af5f2ed78831178e6c3e78daa770",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_meta_fanout_anchor_test.go": "2e63dd2be8c7fc8b5b29617d164b72e9f067e117957f9c291f34cf17fccbc297",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_meta_result_account_reader_test.go": "ecc788027c3eb5c18b36f7b3b6db234be98f8cffb199daee5f1bf78caaabe088",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_native_meta_context_test.go": "8fe1cfc042f511c45b7c9d922eb86f982b6bf1384b3bde00f59f983b2a3d61a9",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_outcome_gas_reservation_test.go": "801141875b1cf65c1104b147cd3d75d1da1ca88bbecdec6b43e7a8868229a851",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_pending_final_kat_test.go": "fa103ddf33f0958385979ad8de4ccb576acae5c3d4b572d74e9f97d930cf961a",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_pending_final_records_test.go": "d6b935793176139ccf574474d2295e511dfcb8807a1c17b31c42bd4b4b8945f3",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_pending_final_verifier_state_test.go": "233ecebde82c1198290da8cb9596451b003263564bfdb9b92a541175ecb7c28e",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_privileged_consent_evidence_test.go": "1b6f07ac1005755d0a68fc90c9d5c977262d6a293fea9f926c47c65043d304db",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_privileged_consent_lifecycle_test.go": "4ab11c2c0aaeca4aee3ccf62a5a6d4c5ee9b9252ffdb7e8856452e2e345fb833",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_privileged_consent_reader_guards_test.go": "bb349e5dc24882e83e63962cd31426ad601e1d9a4507bfb9166f5c9580fb5774",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_privileged_consent_signature_test.go": "a79106f7563d85ead79cbbba422be3a76e8c90ff6bb49363c608d910777e02d8",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_privileged_consent_storage_test.go": "495649bc4953b86dd04a8ab6cc67eb23e0db60c52e2619b64bcdb1b604af2769",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_privileged_consent_system_proof_test.go": "2ad841f82c2a18bfb92b2692de125ebca44809cd3bf8cb99c6a12ba13028a23e",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_privileged_consent_test.go": "d4dd773b18c7db8ecf9dc58620d1fb7b4ac6804af9867424dcc6e430e36c4e5d",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_protected_state_test.go": "d1ce63419589c0e0bdbab8b61132c828aed2889ed0ee182c1d26a579eb0072bf",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_registration_intent_owner_test.go": "9673698b83798dbcf054bd70a3f62c4534bf3aa5dc90d1a57acad389f7be4aae",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_registration_records_test.go": "ac6d02ce038165ac95865387ab1370b0e8d61acaef199a79989274e4309a0272",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_registry_materialization_test.go": "213521743c2125e75154e2187b6e4d2c1fa5b2abc84848f4d32980403e8690a5",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_registry_projection_lifecycle_test.go": "8bc34af1b9f6b1805e1e10871901957a463abcba1d2625ac03dda07c24289ab8",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_registry_registration_test.go": "0a716db8b3fe3da1f01975d945bc76609eee555c4189a0e6e373a83664457fa8",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_registry_resource_test.go": "3dddb6f5280388f73d8c36ccd254991cd68357620492070cbd15b9d7dbd8f768",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_registry_transport_test.go": "bdb3055a9c994b56a7fdc6e4cde46eece540ba91c2c0797d77dee66872302ee1",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_remaining_record_kat_test.go": "1e84c3527ac495d5da300c4660385d9ed6d9d606116016f55f95295d4cabc589",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_result_account_reader_test.go": "b918247a633974df601de4499c363be596f39c251d2843439097b7ef7be93010",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_rollback_containment_test.go": "9d428a48ab27133fb39fd3cb5f1fc778f15e5eea767ab85db1facbbbb40a440c",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_scoped_admission_native_control_test.go": "70569a17ecb8d37d62ecf9fc81412ecbbb6cf3e18ec8a6632fa2c1e0d094dd22",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_scoped_admission_records_test.go": "d8549826d703d5fcfc74c807a0e39b348eb29cb788d81675250519037e35314f",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_scoped_admission_registration_test.go": "1f1ee60b1b0c704e92d714304e8b668527c33f0a8c0b69a4faa83e2f982d3547",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_scoped_admission_stateful_test.go": "cd8d9e665fb9de9ae8ba11ccf788ba5a3a4c904b397181ae68ade9ea2d75743d",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_scoped_admission_successor_test.go": "5769b3e3a2b387a261cf0e89f50e21445b9609b6ae63c1ad485e179a8b7945c2",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_scoped_admission_verifier_state_test.go": "11b7a7834c6740020b2237e18dbc76f14285467e31ad357c7c7af7449fc94222",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_scoped_record_kat_test.go": "4ad6aa54bf9f90d6f0611c94eea79ccbb4583dfb6a7bddb84fe602e82a25b526",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_source_grant_callback_state_test.go": "ef3fa81ed58eb580c295e181294ab233c974e129ac539668cd9eedfcb096fa37",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/qual_drwa_source_grant_records_test.go": "f911a9c0bddb82087b258c17a2488d20e6067d11b23177b7509e78797a992723",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/registrationIntentOwner.go": "fc0387999d486c73dd24eef5b54bf9174bb215b5e9d2a8c1a0514f2cf080c117",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/registrationRecords.go": "9c730edb66f81f765b603f724ff31227c5646131ce49aa8e669c9b34d2780b34",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/registryMaterialization.go": "06f9901735e9eed94c3df7dd20c217da9a216b77eb03aec2009df9425897eee8",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/registryProjectionLifecycle.go": "2e25201099589f61802bb1685c1ab1a5b2763685cb8599a337c678e47afc134e",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/registryRegistration.go": "6a615b45cf129bc84458b394e0661228f20a7718503af03fd3a81ab7965ec96e",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/registryTransport.go": "7a5befbaa572a68344fa35e5331a9e06c1f271cbec32d88769d590847bece7c7",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/resultAccountReader.go": "8353f1f43de4eec99025e65ce032213666de7eed81cec811483dca36d4ed6f1e",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/rollbackContainment.go": "c02b11d013cecc22abcbf434d2f3e988fd5f3e6722a9f787034dd47483e2f21a",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/scopedAdmissionRecords.go": "0e9108e12eec731d4d2aa6c7142a32ad681442dcf60853ba3b30deb7bc2336c7",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/process/drwa/sourceGrantRecords.go": "0ddfb5407638fc6f10fc4da57f0072740684492c1ad67a72d25c2b7a45c84090",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/go.mod": "4a87d491ade87a42001dfca3efcf05c7ccd642e773ee63f0c961abc6f942d5b0",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/mx-chain-go/go.sum": "a9097f13ee3ca830f79d8f3f2ff86a856e8257865c2e0a48286d8d44cb494ff2",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/.toolchains/go1.26.2/bin/go": "1a0f01bdb35c622c78bdc49f26f85dda53f9d7955f453f63c4c023b0dc7c754d",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/controls/OWNER_GRANTS.md": "4ea5a23e008584dfbdc0ef62259028ad74385f76fb706abd52148d796bb6c2e6",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/qualification/models/T14_P06_expected_model_01.md": "bc50ed643f2ac7b6b285cbad7f75eca2182e88b816d13fc380e9ff908e4d5f9f",
+        "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/qualification/models/T14_P06_construction_design_01.md": "d209db2fbeb1f30d1e7453ef026d5b111dc7868ba4dea93ea55030383cfffe30"
+      }
+    }
+  ],
+  "note": "Owner confirmation in this session: Confirm SP1-LOCAL-FOUNDATION-001 for scoped product reruns. Exact retained carrier command only; development evidence, no acceptance. Source scope now includes the pre-existing modified callback-identity test. Raw JSON output equality is not assumed.",
+  "class_grants": [
+    {
+      "class": "go_local",
+      "citation": {
+        "type": "document",
+        "path": "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/controls/OWNER_GRANTS.md",
+        "sha256": "bb823439858518ae537f52fc4b66665ed227cfb707480908ebd523f85a5a2c23",
+        "lines": [
+          91,
+          103
+        ],
+        "quote": "## SP2-LOCAL-FOUNDATION-001\n\n- Grant date: 2026-10-19, effective on owner installation. Grantor and accountable owner: project owner (decision verbatim in evidence/owner_rulings_2026-10-19/sp1_exit_sp2/DECISION_VERBATIM.txt SHA-256 6332dca82d347b3d2bf83b7190fcb529786bff0f07895746757b47ae4eeb1852: \"Also localnet launches now\"; \"Move into start/\"). Executors: Codex and Claude, with producer and non-producer roles disclosed per deliverable.\n- Machine: the current local machine, observed hostname `strix`. No remote runner or cloud resources.\n- Programme: fresh `NewArc/3m` only; SP2 of Plan \u00a74.2 L412 under the approved v4.2.8 working plan and its exact manifest. Working tracker: RWA/start/DRWA_SP2_Task_Tracker.md, placed there by this installation from the draft RWA/DRWA_SP2_Task_Tracker.md SHA-256 935cb2c1a6f2b0ba53e61d62f98251bba24210bfba165154fea17fddbe35750a; rows are taken in the dependency order of Plan \u00a74.4. Existing excluded work and unselected platform repositories remain excluded.\n- Expiry: end of SP2 or revocation, whichever occurs first. No automatic SP3, architecture-freeze or production-stage authority.\n- Permitted local development: after each row's source, model, authority and first-consumer prerequisites are satisfied, make SP2 source and test changes within the bound repository inventory and the row's plan work area; use adequate upstream facilities. Explicitly non-normative experiments may explore alternatives under Part A C.4; they cannot earn conforming model or profile acceptance.\n- Permitted execution: local offline builds, unit/integration/race/fuzz/static/benchmark checks and in-process test helpers, plus necessary read-only package dependency downloads to bounded caches. Smoke-check exact commands first. No public-network tests or upstream workflow execution. Inherited upstream packages run with `-short` unless the exact suite and configuration were inspected first. Test-owned temporary upstream integration tests, including multi-node libp2p tests and in-process chain-simulator tests, are permitted only with loopback-only network endpoints, bounded temporary state, and cleanup of every test-owned listener/process; no public-network or non-loopback access.\n- Permitted localnet launches (contract \u00a711): launching the SP2-13 localnet on this machine \u2014 seednode, validators, observers and proxy in one tmux session, MultiversX TermUI against the shard-1 observer in a second \u2014 only from an execution package with its own recorded identity, with every listener bound to loopback, local-only peer lists and no public network, MultiversX network, gateway or public API access (contract \u00a75). Every operational step (preflight, launch, health check, capture, shutdown) is a smoke-tested script with its SHA-256 recorded (contract \u00a78). Retain `tmux list-sessions`, both pane identities, the TermUI command and binary SHA-256 and a successful shard-1 status response; shut down through the operator entrypoint and confirm that no package-owned process remains. A changed package needs a new identity before it runs again.\n- Stagecheck: Codex and Claude may each invoke `stagecheck/bin/stagecheck.sh` in delivery mode, `--depth code`, all checks report-only and model agents off, for their own SP2 delivery and audit records. No stagecheck configuration change.\n- Prerequisites remain binding: affected expected-model acceptance waits for its independent review; first-consumer constructions are not waived. No arbitrary numeric defaults outside R7 (line 64), unsupported profile or new protocol semantics may be adopted; novel protocol, VM, gas, storage, P2P, cryptographic, transaction or shard behaviour still needs owner approval (contract \u00a75).\n- Excluded: signing and pushes, repository creation on GitHub, PRs/issues/comments, deployment, any public or MultiversX network, transaction submission (including to the localnet), fault injection, runtime or stage acceptance, architecture freeze, production-format freeze, release and qualification-file cleanup. A new bounded grant is required for those operations.\n- Evidence: retain exact inputs/commands/exits/results under the bound evidence root. Agents may update only the enumerated factual state fields under the installed instruction files' current-state update rule. Protected state fields, grants and acceptance remain owner-only. Completed tasks do not constitute sprint acceptance. Preserve before/after state bytes and append a linked update record under the evidence root. No producer can assign its own independent acceptance."
+      },
+      "expiry_stage": "SP2"
+    }
+  ],
+  "auto_rerun": {
+    "enabled": true,
+    "binary": "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/.toolchains/go1.26.2/bin/go",
+    "binary_sha256": "1a0f01bdb35c622c78bdc49f26f85dda53f9d7955f453f63c4c023b0dc7c754d",
+    "subcommands": [
+      "test",
+      "vet"
+    ],
+    "roots": [
+      "build",
+      "evidence"
+    ],
+    "environment": {
+      "GOMODCACHE": "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/.cache/gomod",
+      "GOCACHE": "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/.cache/gobuild",
+      "GOPATH": "/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m/build/.cache/gopath",
+      "GOMAXPROCS": "8",
+      "CGO_ENABLED": "1",
+      "CC": "/usr/bin/gcc"
+    },
+    "timeout_seconds": 7200,
+    "max_reruns": 5
+  }
+}

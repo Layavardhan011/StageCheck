@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+*.whl
+.pytest_cache/
+.coverage
+htmlcov/
+.stagecheck-init.lock
+.stagecheck.lock

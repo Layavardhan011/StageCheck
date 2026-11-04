@@ -1,0 +1,105 @@
+{
+  "enabled": false,
+  "binary": null,
+  "budget_usd": null,
+  "timeout_seconds": null,
+  "agents": [
+    {
+      "id": "claim_support",
+      "instruction": "claim_support.md",
+      "model": null,
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob"
+      ],
+      "depths": [
+        "docs",
+        "code",
+        "sensitive"
+      ]
+    },
+    {
+      "id": "upstream_reuse",
+      "instruction": "upstream_reuse.md",
+      "model": null,
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob"
+      ],
+      "depths": [
+        "code",
+        "sensitive"
+      ]
+    },
+    {
+      "id": "blast_radius",
+      "instruction": "blast_radius.md",
+      "model": null,
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob"
+      ],
+      "depths": [
+        "code",
+        "sensitive"
+      ]
+    },
+    {
+      "id": "test_adequacy",
+      "instruction": "test_adequacy.md",
+      "model": null,
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob"
+      ],
+      "depths": [
+        "code",
+        "sensitive"
+      ]
+    },
+    {
+      "id": "independent_rerun",
+      "instruction": "independent_rerun.md",
+      "model": null,
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob"
+      ],
+      "depths": [
+        "sensitive"
+      ]
+    },
+    {
+      "id": "failure_class",
+      "instruction": "failure_class.md",
+      "model": null,
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob"
+      ],
+      "depths": [
+        "failure"
+      ]
+    },
+    {
+      "id": "eval_curator",
+      "instruction": "eval_curator.md",
+      "model": null,
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob"
+      ],
+      "depths": [
+        "offline"
+      ]
+    }
+  ],
+  "orchestrator_instruction": "orchestrator.md"
+}
