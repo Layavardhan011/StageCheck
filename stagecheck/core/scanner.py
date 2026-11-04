@@ -11,10 +11,22 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from stagecheck.checks.base import Defect
+
+
+class ScannerStatus(str, Enum):
+    """Explicit status model for secret scanner execution (Spec 08, 09, 14, SEC-L2)."""
+
+    PASS = "PASS"
+    FINDINGS = "FINDINGS"
+    SCANNER_UNAVAILABLE = "SCANNER_UNAVAILABLE"
+    SCANNER_ERROR = "SCANNER_ERROR"
+    SCANNER_TIMEOUT = "SCANNER_TIMEOUT"
+    INVALID_SCANNER_OUTPUT = "INVALID_SCANNER_OUTPUT"
 
 
 @dataclass
@@ -23,6 +35,7 @@ class ScanExecutionResult:
 
     is_clear: bool
     defects: List[Defect]
+    status: ScannerStatus = ScannerStatus.PASS
     stdout: str = ""
     stderr: str = ""
     returncode: int = 0
@@ -170,7 +183,15 @@ class SecretScanner:
         # 1. Preflight binary check
         is_valid, binary_defects = self.verify_scanner_binary(stage=stage)
         if not is_valid:
-            # Map preflight defects to secrets stage defect IDs
+            status = ScannerStatus.SCANNER_UNAVAILABLE
+            for d in binary_defects:
+                if "output_malformed" in d.defect_id:
+                    status = ScannerStatus.INVALID_SCANNER_OUTPUT
+                elif "timeout" in d.defect_id:
+                    status = ScannerStatus.SCANNER_TIMEOUT
+                elif "execution_failed" in d.defect_id:
+                    status = ScannerStatus.SCANNER_ERROR
+
             mapped_defects = [
                 Defect(
                     defect_id=d.defect_id.replace("preflight.gitleaks_", "secrets.scanner_"),
@@ -182,7 +203,7 @@ class SecretScanner:
                 )
                 for d in binary_defects
             ]
-            return ScanExecutionResult(is_clear=False, defects=mapped_defects)
+            return ScanExecutionResult(is_clear=False, defects=mapped_defects, status=status)
 
         binary = self.resolve_binary()
         cmd = [
@@ -221,6 +242,7 @@ class SecretScanner:
                             repo=repo_name,
                         )
                     ],
+                    status=ScannerStatus.FINDINGS,
                     stdout=res.stdout,
                     stderr=res.stderr,
                     returncode=res.returncode,
@@ -231,6 +253,7 @@ class SecretScanner:
                 return ScanExecutionResult(
                     is_clear=True,
                     defects=[],
+                    status=ScannerStatus.PASS,
                     stdout=res.stdout,
                     stderr=res.stderr,
                     returncode=0,
@@ -249,6 +272,7 @@ class SecretScanner:
                         repo=repo_name,
                     )
                 ],
+                status=ScannerStatus.SCANNER_ERROR,
                 stdout=res.stdout,
                 stderr=res.stderr,
                 returncode=res.returncode,
@@ -267,6 +291,7 @@ class SecretScanner:
                         repo=repo_name,
                     )
                 ],
+                status=ScannerStatus.SCANNER_TIMEOUT,
             )
         except PermissionError as err:
             return ScanExecutionResult(
@@ -281,6 +306,7 @@ class SecretScanner:
                         repo=repo_name,
                     )
                 ],
+                status=ScannerStatus.SCANNER_UNAVAILABLE,
             )
         except OSError as err:
             return ScanExecutionResult(
@@ -295,6 +321,7 @@ class SecretScanner:
                         repo=repo_name,
                     )
                 ],
+                status=ScannerStatus.SCANNER_UNAVAILABLE,
             )
 
     def scan_staged_changes(
@@ -306,6 +333,15 @@ class SecretScanner:
         """Scan staged changes before commit authorization (Spec 14 / SEC-M1)."""
         is_valid, binary_defects = self.verify_scanner_binary(stage="pre_commit")
         if not is_valid:
+            status = ScannerStatus.SCANNER_UNAVAILABLE
+            for d in binary_defects:
+                if "output_malformed" in d.defect_id:
+                    status = ScannerStatus.INVALID_SCANNER_OUTPUT
+                elif "timeout" in d.defect_id:
+                    status = ScannerStatus.SCANNER_TIMEOUT
+                elif "execution_failed" in d.defect_id:
+                    status = ScannerStatus.SCANNER_ERROR
+
             mapped_defects = [
                 Defect(
                     defect_id=d.defect_id.replace("preflight.gitleaks_", "pre_commit.scanner_"),
@@ -317,7 +353,7 @@ class SecretScanner:
                 )
                 for d in binary_defects
             ]
-            return ScanExecutionResult(is_clear=False, defects=mapped_defects)
+            return ScanExecutionResult(is_clear=False, defects=mapped_defects, status=status)
 
         binary = self.resolve_binary()
         cmd = [
@@ -352,12 +388,13 @@ class SecretScanner:
                             repo=repo_name,
                         )
                     ],
+                    status=ScannerStatus.FINDINGS,
                     stdout=res.stdout,
                     stderr=res.stderr,
                     returncode=1,
                 )
             if res.returncode == 0:
-                return ScanExecutionResult(is_clear=True, defects=[], stdout=res.stdout, stderr=res.stderr)
+                return ScanExecutionResult(is_clear=True, defects=[], status=ScannerStatus.PASS, stdout=res.stdout, stderr=res.stderr)
 
             return ScanExecutionResult(
                 is_clear=False,
@@ -371,6 +408,22 @@ class SecretScanner:
                         repo=repo_name,
                     )
                 ],
+                status=ScannerStatus.SCANNER_ERROR,
+            )
+        except subprocess.TimeoutExpired:
+            return ScanExecutionResult(
+                is_clear=False,
+                defects=[
+                    Defect(
+                        defect_id="pre_commit.scanner_timeout",
+                        message="Pre-commit staged secret scan timed out.",
+                        stage="pre_commit",
+                        severity="CRITICAL",
+                        blocking=True,
+                        repo=repo_name,
+                    )
+                ],
+                status=ScannerStatus.SCANNER_TIMEOUT,
             )
         except Exception as err:
             return ScanExecutionResult(
@@ -385,5 +438,6 @@ class SecretScanner:
                         repo=repo_name,
                     )
                 ],
+                status=ScannerStatus.SCANNER_ERROR,
             )
 

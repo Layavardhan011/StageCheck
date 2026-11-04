@@ -8,23 +8,24 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from stagecheck.core.scanner import SecretScanner
+from stagecheck.core.scanner import ScannerStatus, SecretScanner
 
 
 class TestSecretScannerFailClosed(unittest.TestCase):
-    """Test all 9 scanner operational conditions fail closed."""
+    """Test all 9 scanner operational conditions fail closed with explicit status."""
 
     def setUp(self):
         self.scanner = SecretScanner()
         self.dummy_repo = Path("/tmp/dummy_repo")
 
     def test_condition_1_scanner_missing(self):
-        """Condition 1: Scanner missing in PATH -> Blocking finding."""
+        """Condition 1: Scanner missing in PATH -> Blocking finding, SCANNER_UNAVAILABLE."""
         with patch.object(self.scanner, "resolve_binary", return_value=None):
             res = self.scanner.scan_commit_range(
                 self.dummy_repo, "HEAD~1", "HEAD", repo_name="backend"
             )
             self.assertFalse(res.is_clear)
+            self.assertEqual(res.status, ScannerStatus.SCANNER_UNAVAILABLE)
             self.assertTrue(any(d.defect_id == "secrets.scanner_missing" and d.blocking for d in res.defects))
 
     def test_condition_2_scanner_version_mismatch(self):
@@ -38,6 +39,7 @@ class TestSecretScannerFailClosed(unittest.TestCase):
                         self.dummy_repo, "HEAD~1", "HEAD", repo_name="backend"
                     )
                     self.assertFalse(res.is_clear)
+                    self.assertEqual(res.status, ScannerStatus.SCANNER_UNAVAILABLE)
                     self.assertTrue(any("version_incompatible" in d.defect_id and d.blocking for d in res.defects))
 
     def test_condition_3_scanner_cannot_execute(self):
@@ -49,6 +51,7 @@ class TestSecretScannerFailClosed(unittest.TestCase):
                         self.dummy_repo, "HEAD~1", "HEAD", repo_name="backend"
                     )
                     self.assertFalse(res.is_clear)
+                    self.assertEqual(res.status, ScannerStatus.SCANNER_UNAVAILABLE)
                     self.assertTrue(any("cannot_execute" in d.defect_id and d.blocking for d in res.defects))
 
     def test_condition_4_permission_denied(self):
@@ -59,6 +62,7 @@ class TestSecretScannerFailClosed(unittest.TestCase):
                     self.dummy_repo, "HEAD~1", "HEAD", repo_name="backend"
                 )
                 self.assertFalse(res.is_clear)
+                self.assertEqual(res.status, ScannerStatus.SCANNER_UNAVAILABLE)
                 self.assertTrue(any("permission_denied" in d.defect_id and d.blocking for d in res.defects))
 
     def test_condition_5_scanner_timeout(self):
@@ -71,6 +75,7 @@ class TestSecretScannerFailClosed(unittest.TestCase):
                         self.dummy_repo, "HEAD~1", "HEAD", repo_name="backend"
                     )
                     self.assertFalse(res.is_clear)
+                    self.assertEqual(res.status, ScannerStatus.SCANNER_TIMEOUT)
                     self.assertTrue(any("timeout" in d.defect_id and d.blocking for d in res.defects))
 
     def test_condition_6_scanner_exits_unexpectedly(self):
@@ -84,6 +89,7 @@ class TestSecretScannerFailClosed(unittest.TestCase):
                         self.dummy_repo, "HEAD~1", "HEAD", repo_name="backend"
                     )
                     self.assertFalse(res.is_clear)
+                    self.assertEqual(res.status, ScannerStatus.SCANNER_ERROR)
                     self.assertTrue(any("unexpected_exit" in d.defect_id and d.blocking for d in res.defects))
 
     def test_condition_7_secret_detected(self):
@@ -97,6 +103,7 @@ class TestSecretScannerFailClosed(unittest.TestCase):
                         self.dummy_repo, "HEAD~1", "HEAD", repo_name="backend"
                     )
                     self.assertFalse(res.is_clear)
+                    self.assertEqual(res.status, ScannerStatus.FINDINGS)
                     self.assertTrue(any(d.defect_id == "secrets.detected_credential" and d.blocking for d in res.defects))
 
     def test_condition_8_clean_scan_succeeds(self):
@@ -110,6 +117,7 @@ class TestSecretScannerFailClosed(unittest.TestCase):
                         self.dummy_repo, "HEAD~1", "HEAD", repo_name="backend"
                     )
                     self.assertTrue(res.is_clear)
+                    self.assertEqual(res.status, ScannerStatus.PASS)
                     self.assertEqual(len(res.defects), 0)
 
     def test_condition_9_scanner_output_malformed(self):
@@ -122,6 +130,7 @@ class TestSecretScannerFailClosed(unittest.TestCase):
                         self.dummy_repo, "HEAD~1", "HEAD", repo_name="backend"
                     )
                     self.assertFalse(res.is_clear)
+                    self.assertEqual(res.status, ScannerStatus.INVALID_SCANNER_OUTPUT)
                     self.assertTrue(any("output_malformed" in d.defect_id and d.blocking for d in res.defects))
 
 
