@@ -1,0 +1,34 @@
+{
+  "approved": false,
+  "default": "code",
+  "rules": [
+    {
+      "pattern": "*.md",
+      "depth": "docs"
+    },
+    {
+      "pattern": "*.go",
+      "depth": "code"
+    },
+    {
+      "pattern": "*.proto",
+      "depth": "sensitive"
+    },
+    {
+      "pattern": "*/gas*",
+      "depth": "sensitive"
+    },
+    {
+      "pattern": "*/sign*",
+      "depth": "sensitive"
+    },
+    {
+      "pattern": "*/storage*",
+      "depth": "sensitive"
+    },
+    {
+      "pattern": "*/consensus/*",
+      "depth": "sensitive"
+    }
+  ]
+}

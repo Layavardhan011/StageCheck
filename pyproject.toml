@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stagecheck"
+version = "1.0.0"
+description = "Enterprise AI Software Delivery Governance, Dual-Agent Verification & Multi-Repository Audit Harness"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [
+    { name = "StageCheck Engineering Team" }
+]
+keywords = ["governance", "ai-agents", "verification", "multi-repo", "audit", "security"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Security",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "jsonschema>=4.0.0",
+]
+
+[project.scripts]
+stagecheck = "stagecheck.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["stagecheck*"]
+
+[tool.setuptools.package-data]
+stagecheck = [
+    "schemas/assets/*.json",
+    "config/defaults/*.json",
+]
+

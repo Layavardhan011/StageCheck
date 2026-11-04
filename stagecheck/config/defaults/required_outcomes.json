@@ -1,0 +1,198 @@
+{
+  "preflight.bound_hash": {
+    "clause": "\u00a73",
+    "required_outcome": "Every bound identity must match current bytes."
+  },
+  "preflight.instructions_differ": {
+    "clause": "\u00a76",
+    "required_outcome": "All installed instruction copies must be byte-identical."
+  },
+  "preflight.unlisted_file": {
+    "clause": "\u00a76",
+    "required_outcome": "Every tool file must be listed in MANIFEST.sha256."
+  },
+  "preflight.symlink": {
+    "clause": "\u00a712",
+    "required_outcome": "Tool and control paths must contain no unexpected symlink."
+  },
+  "preflight.reused_hash": {
+    "clause": "\u00a75",
+    "required_outcome": "A reused tool must match its manifest identity before execution."
+  },
+  "preflight.state_history": {
+    "clause": "\u00a73",
+    "required_outcome": "The protected state and complete linked factual-update history must resolve."
+  },
+  "preflight.agent_mapping": {
+    "clause": "\u00a76",
+    "required_outcome": "Every agent instruction file must have exactly one matching configuration entry."
+  },
+  "preflight.binding_mismatch": {
+    "clause": "\u00a73",
+    "required_outcome": "Only an owner binding of the current manifest may enable blocking results."
+  },
+  "scope.excluded": {
+    "clause": "\u00a73",
+    "required_outcome": "Every read, cited and changed path must resolve inside the permitted allowlist."
+  },
+  "scope.draft_approved": {
+    "clause": "\u00a73",
+    "required_outcome": "Only matching files in START_MANIFEST.md may be cited as approved."
+  },
+  "scope.package_span": {
+    "clause": "\u00a710.5",
+    "required_outcome": "Changes must stay in one package surface or cite an explicit wider Plan or grant boundary."
+  },
+  "citation.missing_file": {
+    "clause": "\u00a74",
+    "required_outcome": "The cited file must exist in an allowed location."
+  },
+  "citation.hash_mismatch": {
+    "clause": "\u00a74",
+    "required_outcome": "The citation hash must match the current cited bytes."
+  },
+  "citation.line_range": {
+    "clause": "\u00a74",
+    "required_outcome": "The cited line range must exist and be ordered."
+  },
+  "citation.quote_not_found": {
+    "clause": "\u00a74",
+    "required_outcome": "The exact nonempty quote must occur within the cited line range."
+  },
+  "citation.upstream_identity": {
+    "clause": "\u00a74",
+    "required_outcome": "The cited upstream repository, pinned commit, path, lines and file hash must resolve."
+  },
+  "citation.command_mismatch": {
+    "clause": "\u00a74",
+    "required_outcome": "A retained execution record and raw outputs must reproduce the stated command, exit and hashes."
+  },
+  "report.headers": {
+    "clause": "\u00a77",
+    "required_outcome": "The first three non-empty report lines must open with NOT DONE:, Full Blast Radius Check:, then Enforcement Self-Check:."
+  },
+  "report.table": {
+    "clause": "\u00a77",
+    "required_outcome": "The eleven-group engineering inventory must stay in the retained record, not the chat report."
+  },
+  "report.label": {
+    "clause": "\u00a74",
+    "required_outcome": "Every material claim must carry exactly one permitted evidence label."
+  },
+  "report.inference": {
+    "clause": "\u00a74",
+    "required_outcome": "An inference may not establish a decision, requirement or test expectation."
+  },
+  "report.completion": {
+    "clause": "\u00a74",
+    "required_outcome": "Completion wording must have explicit scope and proof with no unchecked applicable group."
+  },
+  "report.counts": {
+    "clause": "\u00a77",
+    "required_outcome": "Reported coverage counts must equal counts computed from the inventory."
+  },
+  "report.groups": {
+    "clause": "\u00a710.4",
+    "required_outcome": "Engineering coverage must enumerate every group once with concrete items or a supported exclusion."
+  },
+  "report.claim_missing": {
+    "clause": "\u00a74",
+    "required_outcome": "Each machine-readable claim must appear in the submitted report."
+  },
+  "authority.remote": {
+    "clause": "\u00a75",
+    "required_outcome": "Every push URL must equal the literal DISABLED or be an owner-approved xorewa repository target."
+  },
+  "authority.upstream_endpoint": {
+    "clause": "\u00a75",
+    "required_outcome": "No recorded operation may contact a MultiversX network, gateway or public API."
+  },
+  "authority.grant": {
+    "clause": "\u00a79",
+    "required_outcome": "Every consequential operation must cite an applicable, unexpired owner grant."
+  },
+  "secret.pem": {
+    "clause": "\u00a712",
+    "required_outcome": "Changed content must contain no private-key PEM block."
+  },
+  "secret.keystore": {
+    "clause": "\u00a712",
+    "required_outcome": "Changed content must contain no credential-bearing keystore structure."
+  },
+  "secret.assignment": {
+    "clause": "\u00a712",
+    "required_outcome": "Changed content must contain no non-placeholder key or credential assignment."
+  },
+  "secret.filename": {
+    "clause": "\u00a712",
+    "required_outcome": "A denied credential filename must not enter the change."
+  },
+  "qual.test_name": {
+    "clause": "\u00a711",
+    "required_outcome": "TestQual functions must live only in qual_*_test.go files."
+  },
+  "qual.file_name": {
+    "clause": "\u00a711",
+    "required_outcome": "Qualification Go files must use qual_*_test.go and TestQual entry points."
+  },
+  "qual.driver": {
+    "clause": "\u00a711",
+    "required_outcome": "Standalone qualification drivers must remain outside product modules."
+  },
+  "rerun.exit": {
+    "clause": "\u00a77",
+    "required_outcome": "A smoke-tested approved rerun must reproduce the claimed exit status."
+  },
+  "rerun.output": {
+    "clause": "\u00a77",
+    "required_outcome": "A rerun must reproduce the exact retained stdout and stderr hashes."
+  },
+  "rerun.toolchain": {
+    "clause": "\u00a77",
+    "required_outcome": "Go commands must use the locked binary with GOTOOLCHAIN=local."
+  },
+  "agent.unsupported": {
+    "clause": "\u00a74",
+    "required_outcome": "A finding must include currently resolvable evidence supporting its criterion."
+  },
+  "orchestrate.history": {
+    "clause": "\u00a78",
+    "required_outcome": "Prior verdict and report identities must match the retained iteration chain."
+  },
+  "orchestrate.recurrence": {
+    "clause": "\u00a78",
+    "required_outcome": "A reappeared defect requires owner disposition."
+  },
+  "orchestrate.no_progress": {
+    "clause": "\u00a78",
+    "required_outcome": "An unchanged nonempty blocking defect set requires owner disposition."
+  },
+  "orchestrate.repair_bound": {
+    "clause": "\u00a78",
+    "required_outcome": "A repair bound may not be exceeded."
+  },
+  "rerun.unselected": {
+    "clause": "\u00a77",
+    "required_outcome": "A cited command without an owner-selected rerun is reported without execution or loss of other check results."
+  },
+  "report.unbacked_token": {
+    "clause": "\u00a74",
+    "required_outcome": "Every response fact token must resolve to its mechanically valid claims evidence."
+  },
+  "carry.missing_section": {
+    "clause": "\u00a710.2",
+    "required_outcome": "A Markdown delivery or audit record must contain a CARRY_FORWARD section listing every obligation it finds with its receiving row, owner, or none (Addendum 14 \u00a72; audit aspect C1)."
+  },
+  "carry.unrouted": {
+    "clause": "\u00a710.2",
+    "required_outcome": "Every CARRY_FORWARD entry must name the receiving row (SP2-xx, Txx), the owner, or none."
+  },
+  "rerun.outcome": {
+    "clause": "\u00a77",
+    "required_outcome": "An automatic rerun of a cited go test must reproduce every cited per-test outcome (pass, fail or skip) from go test -json."
+  },
+  "carry.not_landed": {
+    "clause": "\u00a710.2",
+    "required_outcome": "A CARRY_FORWARD entry that hands an obligation to a tracker row must quote text now present in that row, or state that the row does not hold it and request an owner tracker carry (Addendum 15 item 2; audit aspect C1)."
+  }
+}

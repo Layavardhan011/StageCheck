@@ -1,0 +1,980 @@
+{
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "check"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "defects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "defect_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "check_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1
+              },
+              "mode": {
+                "enum": [
+                  "blocking",
+                  "report_only"
+                ]
+              },
+              "clause": {
+                "type": "string",
+                "minLength": 1
+              },
+              "claim_id": {
+                "type": "string"
+              },
+              "location": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "lines": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "minItems": 2,
+                    "maxItems": 2
+                  }
+                },
+                "required": [
+                  "path",
+                  "lines"
+                ],
+                "additionalProperties": false
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "enum": [
+                            "document",
+                            "file"
+                          ]
+                        },
+                        "path": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "lines": {
+                          "type": "array",
+                          "items": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "minItems": 2,
+                          "maxItems": 2
+                        },
+                        "quote": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "approved": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "path",
+                        "sha256",
+                        "lines",
+                        "quote"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "command"
+                        },
+                        "record": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "record_sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "argv": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "minItems": 1
+                        },
+                        "cwd": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "exit_status": {
+                          "type": "integer"
+                        },
+                        "stdout_sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "stderr_sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "record",
+                        "record_sha256",
+                        "argv",
+                        "cwd",
+                        "exit_status",
+                        "stdout_sha256",
+                        "stderr_sha256"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "minItems": 1
+              },
+              "required_outcome": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "enum": [
+                  "new",
+                  "repeated",
+                  "reappeared"
+                ]
+              }
+            },
+            "required": [
+              "defect_id",
+              "check_id",
+              "source",
+              "mode",
+              "clause",
+              "claim_id",
+              "location",
+              "evidence",
+              "required_outcome",
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "not_run": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "unbound": {
+          "type": "boolean"
+        },
+        "escalate": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "defects",
+        "errors",
+        "not_run",
+        "files",
+        "commands",
+        "unbound",
+        "escalate"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "agent"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "verdict": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "UNKNOWN"
+          ]
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "check_id": {
+                "const": "agent.unsupported"
+              },
+              "claim_id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "enum": [
+                        "document",
+                        "file"
+                      ]
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "lines": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "minItems": 2,
+                      "maxItems": 2
+                    },
+                    "quote": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "approved": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "path",
+                    "sha256",
+                    "lines",
+                    "quote"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 1
+              }
+            },
+            "required": [
+              "check_id",
+              "claim_id",
+              "text",
+              "evidence"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "not_rerun": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "inventory": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "group": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 11
+              },
+              "label": {
+                "enum": [
+                  "checked",
+                  "not_checked",
+                  "not_applicable"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "required": [
+              "group",
+              "label",
+              "reason",
+              "items"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "verdict",
+        "findings",
+        "not_rerun"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "verdict"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "iteration": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "contract_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "checked_head": {
+          "type": "string",
+          "minLength": 1
+        },
+        "quality": {
+          "type": "object",
+          "properties": {
+            "policy_sha256": {"oneOf": [{"type": "string", "pattern": "^[0-9a-f]{64}$"}, {"const": null}]},
+            "record_files": {"type": "object"},
+            "checks": {"type": "object"},
+            "blocking_by_measurement": {"type": "array", "items": {"type": "string"}},
+            "blocking_by_override": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["policy_sha256", "record_files", "checks"],
+          "additionalProperties": false
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "bound": {
+          "type": "boolean"
+        },
+        "depth": {
+          "enum": [
+            "docs",
+            "code",
+            "sensitive"
+          ]
+        },
+        "input_hashes": {
+          "type": "object"
+        },
+        "previous": {
+          "type": "object"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "check"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "version": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "defects": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "defect_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "check_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "source": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "mode": {
+                      "enum": [
+                        "blocking",
+                        "report_only"
+                      ]
+                    },
+                    "clause": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "claim_id": {
+                      "type": "string"
+                    },
+                    "location": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "lines": {
+                          "type": "array",
+                          "items": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "minItems": 2,
+                          "maxItems": 2
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "lines"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "evidence": {
+                      "type": "array",
+                      "items": {
+                        "oneOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "enum": [
+                                  "document",
+                                  "file"
+                                ]
+                              },
+                              "path": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "sha256": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$"
+                              },
+                              "lines": {
+                                "type": "array",
+                                "items": {
+                                  "type": "integer",
+                                  "minimum": 1
+                                },
+                                "minItems": 2,
+                                "maxItems": 2
+                              },
+                              "quote": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "approved": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "path",
+                              "sha256",
+                              "lines",
+                              "quote"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "const": "command"
+                              },
+                              "record": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "record_sha256": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$"
+                              },
+                              "argv": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "minItems": 1
+                              },
+                              "cwd": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "exit_status": {
+                                "type": "integer"
+                              },
+                              "stdout_sha256": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$"
+                              },
+                              "stderr_sha256": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$"
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "record",
+                              "record_sha256",
+                              "argv",
+                              "cwd",
+                              "exit_status",
+                              "stdout_sha256",
+                              "stderr_sha256"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ]
+                      },
+                      "minItems": 1
+                    },
+                    "required_outcome": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "enum": [
+                        "new",
+                        "repeated",
+                        "reappeared"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "defect_id",
+                    "check_id",
+                    "source",
+                    "mode",
+                    "clause",
+                    "claim_id",
+                    "location",
+                    "evidence",
+                    "required_outcome",
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "errors": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "not_run": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "sha256"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "commands": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "unbound": {
+                "type": "boolean"
+              },
+              "escalate": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "defects",
+              "errors",
+              "not_run",
+              "files",
+              "commands",
+              "unbound",
+              "escalate"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "defects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "defect_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "check_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1
+              },
+              "mode": {
+                "enum": [
+                  "blocking",
+                  "report_only"
+                ]
+              },
+              "clause": {
+                "type": "string",
+                "minLength": 1
+              },
+              "claim_id": {
+                "type": "string"
+              },
+              "location": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "lines": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "minItems": 2,
+                    "maxItems": 2
+                  }
+                },
+                "required": [
+                  "path",
+                  "lines"
+                ],
+                "additionalProperties": false
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "enum": [
+                            "document",
+                            "file"
+                          ]
+                        },
+                        "path": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "lines": {
+                          "type": "array",
+                          "items": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "minItems": 2,
+                          "maxItems": 2
+                        },
+                        "quote": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "approved": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "path",
+                        "sha256",
+                        "lines",
+                        "quote"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "command"
+                        },
+                        "record": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "record_sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "argv": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "minItems": 1
+                        },
+                        "cwd": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "exit_status": {
+                          "type": "integer"
+                        },
+                        "stdout_sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "stderr_sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "record",
+                        "record_sha256",
+                        "argv",
+                        "cwd",
+                        "exit_status",
+                        "stdout_sha256",
+                        "stderr_sha256"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "minItems": 1
+              },
+              "required_outcome": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "enum": [
+                  "new",
+                  "repeated",
+                  "reappeared"
+                ]
+              }
+            },
+            "required": [
+              "defect_id",
+              "check_id",
+              "source",
+              "mode",
+              "clause",
+              "claim_id",
+              "location",
+              "evidence",
+              "required_outcome",
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "not_run": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "result": {
+          "enum": [
+            "CLEAR",
+            "BLOCKED",
+            "ESCALATE",
+            "TOOL_ERROR"
+          ]
+        },
+        "questions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "blocking": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "report_only": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "not_run": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "blocking",
+            "report_only",
+            "not_run"
+          ],
+          "additionalProperties": false
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "status_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "response": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "task_id",
+        "iteration",
+        "contract_sha256",
+        "checked_head",
+        "manifest_sha256",
+        "bound",
+        "depth",
+        "input_hashes",
+        "previous",
+        "checks",
+        "agents",
+        "defects",
+        "not_run",
+        "errors",
+        "result",
+        "questions",
+        "counts"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}
