@@ -123,21 +123,21 @@ StageCheck is developed across 5 modular phases (25 total tasks):
 * **P2-T4:** Root `AGENTS.md` rendering and SHA-256 trust manifest calculation.
 * **P2-T5:** Bootstrap-locked workspace initialization (`.stagecheck-init.lock`) and path containment validation.
 
-### Phase 3 — Agent Protocol, Scope, Commands & Multi-Repository Verification
+### Phase 3 — Agent Protocol, Scope, Commands & Multi-Repository Verification `[COMPLETED]`
 * **P3-T1:** Provider-neutral agent registration and evidence directory routing.
 * **P3-T2:** Prompt verification (`stagecheck verify-prompt`) and declared-scope validation gate.
 * **P3-T3:** Task branch governance (`fincore/<task_id>`) and multi-repo baseline binding.
 * **P3-T4:** Tokenized command runner with argument whitelisting and process group cleanup.
 * **P3-T5:** Phase 2A cooperative pre-commit review handshake (`review-precommit`, `approve-review`).
 
-### Phase 4 — Sentinel, Audit Lifecycle, Evidence & Escalation
-* **P4-T1:** Continuous event-driven Linux Sentinel daemon (observer / watchdog).
-* **P4-T2:** Independent 9-stage verification suite with multi-repo aggregation.
-* **P4-T3:** SHA-256 evidence manifest (`EVIDENCE_MANIFEST.json`) and deterministic task seals (`seal.json`).
-* **P4-T4:** 3-attempt circuit breaker, defect progression ledger, and escalation reporting.
-* **P4-T5:** Human disposition CLI (`stagecheck disposition add`) and notification integration.
+### Phase 4 — Sentinel, Audit Lifecycle, Evidence & Escalation `[COMPLETED]`
+* **P4-T1:** Continuous event-driven Linux Sentinel daemon (`stagecheck sentinel start|stop|status|logs`).
+* **P4-T2:** Independent 9-stage verification suite with multi-repo aggregation (`stagecheck audit`).
+* **P4-T3:** SHA-256 evidence manifest (`EVIDENCE_MANIFEST.json`), deterministic task seals (`seal.json`), and immutable Merkle attempt chaining.
+* **P4-T4:** 3-attempt circuit breaker, defect progression ledger, and escalation reporting (`escalation_report.md`).
+* **P4-T5:** Human disposition CLI (`stagecheck disposition add`, `stagecheck resume`) and notification integration.
 
-### Phase 5 — Portability, Hardening, Integration & Release Readiness
+### Phase 5 — Portability, Hardening, Integration & Release Readiness `[UPCOMING]`
 * **P5-T1:** Synthetic evaluation fixture factory replacing external dependencies.
 * **P5-T2:** Comprehensive hardcoded path audit and portability hardening.
 * **P5-T3:** End-to-end lifecycle verification and adversarial attack regressions.
