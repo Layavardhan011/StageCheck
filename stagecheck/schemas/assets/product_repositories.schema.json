@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StageCheck Product Repositories Registry Schema v2",
+  "type": "object",
+  "required": ["schema_version", "repositories"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["2.0"]
+    },
+    "repositories": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["path", "default_branch", "baseline_head"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^repos/[a-zA-Z0-9._-]+$"
+          },
+          "default_branch": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9._/-]+$"
+          },
+          "baseline_head": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          }
+        }
+      }
+    }
+  }
+}

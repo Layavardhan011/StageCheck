@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StageCheck Control Descriptors Schemas",
+  "definitions": {
+    "stagecheck_root": {
+      "type": "object",
+      "required": ["stagecheck_root", "manifest_sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "stagecheck_root": {"type": "string"},
+        "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "evidence_root": {
+      "type": "object",
+      "required": ["evidence_root"],
+      "additionalProperties": false,
+      "properties": {
+        "evidence_root": {"type": "string"}
+      }
+    },
+    "qualification_root": {
+      "type": "object",
+      "required": ["qualification_root"],
+      "additionalProperties": false,
+      "properties": {
+        "qualification_root": {"type": "string"}
+      }
+    },
+    "dispositions": {
+      "type": "object",
+      "required": ["schema_version", "dispositions"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {"type": "string", "enum": ["2.0"]},
+        "dispositions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["task_id", "defect_id", "rationale", "authorized_by", "timestamp"],
+            "additionalProperties": false,
+            "properties": {
+              "task_id": {"type": "string"},
+              "defect_id": {"type": "string"},
+              "rationale": {"type": "string"},
+              "authorized_by": {"type": "string"},
+              "timestamp": {"type": "string"}
+            }
+          }
+        }
+      }
+    }
+  }
+}

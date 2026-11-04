@@ -43,9 +43,9 @@ class TestSmoke(unittest.TestCase):
         """Verify running main() with subcommands."""
         buf = io.StringIO()
         with redirect_stdout(buf):
-            ret = main(["init", "--repos", "payment-service"])
+            ret = main(["start", "--task", "task-101"])
         self.assertEqual(ret, 0)
-        self.assertIn("Dispatched subcommand 'init'", buf.getvalue())
+        self.assertIn("Dispatched subcommand 'start'", buf.getvalue())
 
     def test_embedded_schema_assets(self) -> None:
         """Verify schema asset discovery."""

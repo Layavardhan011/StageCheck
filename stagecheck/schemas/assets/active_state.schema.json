@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StageCheck Active State Governance Schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "task_id",
+    "phase",
+    "attempt_index",
+    "repair_index",
+    "max_total_attempts",
+    "max_repairs",
+    "circuit_breaker_tripped",
+    "target_repositories"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["2.0"]
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^task-[a-zA-Z0-9_-]+$"
+    },
+    "phase": {
+      "type": "string",
+      "enum": [
+        "NOT_STARTED",
+        "PHASE_1_PLANNING",
+        "PHASE_1_REPAIR",
+        "PHASE_2A_IMPLEMENTATION",
+        "PHASE_2B_DELIVERY",
+        "PHASE_3_AUDITING",
+        "AWAITING_HUMAN_DISPOSITION",
+        "CIRCUIT_BREAKER_TRIPPED",
+        "COMPLETED"
+      ]
+    },
+    "attempt_index": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4
+    },
+    "repair_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "max_total_attempts": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "max_repairs": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "circuit_breaker_tripped": {
+      "type": "boolean"
+    },
+    "halt_reason": {
+      "type": "string"
+    },
+    "target_repositories": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9._-]+$"
+      }
+    },
+    "resets_authorized": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["timestamp", "authorized_by", "from_attempt", "to_attempt"],
+        "properties": {
+          "timestamp": {"type": "string"},
+          "authorized_by": {"type": "string"},
+          "from_attempt": {"type": "integer"},
+          "to_attempt": {"type": "integer"}
+        }
+      }
+    }
+  }
+}
