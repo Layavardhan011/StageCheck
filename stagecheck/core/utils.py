@@ -172,8 +172,8 @@ def load_json_file(path: Union[str, Path]) -> Any:
 def validate_schema(data: Any, schema: Dict[str, Any]) -> None:
     """Lightweight built-in JSON schema validator for core structures.
 
-    Validates types, required object fields, pattern regexes, and enums.
-    Provides fallback when external jsonschema library is not installed.
+    Validates types, required object fields, pattern regexes, enums,
+    minProperties, minItems, and additionalProperties.
     """
     if not isinstance(schema, dict):
         raise SchemaValidationError("Schema must be a dictionary.")
@@ -183,15 +183,25 @@ def validate_schema(data: Any, schema: Dict[str, Any]) -> None:
         if not isinstance(data, dict):
             raise SchemaValidationError(f"Expected object, got {type(data).__name__}.")
 
+        min_props = schema.get("minProperties")
+        if min_props is not None and len(data) < min_props:
+            raise SchemaValidationError(f"Object has {len(data)} properties, minimum required is {min_props}.")
+
         required = schema.get("required", [])
         for field in required:
             if field not in data:
                 raise SchemaValidationError(f"Missing required property: '{field}'.")
 
         properties = schema.get("properties", {})
-        for prop_name, prop_schema in properties.items():
-            if prop_name in data:
-                validate_schema(data[prop_name], prop_schema)
+        additional_props = schema.get("additionalProperties")
+
+        for key, val in data.items():
+            if key in properties:
+                validate_schema(val, properties[key])
+            elif isinstance(additional_props, dict):
+                validate_schema(val, additional_props)
+            elif additional_props is False:
+                raise SchemaValidationError(f"Unexpected additional property '{key}' not allowed by schema.")
 
     elif expected_type == "string":
         if not isinstance(data, str):
@@ -213,10 +223,16 @@ def validate_schema(data: Any, schema: Dict[str, Any]) -> None:
         minimum = schema.get("minimum")
         if minimum is not None and data < minimum:
             raise SchemaValidationError(f"Integer {data} is less than minimum {minimum}.")
+        maximum = schema.get("maximum")
+        if maximum is not None and data > maximum:
+            raise SchemaValidationError(f"Integer {data} exceeds maximum {maximum}.")
 
     elif expected_type == "array":
         if not isinstance(data, list):
             raise SchemaValidationError(f"Expected array, got {type(data).__name__}.")
+        min_items = schema.get("minItems")
+        if min_items is not None and len(data) < min_items:
+            raise SchemaValidationError(f"Array has {len(data)} items, minimum required is {min_items}.")
         items_schema = schema.get("items")
         if items_schema:
             for idx, item in enumerate(data):
@@ -228,4 +244,5 @@ def validate_schema(data: Any, schema: Dict[str, Any]) -> None:
     elif expected_type == "boolean":
         if not isinstance(data, bool):
             raise SchemaValidationError(f"Expected boolean, got {type(data).__name__}.")
+
 
