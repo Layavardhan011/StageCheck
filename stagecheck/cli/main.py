@@ -81,6 +81,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_disp_add.add_argument("--defect", required=True, help="Defect code.")
     p_disp_add.add_argument("--rationale", required=True, help="Justification rationale.")
 
+    # 10. sentinel
+    p_sentinel = subparsers.add_parser("sentinel", help="Manage background continuous sentinel daemon.")
+    p_sentinel.add_argument("sentinel_action", choices=["start", "stop", "status", "logs"], help="Sentinel action to execute.")
+    p_sentinel.add_argument("--daemon", action="store_true", default=True, help="Run as background daemon (default).")
+    p_sentinel.add_argument("--foreground", action="store_false", dest="daemon", help="Run in foreground.")
+    p_sentinel.add_argument("--workspace", help="Explicit workspace root path.")
+
     return parser
 
 
@@ -129,6 +136,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         return run_approve_review(
             task=args.task,
             attempt=getattr(args, "attempt", 1),
+            workspace=getattr(args, "workspace", None),
+        )
+
+    if args.subcommand == "sentinel":
+        from stagecheck.cli.sentinel_cmd import run_sentinel
+        return run_sentinel(
+            action=args.sentinel_action,
+            daemon=getattr(args, "daemon", True),
             workspace=getattr(args, "workspace", None),
         )
 
