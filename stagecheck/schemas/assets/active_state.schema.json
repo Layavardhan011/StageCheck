@@ -80,6 +80,60 @@
           "to_attempt": {"type": "integer"}
         }
       }
+    },
+    "registered_agents": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "role"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$"
+          },
+          "role": {
+            "type": "string",
+            "enum": ["prompt_and_audit", "code_implementation", "dual_role"]
+          },
+          "instruction": {"type": "string"},
+          "comment": {"type": "string"},
+          "enabled": {"type": "boolean"}
+        }
+      }
+    },
+    "protected": {
+      "type": "object",
+      "properties": {
+        "governance_version": {"type": "integer"},
+        "max_total_attempts": {"type": "integer"},
+        "max_repairs": {"type": "integer"},
+        "circuit_breaker_enabled": {"type": "boolean"},
+        "review_timeout_seconds": {"type": "integer"},
+        "registered_agents": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name", "role"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$"
+              },
+              "role": {
+                "type": "string",
+                "enum": ["prompt_and_audit", "code_implementation", "dual_role"]
+              },
+              "instruction": {"type": "string"},
+              "comment": {"type": "string"},
+              "enabled": {"type": "boolean"}
+            }
+          }
+        }
+      }
     }
   }
 }
+
+

@@ -90,6 +90,22 @@ def build_control_descriptors(
         "max_repairs": 2,
         "circuit_breaker_tripped": False,
         "target_repositories": list(baselines.keys()) if baselines else ["default"],
+        "registered_agents": [
+            {
+                "name": "agent1",
+                "role": "prompt_and_audit",
+                "instruction": "instructions/agent1_prompt_and_audit.md",
+                "comment": "Default prompt architect and auditor",
+                "enabled": True,
+            },
+            {
+                "name": "agent2",
+                "role": "code_implementation",
+                "instruction": "instructions/agent2_code_implementation.md",
+                "comment": "Default code implementer",
+                "enabled": True,
+            },
+        ],
     }
 
     stagecheck_root_content = {
@@ -212,3 +228,4 @@ def scaffold_controls_atomic(
         # Clean up staging directory
         if staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
+

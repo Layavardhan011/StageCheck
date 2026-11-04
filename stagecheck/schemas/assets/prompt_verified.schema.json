@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StageCheck Prompt Verified Record Schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "task_id",
+    "attempt",
+    "prompt_sha256",
+    "scope_sha256",
+    "verified_at",
+    "status"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["2.0"]
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^task-[a-zA-Z0-9_-]+$"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "prompt_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "scope_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "verified_at": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["VERIFIED"]
+    }
+  }
+}
