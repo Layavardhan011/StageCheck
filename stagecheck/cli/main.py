@@ -123,6 +123,22 @@ def main(argv: Optional[List[str]] = None) -> int:
             force=getattr(args, "force", False),
         )
 
+    if args.subcommand == "start":
+        from stagecheck.cli.start_cmd import run_start
+        from stagecheck.core.paths import find_workspace_root
+        ws = getattr(args, "workspace", None)
+        try:
+            ws_root = Path(ws).resolve() if ws else find_workspace_root()
+            if (ws_root / "controls").is_dir():
+                return run_start(
+                    workspace=ws_root,
+                    task=args.task,
+                )
+        except Exception:
+            pass
+        print(f"StageCheck v{stagecheck.__version__}: Dispatched subcommand 'start'")
+        return 0
+
     if args.subcommand == "verify-prompt":
         from stagecheck.cli.prompt_cmd import run_verify_prompt
         return run_verify_prompt(
