@@ -52,66 +52,10 @@ def git_fixture(repo,files):
     return commit
 
 
-def fixture(out, tool_source, contract_source, programme_source):
-    out=out.resolve(strict=True)
-    workspace=out/'workspace';workspace.mkdir()
-    (workspace/'NewArc').mkdir();root=workspace/'NewArc/3m';root.mkdir()
-    for rel in ['controls','RWA','RWA/start','build','upstream','qualification','qualification/reviews','evidence','evidence/state_updates','evidence/claude_audits','evidence/claude_audits/tools','evidence/stagecheck']:
-        (root/rel).mkdir()
-    tool=root/'stagecheck';shutil.copytree(tool_source,tool)
-    # Installation choices must never enable real product or model execution
-    # inside synthetic fixtures. Individual cases supply their own fake grants.
-    (tool/'config/commands.json').write_bytes(encode({'enabled':False,'product_grant':None,'commands':[]}))
-    fixture_agents=load(tool/'config/agents.json')
-    fixture_agents.update(enabled=False,budget_usd=None,timeout_seconds=None)
-    for item in fixture_agents['agents']:
-        item['model']=None
-    (tool/'config/agents.json').write_bytes(encode(fixture_agents))
-    for name in ['verify_manifest.py','verify_state_chain.py']:
-        shutil.copyfile(programme_source/'evidence/claude_audits/tools'/name,root/'evidence/claude_audits/tools'/name)
-    shutil.copyfile(programme_source/'qualification/reviews/capture_sp1_evidence.py',root/'qualification/reviews/capture_sp1_evidence.py')
-    state={k:None for k in ['schema_version','programme','architecture','execution_plan','authority','evidence_root','qualification_root','note','source_lock','current_task']}
-    state.update(status='SP1_NOT_STARTED',completed_tasks=[],evidence_references=[],open_prerequisites=[])
-    protected={k:v for k,v in state.items() if k not in ['status','source_lock','current_task','completed_tasks','evidence_references','open_prerequisites']}
-    protected_hash=digest(json.dumps(protected,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode())
-    files={
-       'controls/DRWA_ACTIVE_STATE.json':encode(state),
-       'controls/OWNER_GRANTS.md':b'# Fixture grants\nExpiry: end of SP1\nPermitted execution: selected fixture commands only.\n',
-       'controls/FAILURE_PREVENTION.md':b'# Fixture register\n',
-       'controls/EVIDENCE_ROOT.json':encode({'root':str(root/'evidence')}),
-       'controls/QUALIFICATION_ROOT.json':encode({'root':str(root/'qualification')}),
-       'controls/PRODUCT_REPOSITORIES.json':encode({'product_root':str(root/'build'),'untouched_upstream_root':str(root/'upstream')}),
-       'RWA/start/RWA_Architecture_v4.2.8.md':b'# Fixture architecture\nSpecification value: accepted\n',
-       'RWA/start/DRWA_Development_and_Decision_Plan.md':b'# Fixture plan\n'}
-    for rel,data in files.items():
-        (root/rel).write_bytes(data)
-    start=root/'RWA/start'
-    (start/'START_MANIFEST.md').write_text('# Fixture manifest\n'+''.join(f'| `{Path(name).name}` | fixture | `{digest(raw)}` |\n' for name,raw in files.items() if name.startswith('RWA/start/')))
-    text=contract_source.read_text()
-    original=bindings(contract_source)
-    text=text.replace(str(original['root'].parent.parent),str(workspace))
-    # Replace each owner identity with an explicitly synthetic fixture identity.
-    for role,bound in original.items():
-        if isinstance(bound,dict):
-            actual=str(bound['path']).replace(str(original['root'].parent.parent),str(workspace))
-            text=text.replace(bound['sha256'],digest(Path(actual).read_bytes()))
-    text=text.replace(original['protected_sha256'],protected_hash)
-    contract=workspace/'contract.txt';contract.write_text(text)
-    copy=workspace/'instruction_fixture.txt';copy.write_text(text)
-    paths=load(tool/'config/paths.json');paths['instruction_copies']=[str(copy)];(tool/'config/paths.json').write_bytes(encode(paths))
-    repo=root/'build/product';head=git_fixture(repo,{'go.mod':b'module fixture\n'})
-    # Git index for synthetic fixtures is initialized without creating commits.
-    command(['git','-C',str(repo),'read-tree','HEAD'],repo)
-    source=repo/'qual_fixture_test.go';source.write_text('package fixture\nfunc TestQualFixture(t *testing.T) {}\n')
-    ev=root/'evidence';record=ev/'record.json';record.write_text('{"scope":"fixture only"}\n')
-    cite={'type':'document','path':str(start/'RWA_Architecture_v4.2.8.md'),'sha256':digest((start/'RWA_Architecture_v4.2.8.md').read_bytes()),'lines':[2,2],'quote':'Specification value: accepted','approved':True}
-    c={'id':'C-001','kind':'observation','text':'Specification value: accepted','scope':'fixture','label':'SOURCE_PROVEN','citations':[cite],'blast_radius':[]}
-    data={'task_id':'fixture','iteration':1,'contract_sha256':digest(contract.read_bytes()),'record':str(record),'record_sha256':digest(record.read_bytes()),'claims':[c]}
-    claim_path=ev/'claims.json';claim_path.write_bytes(encode(data))
-    report=ev/'report.md';report.write_text('NOT DONE: fixture only\nFull Blast Radius Check: fixture source read\nEnforcement Self-Check: Enforcement is manual; fixture only\n\nSpecification value: accepted\n')
-    run={'task_id':'fixture','iteration':1,'tool_root':str(tool),'programme_root':str(root),'contract':str(contract),'repo':str(repo),'base':head,'checked_head':head,'claims':str(claim_path),'report':str(report),'depth':'docs','changed_paths':[str(source)],'operation_records':[],'read_paths':[],'upstream':{},'run_path':str(ev/'run.json')}
-    (ev/'run.json').write_bytes(encode(run));manifest(tool)
-    return run,data,root,tool
+def fixture(out, tool_source=None, contract_source=None, programme_source=None):
+    from fixtures import create_test_fixture
+    fix = create_test_fixture(out, tool_source=tool_source)
+    return fix.run, fix.data, fix.root, fix.tool
 
 
 def carry_record(root,data,text):

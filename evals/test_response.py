@@ -10,15 +10,13 @@ from orchestrate import history_read
 import response_hook as rh
 from unittest.mock import patch
 
-PROGRAMME=Path('/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m')
-CONTRACT=PROGRAMME.parent.parent/'AGENTS.md'
 HEADS='NOT DONE: fixture only\nFull Blast Radius Check: nothing was read or run\nEnforcement Self-Check: manual\n'
 
 class Response(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(prefix='response-test-');self.addCleanup(self.tmp.cleanup)
         self.home=Path(self.tmp.name);self.source=Path(__file__).resolve().parents[1]
-        self.run,self.data,self.root,self.tool=fixture(self.home,self.source,CONTRACT,PROGRAMME)
+        self.run,self.data,self.root,self.tool=fixture(self.home,self.source)
         self.run.update(response=True,repo=None,base='response',checked_head='response',changed_paths=[],dirty=False)
         self.data.pop('record');self.data.pop('record_sha256');self.data['claims']=[]
         Path(self.run['report']).write_text(HEADS);self.save()
@@ -151,7 +149,7 @@ class Hook(unittest.TestCase):
         for rule in self.config['send_back_rules']:
             if rule in ['report.unbacked_token'] or rule.startswith('secret.'):continue
             with self.subTest(rule=rule),tempfile.TemporaryDirectory(prefix='response-rule-') as tmp:
-                run,data,root,tool=fixture(Path(tmp),self.source,CONTRACT,PROGRAMME)
+                run,data,root,tool=fixture(Path(tmp),self.source)
                 run.update(response=True,repo=None,changed_paths=[])
                 if rule=='scope.excluded':
                     p=root/'RWA/previous';p.mkdir();f=p/'x.txt';f.write_text('excluded');run['read_paths']=[str(f)]

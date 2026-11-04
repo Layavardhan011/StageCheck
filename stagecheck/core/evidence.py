@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from stagecheck.core.paths import find_workspace_root
+from stagecheck.core.permissions import controlled_write_transaction
 from stagecheck.core.utils import canonical_json_dumps, sha256_digest, sha256_file
 
 
@@ -73,11 +74,21 @@ def update_evidence_manifest(
     manifest_path = get_manifest_path(workspace_root)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Temporary file write + atomic replace
-    temp_path = manifest_path.with_suffix(".tmp")
-    with open(temp_path, "w", encoding="utf-8") as f:
-        f.write(canonical_json_dumps(manifest) + "\n")
-    os.replace(temp_path, manifest_path)
+    # Temporary file write + atomic replace under controlled permission transaction
+    manifest_dir = manifest_path.parent
+    is_ro = not os.access(manifest_dir, os.W_OK)
+    if is_ro:
+        os.chmod(manifest_dir, 0o755)
+
+    try:
+        temp_path = manifest_path.with_suffix(".tmp")
+        with open(temp_path, "w", encoding="utf-8") as f:
+            f.write(canonical_json_dumps(manifest) + "\n")
+        os.replace(temp_path, manifest_path)
+        manifest_path.chmod(0o444)
+    finally:
+        if is_ro:
+            os.chmod(manifest_dir, 0o555)
 
     return manifest_path
 
@@ -234,12 +245,6 @@ def create_task_seal(
         files_to_index.append(verdict_path)
     update_evidence_manifest(workspace_root, files_to_index)
 
-    # Recalculate seal manifest_sha256 after manifest update to freeze manifest state
-    updated_manifest_hash = sha256_file(get_manifest_path(workspace_root))
-    seal_data["manifest_sha256"] = updated_manifest_hash
-    with open(seal_path, "w", encoding="utf-8") as f:
-        f.write(canonical_json_dumps(seal_data) + "\n")
-
     # Lock read-only mode 0444
     os.chmod(seal_path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
 
@@ -331,3 +336,4 @@ def append_issue_history(
     # Index history file in evidence manifest
     update_evidence_manifest(workspace_root, [history_file])
     return history_file
+

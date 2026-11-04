@@ -43,9 +43,8 @@ class Fixture(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory(prefix='quality-test-');self.addCleanup(self.tmp.cleanup)
         self.home=Path(self.tmp.name)
         self.tool=Path(__file__).resolve().parents[1]
-        self.programme=Path('/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m')
-        self.contract=self.programme.parent.parent/'AGENTS.md'
-        self.run,self.data,self.root,self.ft=fixture(self.home,self.tool,self.contract,self.programme)
+        self.run,self.data,self.root,self.ft=fixture(self.home,self.tool)
+        self.contract=Path(self.run['contract'])
         self.ctx=q.Context(self.run)
         self.records=q.roots(self.ctx)[1]
     def verdict(self,task='fixture',attempt=1,defect_id='D-fixture',check='citations',version=None):

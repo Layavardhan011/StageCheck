@@ -39,3 +39,4 @@ def run_resume(
     except DispositionError as err:
         print(f"\nERROR: [resume.failed] {err}", file=sys.stderr)
         return 1
+

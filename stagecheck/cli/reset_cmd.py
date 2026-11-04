@@ -50,3 +50,4 @@ def run_reset_attempts(
     except ResetAttemptsError as err:
         print(f"\nERROR: [reset_attempts.failed] {err}", file=sys.stderr)
         return 1
+

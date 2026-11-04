@@ -5,9 +5,8 @@ from run_evals import *
 def main():
     p=argparse.ArgumentParser();p.add_argument('--smoke',action='store_true');a=p.parse_args()
     tool=Path(__file__).resolve().parents[1]
-    programme=Path('/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m')
     with tempfile.TemporaryDirectory(prefix='response-regression-') as scratch:
-        run,data,root,ft=fixture(Path(scratch),tool,programme.parent.parent/'AGENTS.md',programme)
+        run,data,root,ft=fixture(Path(scratch),tool)
         for i in range(1,11):
             out=root/'evidence'/('sp1_t'+str(i).zfill(2))/'synthetic';out.mkdir(parents=True)
             raw=b'synthetic retention only\n';(out/'stdout').write_bytes(raw);(out/'stderr').write_bytes(b'')

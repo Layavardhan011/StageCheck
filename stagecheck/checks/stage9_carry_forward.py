@@ -109,3 +109,4 @@ def run_stage9_carry_forward(ctx: AuditContext) -> StageResult:
         defects=defects,
         errors=errors,
     )
+

@@ -68,3 +68,4 @@ def run_audit_cmd(
         print("\n>> VERDICT: BLOCKED (One or more stages failed - zero partial pass)")
         print("=" * 72)
         return 1
+
