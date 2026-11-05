@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from stagecheck.schemas import get_schema_path
-from stagecheck.core.utils import canonical_json_dumps, load_json_file, validate_schema
+from stagecheck.core.utils import load_json_file, validate_schema
 
 
 class TaskPlanError(Exception):

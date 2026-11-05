@@ -10,7 +10,7 @@ from typing import Any, Dict, Union
 from stagecheck.core.agents_md import write_agents_contract
 from stagecheck.core.evidence import update_evidence_manifest
 from stagecheck.core.permissions import controlled_write_transaction
-from stagecheck.core.utils import canonical_json_dumps, load_json_file
+from stagecheck.core.utils import load_json_file, pretty_json_dumps
 from stagecheck.schemas.validator import validate_schema
 
 
@@ -46,7 +46,7 @@ def save_active_state(
         pass
 
     with controlled_write_transaction(controls_dir):
-        state_file.write_text(canonical_json_dumps(state_data) + "\n", encoding="utf-8")
+        state_file.write_text(pretty_json_dumps(state_data), encoding="utf-8")
         state_file.chmod(0o444)
 
         if update_contract:

@@ -33,6 +33,7 @@ from stagecheck.core.evidence import (
 from stagecheck.core.paths import find_workspace_root
 from stagecheck.core.utils import (
     canonical_json_dumps,
+    pretty_json_dumps,
     sha256_file,
     validate_schema,
 )
@@ -343,13 +344,13 @@ class AuditOrchestrator:
         phase3_dir.mkdir(parents=True, exist_ok=True)
         verdict_path = phase3_dir / "verdict.json"
         with open(verdict_path, "w", encoding="utf-8") as f:
-            f.write(canonical_json_dumps(verdict_data) + "\n")
+            f.write(pretty_json_dumps(verdict_data))
 
         # Also write task root verdict.json for high-level tools
         task_root_dir = self.workspace_root / "evidence" / "tasks" / ctx.task_id
         task_root_dir.mkdir(parents=True, exist_ok=True)
         with open(task_root_dir / "verdict.json", "w", encoding="utf-8") as f:
-            f.write(canonical_json_dumps(verdict_data) + "\n")
+            f.write(pretty_json_dumps(verdict_data))
 
         # Update evidence manifest with verdicts
         update_evidence_manifest(self.workspace_root, [verdict_path, task_root_dir / "verdict.json"])

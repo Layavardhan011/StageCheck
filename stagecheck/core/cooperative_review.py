@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
-from stagecheck.core.utils import canonical_json_dumps, sha256_digest, validate_schema
+from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest, validate_schema
 from stagecheck.schemas import get_schema_path
 
 
@@ -136,7 +136,7 @@ def submit_pre_commit_status(
     validate_schema(status_data, schema)
 
     status_file = phase2a_dir / "pre_commit_status.json"
-    status_file.write_text(canonical_json_dumps(status_data) + "\n", encoding="utf-8")
+    status_file.write_text(pretty_json_dumps(status_data), encoding="utf-8")
     return status_file
 
 
@@ -272,7 +272,7 @@ def record_pre_commit_review(
         "feedback": summary,
         "remediation_required": [i.get("description", str(i)) for i in new_issues],
     }
-    response_file.write_text(canonical_json_dumps(response_content) + "\n", encoding="utf-8")
+    response_file.write_text(pretty_json_dumps(response_content), encoding="utf-8")
 
     # 2. Append to cumulative issue history if new defects found
     if new_issues:
@@ -280,7 +280,7 @@ def record_pre_commit_review(
 
     # 3. Write pre_commit_review.json
     review_file = phase2a_dir / "pre_commit_review.json"
-    review_file.write_text(canonical_json_dumps(review_data) + "\n", encoding="utf-8")
+    review_file.write_text(pretty_json_dumps(review_data), encoding="utf-8")
     return review_file
 
 

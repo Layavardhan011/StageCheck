@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Set, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.git import GitError, discover_repository
-from stagecheck.core.utils import canonical_json_dumps, sha256_digest
+from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest
 
 
 class BranchGovernanceError(GitError):
@@ -161,7 +161,7 @@ def capture_multi_repo_task_baseline(
         }
 
     # Write record
-    baseline_file.write_text(canonical_json_dumps(baselines) + "\n", encoding="utf-8")
+    baseline_file.write_text(pretty_json_dumps(baselines), encoding="utf-8")
     return baselines
 
 

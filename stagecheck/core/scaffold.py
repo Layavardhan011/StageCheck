@@ -6,6 +6,7 @@ and committed atomically with automatic rollback upon any failure.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -15,10 +16,14 @@ from typing import Any, Callable, Dict, List, Optional
 from stagecheck.core.git import RepoBaseline
 from stagecheck.core.utils import (
     canonical_json_dumps,
+    pretty_json_dumps,
     sha256_canonical,
     sha256_digest,
+    validate_agent_slug,
 )
 from stagecheck.schemas.validator import validate_control_descriptor
+
+deterministic_json_dumps = pretty_json_dumps
 
 
 class ScaffoldingError(Exception):
@@ -115,24 +120,79 @@ def scaffold_agent_instructions(
     instructions_dir = root / "instructions"
     instructions_dir.mkdir(parents=True, exist_ok=True)
 
+    norm_a1 = validate_agent_slug(agent1_name.strip().lower())
+    norm_a2 = validate_agent_slug(agent2_name.strip().lower())
+
     paths: Dict[str, Path] = {}
-    if agent1_name == agent2_name:
+    if norm_a1 == norm_a2:
         # Single-agent unified dual role
-        single_path = instructions_dir / f"{agent1_name}_dual_role.md"
+        single_path = instructions_dir / f"{norm_a1}_dual_role.md"
         if not single_path.exists():
-            single_content = f"# {agent1_name.capitalize()} Dual-Role Instructions\n\nRole: `dual_role`.\n\n" + DEFAULT_AGENT1_INSTRUCTIONS_MD + "\n---\n" + DEFAULT_AGENT2_INSTRUCTIONS_MD
+            single_content = (
+                f"# {agent1_name.strip()} Unified Instructions: Dual-Role Operating Protocol\n\n"
+                f"Role: `dual_role`.\n\n"
+                f"This workspace operates in **Single-Agent Mode** where `{agent1_name.strip()}` executes both "
+                f"prompt architecture/auditing and code implementation.\n"
+                f"To preserve governance separation of concerns, the agent must strictly alternate between "
+                f"planning/auditing and implementation phases.\n\n"
+                f"---\n\n"
+                f"## Part 1: Planning & Auditing Responsibilities (Phase 1, Phase 2A Review, Phase 3 Audit)\n\n"
+                f"### Purpose\n"
+                f"Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define declared scope (`declared_scope.json`), "
+                f"perform Phase 2A pre-commit cooperative differential reviews, and inspect Phase 3 independent audit verifications.\n\n"
+                f"### Inputs\n"
+                f"- `specs/TASK_PLAN.json`\n"
+                f"- `specs/ARCHITECTURE.md`\n"
+                f"- `controls/ACTIVE_STATE.json`\n"
+                f"- `evidence/tasks/<task_id>/attempt_<N>/`\n\n"
+                f"### Checks & Invariants\n"
+                f"- Verify task decomposition against architectural contracts.\n"
+                f"- Review uncommitted diffs for scope compliance and secret exposure.\n"
+                f"- Record defect history in `TASK_<ID>_ISSUE_HISTORY.md`.\n\n"
+                f"### Phase Restrictions\n"
+                f"- In planning/review phases, DO NOT write implementation code in `repos/*`.\n"
+                f"- NEVER execute remote push commands (`git push`).\n"
+                f"- Permitted Git commands during review are read-only: `git status`, `git log`, `git diff`, `git show`, `git blame`, `git branch`.\n\n"
+                f"---\n\n"
+                f"## Part 2: Code Implementation Responsibilities (Phase 2A Implementation & Delivery)\n\n"
+                f"### Purpose\n"
+                f"Implement source code, unit tests, and regression coverage for approved tasks on permitted task branches.\n\n"
+                f"### Inputs\n"
+                f"- `evidence/tasks/<task_id>/attempt_<N>/Phase-1/prompt.md`\n"
+                f"- `evidence/tasks/<task_id>/attempt_<N>/Phase-1/declared_scope.json`\n"
+                f"- `controls/ACTIVE_STATE.json`\n\n"
+                f"### Checks & Invariants\n"
+                f"- Ensure code satisfies declared scope without modifying forbidden paths.\n"
+                f"- Ensure all unit tests pass locally before submitting for Phase 2A review.\n"
+                f"- Run local secret check (`gitleaks protect --staged`) prior to local commit.\n\n"
+                f"### Security Invariants & Negative Prohibitions\n"
+                f"- MUST NOT execute remote push operations (`git push` is strictly forbidden).\n"
+                f"- MUST NOT commit directly to `main` or `master` branch.\n"
+                f"- MUST NOT modify control descriptors in `controls/*` or edit `.stagecheck.lock`.\n"
+                f"- MUST NOT alter Gitleaks configuration or create `.gitleaksignore` override files.\n"
+            )
             single_path.write_text(single_content, encoding="utf-8")
         paths[single_path.name] = single_path
     else:
         # Dual-agent separate instructions
-        a1_path = instructions_dir / f"{agent1_name}_prompt_and_audit.md"
+        a1_path = instructions_dir / f"{norm_a1}_prompt_and_audit.md"
         if not a1_path.exists():
-            a1_path.write_text(DEFAULT_AGENT1_INSTRUCTIONS_MD, encoding="utf-8")
+            a1_content = (
+                f"# {agent1_name.strip()} Instructions: Prompt Architecture & Governance Auditor\n\n"
+                f"Role: `prompt_and_audit`.\n\n"
+                + DEFAULT_AGENT1_INSTRUCTIONS_MD[DEFAULT_AGENT1_INSTRUCTIONS_MD.find("## Purpose"):]
+            )
+            a1_path.write_text(a1_content, encoding="utf-8")
         paths[a1_path.name] = a1_path
 
-        a2_path = instructions_dir / f"{agent2_name}_code_implementation.md"
+        a2_path = instructions_dir / f"{norm_a2}_code_implementation.md"
         if not a2_path.exists():
-            a2_path.write_text(DEFAULT_AGENT2_INSTRUCTIONS_MD, encoding="utf-8")
+            a2_content = (
+                f"# {agent2_name.strip()} Instructions: Code Implementation & Test Authoring\n\n"
+                f"Role: `code_implementation`.\n\n"
+                + DEFAULT_AGENT2_INSTRUCTIONS_MD[DEFAULT_AGENT2_INSTRUCTIONS_MD.find("## Purpose"):]
+            )
+            a2_path.write_text(a2_content, encoding="utf-8")
         paths[a2_path.name] = a2_path
 
     return paths
@@ -168,7 +228,7 @@ def scaffold_task_plan(
                 }
             ],
         }
-        plan_file.write_text(canonical_json_dumps(initial_plan), encoding="utf-8")
+        plan_file.write_text(deterministic_json_dumps(initial_plan), encoding="utf-8")
 
     return plan_file
 
@@ -179,6 +239,8 @@ def build_control_descriptors(
     stagecheck_root: str = "@package",
     evidence_root: str = "evidence",
     qualification_root: str = "evals",
+    agent1_name: str = "agent1",
+    agent2_name: str = "agent2",
 ) -> Dict[str, str]:
     """Generate the formatted string content for all 8 mandatory control files.
 
@@ -197,6 +259,38 @@ def build_control_descriptors(
         },
     }
 
+    norm_a1 = validate_agent_slug(agent1_name.strip().lower())
+    norm_a2 = validate_agent_slug(agent2_name.strip().lower())
+    single_agent_mode = (norm_a1 == norm_a2)
+
+    if single_agent_mode:
+        registered_agents = [
+            {
+                "name": norm_a1,
+                "role": "dual_role",
+                "instruction": f"instructions/{norm_a1}_dual_role.md",
+                "comment": f"{agent1_name.strip()} unified dual-role agent",
+                "enabled": True,
+            }
+        ]
+    else:
+        registered_agents = [
+            {
+                "name": norm_a1,
+                "role": "prompt_and_audit",
+                "instruction": f"instructions/{norm_a1}_prompt_and_audit.md",
+                "comment": f"{agent1_name.strip()} prompt architect and auditor",
+                "enabled": True,
+            },
+            {
+                "name": norm_a2,
+                "role": "code_implementation",
+                "instruction": f"instructions/{norm_a2}_code_implementation.md",
+                "comment": f"{agent2_name.strip()} code implementer",
+                "enabled": True,
+            },
+        ]
+
     active_state_content: Dict[str, Any] = {
         "schema_version": "2.0",
         "task_id": "task-init",
@@ -206,23 +300,9 @@ def build_control_descriptors(
         "max_total_attempts": 3,
         "max_repairs": 2,
         "circuit_breaker_tripped": False,
+        "single_agent_mode": single_agent_mode,
         "target_repositories": list(baselines.keys()) if baselines else ["default"],
-        "registered_agents": [
-            {
-                "name": "agent1",
-                "role": "prompt_and_audit",
-                "instruction": "instructions/agent1_prompt_and_audit.md",
-                "comment": "Default prompt architect and auditor",
-                "enabled": True,
-            },
-            {
-                "name": "agent2",
-                "role": "code_implementation",
-                "instruction": "instructions/agent2_code_implementation.md",
-                "comment": "Default code implementer",
-                "enabled": True,
-            },
-        ],
+        "registered_agents": registered_agents,
     }
 
     stagecheck_root_content = {
@@ -244,14 +324,14 @@ def build_control_descriptors(
     }
 
     return {
-        "STAGECHECK_ROOT.json": canonical_json_dumps(stagecheck_root_content),
-        "EVIDENCE_ROOT.json": canonical_json_dumps(evidence_root_content),
-        "PRODUCT_REPOSITORIES.json": canonical_json_dumps(repo_registry_content),
-        "QUALIFICATION_ROOT.json": canonical_json_dumps(qualification_root_content),
-        "ACTIVE_STATE.json": canonical_json_dumps(active_state_content),
+        "STAGECHECK_ROOT.json": deterministic_json_dumps(stagecheck_root_content),
+        "EVIDENCE_ROOT.json": deterministic_json_dumps(evidence_root_content),
+        "PRODUCT_REPOSITORIES.json": deterministic_json_dumps(repo_registry_content),
+        "QUALIFICATION_ROOT.json": deterministic_json_dumps(qualification_root_content),
+        "ACTIVE_STATE.json": deterministic_json_dumps(active_state_content),
         "OWNER_GRANTS.md": DEFAULT_OWNER_GRANTS_MD,
         "FAILURE_PREVENTION.md": DEFAULT_FAILURE_PREVENTION_MD,
-        "DISPOSITIONS.json": canonical_json_dumps(dispositions_content),
+        "DISPOSITIONS.json": deterministic_json_dumps(dispositions_content),
     }
 
 
@@ -260,6 +340,8 @@ def scaffold_controls_atomic(
     baselines: Dict[str, RepoBaseline],
     manifest_sha256: str = "0" * 64,
     stagecheck_root: str = "@package",
+    agent1_name: str = "agent1",
+    agent2_name: str = "agent2",
     fault_injector: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Path]:
     """Atomically generate all 8 control descriptors under controls/ directory.
@@ -272,6 +354,8 @@ def scaffold_controls_atomic(
         baselines: Discovered multi-repository baselines.
         manifest_sha256: 64-char SHA-256 digest of MANIFEST.sha256.
         stagecheck_root: Package root reference ('@package' or relative path).
+        agent1_name: Agent 1 identifier slug or name.
+        agent2_name: Agent 2 identifier slug or name.
         fault_injector: Optional test hook to inject faults during staging.
 
     Returns:
@@ -288,6 +372,8 @@ def scaffold_controls_atomic(
         baselines=baselines,
         manifest_sha256=manifest_sha256,
         stagecheck_root=stagecheck_root,
+        agent1_name=agent1_name,
+        agent2_name=agent2_name,
     )
 
     # Staging directory for atomic transaction

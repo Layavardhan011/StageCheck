@@ -120,7 +120,7 @@ git -C "${TEMP_WS}/repos/core-svc" add .
 git -C "${TEMP_WS}/repos/core-svc" commit -q -m "Initial commit"
 
 # Init workspace
-"${TEMP_VENV}/bin/stagecheck" init --workspace "${TEMP_WS}" >/dev/null
+"${TEMP_VENV}/bin/stagecheck" init --workspace "${TEMP_WS}" --agent1 "agent1" --agent2 "agent2" >/dev/null
 
 # Start daemon
 "${TEMP_VENV}/bin/stagecheck" sentinel start --workspace "${TEMP_WS}"

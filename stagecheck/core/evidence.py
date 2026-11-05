@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from stagecheck.core.paths import find_workspace_root
 from stagecheck.core.permissions import controlled_write_transaction
-from stagecheck.core.utils import canonical_json_dumps, sha256_digest, sha256_file
+from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest, sha256_file
 
 
 class EvidenceTamperError(Exception):
@@ -83,7 +83,7 @@ def update_evidence_manifest(
     try:
         temp_path = manifest_path.with_suffix(".tmp")
         with open(temp_path, "w", encoding="utf-8") as f:
-            f.write(canonical_json_dumps(manifest) + "\n")
+            f.write(pretty_json_dumps(manifest))
         os.replace(temp_path, manifest_path)
         manifest_path.chmod(0o444)
     finally:
@@ -224,20 +224,20 @@ def create_task_seal(
     # Write seal atomically
     tmp_seal = seal_path.with_suffix(".tmp")
     with open(tmp_seal, "w", encoding="utf-8") as f:
-        f.write(canonical_json_dumps(seal_data) + "\n")
+        f.write(pretty_json_dumps(seal_data))
     os.replace(tmp_seal, seal_path)
 
     # Also update Phase-3 copy if Phase-3 directory exists
     p3_dir = attempt_dir / "Phase-3"
     if p3_dir.is_dir():
         with open(p3_dir / "seal.json", "w", encoding="utf-8") as f:
-            f.write(canonical_json_dumps(seal_data) + "\n")
+            f.write(pretty_json_dumps(seal_data))
 
     # If final PASSED outcome, write master task seal at task root
     if outcome == "PASSED":
         master_seal = workspace_root / "evidence" / "tasks" / task_id / "seal.json"
         with open(master_seal, "w", encoding="utf-8") as f:
-            f.write(canonical_json_dumps(seal_data) + "\n")
+            f.write(pretty_json_dumps(seal_data))
 
     # Update EVIDENCE_MANIFEST with the new seal and verdict files
     files_to_index = [seal_path]
@@ -336,4 +336,38 @@ def append_issue_history(
     # Index history file in evidence manifest
     update_evidence_manifest(workspace_root, [history_file])
     return history_file
+
+
+def update_code_quality_ledger(
+    workspace_root: Path,
+    task_id: str,
+    attempt: int = 1,
+    observations: Optional[List[Dict[str, Any]]] = None,
+) -> Path:
+    """Record non-blocking maintainability/quality findings in evidence/CODE_QUALITY_REPORT.json (GAP-F2)."""
+    ev_dir = Path(workspace_root).resolve() / "evidence"
+    ev_dir.mkdir(parents=True, exist_ok=True)
+    report_file = ev_dir / "CODE_QUALITY_REPORT.json"
+
+    data: Dict[str, Any] = {"Code Quality issue": []}
+    if report_file.is_file():
+        try:
+            with open(report_file, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict) and "Code Quality issue" in loaded:
+                    data = loaded
+        except Exception:
+            pass
+
+    if observations:
+        data["Code Quality issue"].extend(observations)
+
+    tmp_file = report_file.with_suffix(".tmp")
+    with open(tmp_file, "w", encoding="utf-8") as f:
+        f.write(pretty_json_dumps(data))
+    os.replace(tmp_file, report_file)
+
+    update_evidence_manifest(workspace_root, [report_file])
+    return report_file
+
 

@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from stagecheck.core.locking import acquire_runtime_lock
 from stagecheck.core.paths import find_workspace_root
 from stagecheck.core.permissions import controlled_write_transaction
-from stagecheck.core.utils import canonical_json_dumps
+from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps
 
 MAX_DEFAULT_ATTEMPTS = 3
 
@@ -294,7 +294,7 @@ def trip_circuit_breaker(
             active_state["attempt_index"] = attempt
 
             with open(state_file, "w", encoding="utf-8") as f:
-                f.write(canonical_json_dumps(active_state) + "\n")
+                f.write(pretty_json_dumps(active_state))
 
     # Generate escalation report
     report_path = write_escalation_report(workspace_root, task_id, attempt, evaluation, current_defects)
@@ -372,6 +372,6 @@ def reset_circuit_breaker(
             }
 
             with open(state_file, "w", encoding="utf-8") as f:
-                f.write(canonical_json_dumps(active_state) + "\n")
+                f.write(pretty_json_dumps(active_state))
 
             return active_state

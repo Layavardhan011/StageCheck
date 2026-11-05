@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.paths import is_path_contained, safe_resolve
-from stagecheck.core.utils import canonical_json_dumps, sha256_file, validate_schema
+from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_file, validate_schema
 from stagecheck.schemas import get_schema_path
 
 
@@ -225,7 +225,7 @@ def freeze_prompt_and_scope(
 
     # Write atomically
     tmp_path = phase1_dir / f".prompt_verified.tmp.{os.getpid()}"
-    tmp_path.write_text(canonical_json_dumps(record_data) + "\n", encoding="utf-8")
+    tmp_path.write_text(pretty_json_dumps(record_data), encoding="utf-8")
     os.replace(tmp_path, verified_record_path)
 
     # Apply read-only mode to frozen Phase-1 files (defense-in-depth)

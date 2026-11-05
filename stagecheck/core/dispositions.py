@@ -22,7 +22,7 @@ from stagecheck.core.evidence import update_evidence_manifest
 from stagecheck.core.locking import acquire_runtime_lock
 from stagecheck.core.paths import find_workspace_root
 from stagecheck.core.permissions import controlled_write_transaction
-from stagecheck.core.utils import canonical_json_dumps, sha256_file
+from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_file
 
 
 class DispositionError(Exception):
@@ -122,7 +122,7 @@ def add_disposition(
             # Atomic replace
             tmp_disp = disp_path.with_suffix(".tmp")
             with open(tmp_disp, "w", encoding="utf-8") as f:
-                f.write(canonical_json_dumps(disp_data) + "\n")
+                f.write(pretty_json_dumps(disp_data))
             os.replace(tmp_disp, disp_path)
 
             # 3. Re-render AGENTS.md to update SHA-256 table binding
@@ -254,7 +254,7 @@ def resume_after_disposition(
             state["resumed_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
             with open(state_file, "w", encoding="utf-8") as f:
-                f.write(canonical_json_dumps(state) + "\n")
+                f.write(pretty_json_dumps(state))
 
     return {
         "task_id": task_id,

@@ -121,6 +121,29 @@ def canonical_json_dumps(obj: Any) -> str:
     return canonical_json_bytes(obj).decode("utf-8")
 
 
+def pretty_json_dumps(obj: Any, indent: int = 2) -> str:
+    """Serialize object to formatted, human-readable multi-line JSON with 2-space indentation.
+
+    Requirements:
+      1. Every JSON object uses multi-line formatting.
+      2. Each key-value field appears on its own line.
+      3. Nested objects and arrays are properly expanded and indented.
+      4. Indentation is consistently 2 spaces.
+      5. Preserves data structure, types, and values (ensure_ascii=False).
+      6. Output always ends with a newline.
+    """
+    try:
+        return json.dumps(obj, indent=indent, ensure_ascii=False) + "\n"
+    except (TypeError, ValueError) as err:
+        raise SerializationError(f"Failed to serialize object to formatted JSON: {err}") from err
+
+
+def write_json_file(path: Union[str, Path], data: Any, indent: int = 2) -> None:
+    """Write data to a file formatted as readable JSON with 2-space indentation and trailing newline."""
+    file_path = Path(path)
+    file_path.write_text(pretty_json_dumps(data, indent=indent), encoding="utf-8")
+
+
 def sha256_digest(data: Union[str, bytes]) -> str:
     """Compute the hexadecimal SHA-256 digest of string or bytes."""
     if isinstance(data, str):

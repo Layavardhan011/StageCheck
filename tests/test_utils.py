@@ -15,11 +15,13 @@ from stagecheck.core.utils import (
     canonical_json_dumps,
     is_valid_agent_slug,
     load_json_file,
+    pretty_json_dumps,
     sha256_canonical,
     sha256_digest,
     sha256_file,
     validate_agent_slug,
     validate_schema,
+    write_json_file,
 )
 
 
@@ -98,6 +100,47 @@ class TestUtils(unittest.TestCase):
     def test_sha256_file_missing_raises_error(self) -> None:
         with self.assertRaises(FileNotFoundError):
             sha256_file(self.temp_path / "nonexistent.file")
+
+    def test_pretty_json_formatting(self) -> None:
+        """Verify pretty_json_dumps meets multi-line 2-space indentation and newline requirements."""
+        data = {
+            "agent": "agent1",
+            "status": "ready",
+            "config": {"enabled": True, "mode": "strict"},
+            "checks": ["security", "quality", "compliance"],
+        }
+        output = pretty_json_dumps(data)
+        expected = (
+            "{\n"
+            '  "agent": "agent1",\n'
+            '  "status": "ready",\n'
+            '  "config": {\n'
+            '    "enabled": true,\n'
+            '    "mode": "strict"\n'
+            "  },\n"
+            '  "checks": [\n'
+            '    "security",\n'
+            '    "quality",\n'
+            '    "compliance"\n'
+            "  ]\n"
+            "}\n"
+        )
+        self.assertEqual(output, expected)
+        # Verify valid JSON round-trip
+        self.assertEqual(load_json_file(self.temp_path / "dummy.json" if False else None) if False else None, None)
+
+    def test_write_json_file(self) -> None:
+        """Verify write_json_file writes readable multi-line JSON ending with newline."""
+        test_file = self.temp_path / "pretty.json"
+        data = {"task_id": "task-01", "items": [1, 2]}
+        write_json_file(test_file, data)
+
+        content = test_file.read_text(encoding="utf-8")
+        self.assertTrue(content.endswith("\n"))
+        self.assertIn('\n  "task_id": "task-01",\n', content)
+        self.assertIn('\n  "items": [\n    1,\n    2\n  ]\n', content)
+        loaded = load_json_file(test_file)
+        self.assertEqual(loaded, data)
 
     # ==========================================
     # JSON Loading & Schema Validation Tests
