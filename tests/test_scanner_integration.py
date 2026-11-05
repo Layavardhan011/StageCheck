@@ -170,7 +170,7 @@ class TestSecretScannerIntegration(unittest.TestCase):
         """4. Prove detected credentials in commit range block audit verification."""
         # Commit a real secret pattern into git
         (self.repo_dir / "config.py").write_text(
-            'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n', encoding="utf-8"
+            'AWS_KEY = "AKIA1234567890ABCDEF"\n', encoding="utf-8"
         )
         subprocess.run(["git", "-C", str(self.repo_dir), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.repo_dir), "commit", "-m", "leak secret"], check=True)

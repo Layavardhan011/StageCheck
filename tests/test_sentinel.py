@@ -63,6 +63,8 @@ class TestSentinel(unittest.TestCase):
             "repos/backend/.pytest_cache/v/cache/nodeids",
             "repos/backend/src/.main.py.swp",
             "repos/backend/tmp.12345.tmp.",
+            "evidence/sentinel.log",
+            ".stagecheck_sentinel.pid",
         ]
         for path_str in tier2_cases:
             with self.subTest(path=path_str):

@@ -82,6 +82,8 @@ TIER_2_SUBSTRINGS = (
     ".tmp.",
     ".swp",
     ".pyc",
+    "sentinel.log",
+    ".stagecheck_sentinel.pid",
 )
 
 # Directories pruned from recursive inotify traversal to save watches and memory
@@ -734,8 +736,8 @@ class SentinelDaemon:
 
     def _log_event(self, rel_path: str, tier: int, label: str) -> None:
         """Append event to sentinel.log."""
-        if tier == 2:
-            return  # Silently drop Tier 2 events
+        if tier == 2 or rel_path.endswith("sentinel.log") or rel_path.endswith(".stagecheck_sentinel.pid"):
+            return  # Silently drop Tier 2 and internal daemon log/pid files
 
         ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
         entry = f"[{ts}] [Tier {tier}] [{label}] {rel_path}\n"
