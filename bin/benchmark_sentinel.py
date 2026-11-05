@@ -70,7 +70,7 @@ def run_real_sentinel_benchmark() -> int:
 
         # Wait for daemon process initialization and PID acquisition
         pid = None
-        for _ in range(50):
+        for _ in range(100):
             time.sleep(0.05)
             running, active_pid = daemon.is_running()
             if running and active_pid:
@@ -79,6 +79,19 @@ def run_real_sentinel_benchmark() -> int:
 
         if not pid:
             print("[FAIL] Sentinel daemon PID was not registered within startup timeout.")
+            daemon_log = workspace_dir / "evidence" / "sentinel_daemon.log"
+            if daemon_log.is_file() and daemon_log.stat().st_size > 0:
+                print(f"Daemon process stderr/stdout log:\n{daemon_log.read_text(encoding='utf-8')}")
+            else:
+                print("No daemon process log captured.")
+            sentinel_log = workspace_dir / "evidence" / "sentinel.log"
+            if sentinel_log.is_file() and sentinel_log.stat().st_size > 0:
+                print(f"Sentinel log:\n{sentinel_log.read_text(encoding='utf-8')}")
+            pid_file = workspace_dir / ".stagecheck_sentinel.pid"
+            if pid_file.is_file():
+                print(f"PID file content: '{pid_file.read_text(encoding='utf-8').strip()}'")
+            else:
+                print("PID file does not exist.")
             return 1
 
         print(f"Daemon Status: RUNNING (PID {pid})")

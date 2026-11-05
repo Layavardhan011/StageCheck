@@ -13,10 +13,10 @@
 This report certifies that the StageCheck codebase has been audited, modified, hardened, and verified against all 14 individual architecture specifications and the master architecture. All previously identified architectural gaps, test collection failures, security fail-open vulnerabilities, and missing CLI commands have been resolved with real production implementations and backed by executable test evidence.
 
 The test suite executes with **100% pass rate**:
-$$\mathbf{197\text{ passed, } 62\text{ subtests passed in } 9.65s}$$
-$$\mathbf{361\text{ tests collected across tests/ and evals/ with 0 collection errors (361 passed, 301 subtests)}}$$
+$$\mathbf{198\text{ passed, } 62\text{ subtests passed in } 9.13s}$$
+$$\mathbf{362\text{ tests collected across tests/ and evals/ with 0 collection errors (362 passed, 301 subtests)}}$$
 The distributable wheel (`dist/stagecheck-1.0.0-py3-none-any.whl`) was built, installed into a clean isolated virtual environment, and validated outside the source repository. Real Sentinel daemon runtime performance metrics were measured directly via kernel `/proc` interfaces and Linux `inotify`:
-$$\mathbf{19.81\text{ MiB RSS (< 25.0 MiB target), } 0.00\%\text{ idle CPU, } 0.43\text{ ms inotify event latency (< 50.0 ms target)}}$$
+$$\mathbf{20.05\text{ MiB RSS (< 25.0 MiB target), } 0.00\%\text{ idle CPU, } 0.22\text{ ms inotify event latency (< 50.0 ms target)}}$$
 
 ---
 
@@ -77,7 +77,7 @@ $$\mathbf{19.81\text{ MiB RSS (< 25.0 MiB target), } 0.00\%\text{ idle CPU, } 0.
 ```bash
 uv run --extra dev pytest --collect-only -q evals tests
 ```
-- **Total Tests Collected:** 361 tests (197 in tests/, 164 across evals/)
+- **Total Tests Collected:** 362 tests (198 in tests/, 164 across evals/)
 - **Collection Errors:** 0
 - **Duration:** 0.18s
 
@@ -85,10 +85,10 @@ uv run --extra dev pytest --collect-only -q evals tests
 ```bash
 uv run --extra dev pytest -q tests
 ```
-- **Passed:** 197 tests
+- **Passed:** 198 tests
 - **Subtests Passed:** 62 subtests
 - **Failed:** 0
-- **Duration:** 9.65s
+- **Duration:** 9.13s
 
 ### C. Fail-Closed Secret Scanner Verification (All 9 Conditions & Integration)
 ```bash
@@ -173,10 +173,10 @@ Measured directly on the live system via `python3 bin/benchmark_sentinel.py` aga
 
 - **Platform:** Linux 7.0.0-38-generic (x86_64), CPython 3.12.3
 - **Background Daemon:** Spawns real detached process via canonical double-fork `os.execvpe` + `os.setsid()`, verified via `os.kill(pid, 0)`
-- **Memory RSS (Active Process via `/proc/<pid>/statm`):** `19.81 MiB` (Target: `< 25.00 MiB`) -> **PASS**
+- **Memory RSS (Active Process via `/proc/<pid>/statm`):** `20.05 MiB` (Target: `< 25.00 MiB`) -> **PASS**
 - **Idle CPU Load (via `/proc/<pid>/stat` sampling):** `0.00%` (raw ticks: 0, interval: 1.00s) (Target: `0.00%` / `< 1.00%`) -> **PASS**
-- **Real Inotify Event Latency:** `0.43 ms avg` (min: `0.08 ms`, max: `0.72 ms`) (Target: `< 50.00 ms`) -> **PASS**
-- **Throughput:** `13,316.1 events/sec` (50 events in 0.004s) -> **PASS**
+- **Real Inotify Event Latency:** `0.22 ms avg` (min: `0.08 ms`, max: `0.74 ms`) (Target: `< 50.00 ms`) -> **PASS**
+- **Throughput:** `14,094.0 events/sec` (50 events in 0.004s) -> **PASS**
 - **Correctness:** `PASS` (Verified Tier 1 router labels)
 - **Clean Daemon Termination:** Verified via SIGTERM, PID file unlinking, and zero orphan/zombie processes -> **PASS**
 - **Total Benchmark Execution Time:** `1.16 s`

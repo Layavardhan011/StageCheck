@@ -224,25 +224,32 @@ class SentinelDaemon:
 
     def _init_libc(self) -> None:
         if self._libc is None:
-            self._libc = ctypes.CDLL(None)
+            import ctypes.util
+            libc_name = ctypes.util.find_library("c") or "libc.so.6"
+            try:
+                self._libc = ctypes.CDLL(libc_name)
+            except OSError:
+                self._libc = ctypes.CDLL(None)
 
     def write_pid(self) -> None:
         """Write current PID atomically to .stagecheck_sentinel.pid with symlink defense (SEC-AA1)."""
-        pid_path = str(self.pid_file)
+        pid_path = self.pid_file
 
-        # Check existing PID file
-        if self.pid_file.exists():
-            st = os.lstat(pid_path)
-            if stat.S_ISLNK(st.st_mode):
-                raise SentinelError("Security violation: .stagecheck_sentinel.pid is a symbolic link.")
+        # Check existing PID file for symlink attack
+        if pid_path.is_symlink() or (pid_path.exists() and stat.S_ISLNK(os.lstat(str(pid_path)).st_mode)):
+            raise SentinelError("Security violation: .stagecheck_sentinel.pid is a symbolic link.")
 
-        # Open exclusively with O_NOFOLLOW
+        # Atomic write via temporary file + rename to prevent race conditions
+        temp_pid = pid_path.with_name(f".stagecheck_sentinel.pid.tmp.{os.getpid()}")
         flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(pid_path, flags, 0o644)
+        fd = os.open(str(temp_pid), flags, 0o644)
         try:
             os.write(fd, f"{os.getpid()}\n".encode("utf-8"))
+            os.fsync(fd)
         finally:
             os.close(fd)
+
+        os.replace(str(temp_pid), str(pid_path))
 
     def read_pid(self) -> Optional[int]:
         """Read and validate PID from .stagecheck_sentinel.pid."""
@@ -280,8 +287,12 @@ class SentinelDaemon:
         """Start the Sentinel daemon in background or foreground."""
         running, pid = self.is_running()
         if running:
-            print(f"Sentinel daemon already running (PID {pid}).")
-            return 0
+            if not daemon and pid == os.getpid():
+                # Already running as current process
+                pass
+            else:
+                print(f"Sentinel daemon already running (PID {pid}).")
+                return 0
 
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "evidence").mkdir(parents=True, exist_ok=True)
@@ -324,13 +335,29 @@ class SentinelDaemon:
 
             os.close(w_pipe)
 
+            # Child 2 (Daemon process)
+            # Set up daemon stdout/stderr log
+            (self.root / "evidence").mkdir(parents=True, exist_ok=True)
+            log_path = str(self.root / "evidence" / "sentinel_daemon.log")
+            log_fd = os.open(log_path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
+            devnull_r = os.open(os.devnull, os.O_RDONLY)
+
+            # Use literal standard file descriptors 0 (stdin), 1 (stdout), 2 (stderr)
+            # Avoid sys.stdin.fileno() which raises UnsupportedOperation in pytest/test runners
+            os.dup2(devnull_r, 0)
+            os.dup2(log_fd, 1)
+            os.dup2(log_fd, 2)
+            os.close(devnull_r)
+            os.close(log_fd)
+
             # Cleanly replace child memory with fresh Python process running foreground daemon
             # This purges parent heap/test fixtures and guarantees < 25MB RSS
             env = os.environ.copy()
             tool_root = str(Path(__file__).resolve().parents[2])
-            current_pythonpath = env.get("PYTHONPATH", "")
-            if tool_root not in current_pythonpath.split(os.pathsep):
-                env["PYTHONPATH"] = f"{tool_root}{os.pathsep}{current_pythonpath}" if current_pythonpath else tool_root
+            all_paths = [p for p in sys.path if p and os.path.exists(p)]
+            if tool_root not in all_paths:
+                all_paths.insert(0, tool_root)
+            env["PYTHONPATH"] = os.pathsep.join(all_paths)
 
             cmd = [
                 sys.executable,
@@ -345,17 +372,11 @@ class SentinelDaemon:
             sys.stdout.flush()
             sys.stderr.flush()
             try:
-                devnull_r = os.open(os.devnull, os.O_RDONLY)
-                devnull_w = os.open(os.devnull, os.O_WRONLY)
-                os.dup2(devnull_r, sys.stdin.fileno())
-                os.dup2(devnull_w, sys.stdout.fileno())
-                os.dup2(devnull_w, sys.stderr.fileno())
-                os.close(devnull_r)
-                os.close(devnull_w)
                 os.execvpe(sys.executable, cmd, env)
-            except Exception:
+            except Exception as e:
                 # Fallback if execvpe fails
-                self.write_pid()
+                sys.stderr.write(f"execvpe failed: {e}\n")
+                sys.stderr.flush()
                 self._run_loop()
                 sys.exit(0)
         else:
@@ -471,10 +492,15 @@ class SentinelDaemon:
         """Main event loop using Linux inotify and epoll."""
         self._init_libc()
         if not self._libc:
+            sys.stderr.write("Failed to initialize libc for inotify.\n")
+            sys.stderr.flush()
             return
 
         self._inotify_fd = self._libc.inotify_init1(IN_NONBLOCK | IN_CLOEXEC)
         if self._inotify_fd < 0:
+            err = ctypes.get_errno() if hasattr(ctypes, "get_errno") else -1
+            sys.stderr.write(f"inotify_init1 failed with descriptor {self._inotify_fd} (errno: {err}).\n")
+            sys.stderr.flush()
             return
 
         self._attach_recursive_watches()
@@ -491,7 +517,10 @@ class SentinelDaemon:
 
         try:
             while True:
-                events = epoll.poll(timeout=1.0)
+                try:
+                    events = epoll.poll(timeout=-1)
+                except (InterruptedError, OSError):
+                    break
                 for fd, event in events:
                     if fd == self._inotify_fd and (event & select.EPOLLIN):
                         try:

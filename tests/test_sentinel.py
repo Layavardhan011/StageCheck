@@ -157,6 +157,36 @@ class TestSentinel(unittest.TestCase):
         ret_logs = main(["sentinel", "logs", "--workspace", str(self.workspace)])
         self.assertEqual(ret_logs, 0)
 
+    def test_daemon_start_and_stop_lifecycle(self) -> None:
+        """Verify real Sentinel daemon background startup, PID acquisition, and graceful stop."""
+        import time
+        sentinel = SentinelDaemon(self.workspace)
+        exit_code = sentinel.start(daemon=True)
+        self.assertEqual(exit_code, 0)
+
+        # Confirm daemon registers PID
+        pid = None
+        for _ in range(50):
+            time.sleep(0.05)
+            running, active_pid = sentinel.is_running()
+            if running and active_pid:
+                pid = active_pid
+                break
+
+        self.assertIsNotNone(pid, "Sentinel daemon failed to register PID in time")
+        self.assertGreater(pid, 1)
+
+        # Confirm status sees it running
+        status = sentinel.status()
+        self.assertTrue(status["running"])
+        self.assertEqual(status["pid"], pid)
+
+        # Stop daemon
+        stop_code = sentinel.stop()
+        self.assertEqual(stop_code, 0)
+        self.assertFalse(sentinel.is_running()[0])
+        self.assertFalse(sentinel.pid_file.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
