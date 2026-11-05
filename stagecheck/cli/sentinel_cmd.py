@@ -16,6 +16,7 @@ def run_sentinel(
     action: str,
     daemon: bool = True,
     workspace: Optional[str] = None,
+    ready_fd: Optional[int] = None,
 ) -> int:
     """Execute Sentinel lifecycle actions.
 
@@ -23,6 +24,7 @@ def run_sentinel(
         action: One of 'start', 'stop', 'status', 'logs'.
         daemon: Whether to run in background daemon mode.
         workspace: Optional workspace root directory path.
+        ready_fd: Optional readiness notification pipe fd.
 
     Returns:
         0 on success, non-zero on failure.
@@ -31,7 +33,7 @@ def run_sentinel(
     sentinel = SentinelDaemon(workspace_root)
 
     if action == "start":
-        return sentinel.start(daemon=daemon)
+        return sentinel.start(daemon=daemon, ready_fd=ready_fd)
 
     elif action == "stop":
         return sentinel.stop()

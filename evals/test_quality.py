@@ -291,9 +291,27 @@ class Fixture(unittest.TestCase):
     def launch(self,task):
         # Existing fixture contains an untracked qualification file. Explicit dirty
         # inspection retains its identity; product execution stays disabled.
-        data=q.load(self.run['claims']);data['task_id']=task;Path(self.run['claims']).write_bytes(q.encode(data))
+        data=q.load(self.run['claims']);data['task_id']=task
         manifest(self.ft)
-        (self.root/'controls/STAGECHECK_ROOT.json').write_bytes(q.encode({'root':str(self.ft),'manifest_sha256':q.digest((self.ft/'MANIFEST.sha256').read_bytes())}))
+        new_manifest_hash = q.digest((self.ft/'MANIFEST.sha256').read_bytes())
+        (self.root/'controls/STAGECHECK_ROOT.json').write_bytes(q.encode({'root':str(self.ft),'manifest_sha256':new_manifest_hash}))
+
+        # Keep contract in sync with new manifest hash for the synthetic fixture tool
+        import re
+        contract_text = self.contract.read_text()
+        contract_text = re.sub(
+            r"\|\s*StageCheck tool\s*\|\s*`[^`]+`\s*\|\s*`[0-9a-f]{64}`\s*\|",
+            f"| StageCheck tool | `{self.ft}/MANIFEST.sha256` | `{new_manifest_hash}` |",
+            contract_text
+        )
+        self.contract.write_text(contract_text)
+        (self.contract.parent / "AGENTS.md").write_text(contract_text)
+        for cp in q.load(self.ft / "config/paths.json").get("instruction_copies", []):
+            Path(cp).write_text(contract_text)
+
+        data['contract_sha256'] = q.digest(self.contract.read_bytes())
+        Path(self.run['claims']).write_bytes(q.encode(data))
+
         args=[sys.executable,'-B',str(self.ft/'bin/orchestrate.py'),'--task',task,'--repo',self.run['repo'],'--base',self.run['base'],'--report',self.run['report'],'--claims',self.run['claims'],'--root',str(self.root),'--contract',str(self.ctx.contract),'--allow-dirty']
         r=subprocess.run(args,capture_output=True,timeout=45,env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'})
         path=self.root/'evidence/stagecheck'/task/'1/verdict.json'

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 import stagecheck
@@ -41,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     # 2. start
     p_start = subparsers.add_parser("start", help="Activate a new task under exclusive lock.")
     p_start.add_argument("--task", required=True, help="Task identifier (e.g. task-101).")
+    p_start.add_argument("--workspace", help="Explicit workspace root path.")
 
     # 3. verify-prompt
     p_vp = subparsers.add_parser("verify-prompt", help="Verify Phase 1 prompt blueprint and freeze hash.")
@@ -95,6 +97,30 @@ def build_parser() -> argparse.ArgumentParser:
     p_sentinel.add_argument("--daemon", action="store_true", default=True, help="Run as background daemon (default).")
     p_sentinel.add_argument("--foreground", action="store_false", dest="daemon", help="Run in foreground.")
     p_sentinel.add_argument("--workspace", help="Explicit workspace root path.")
+    p_sentinel.add_argument("--ready-fd", type=int, default=-1, help=argparse.SUPPRESS)
+
+    # 11. plan (GAP-05, GAP-H4, GAP-L1)
+    p_plan = subparsers.add_parser("plan", help="Manage and validate project task roadmap.")
+    p_plan.add_argument("plan_action", choices=["validate", "next", "show"], help="Roadmap action.")
+    p_plan.add_argument("--activate", action="store_true", help="Activate next eligible task.")
+    p_plan.add_argument("--workspace", help="Explicit workspace root path.")
+
+    # 12. unlock (GAP-J2)
+    p_unlock = subparsers.add_parser("unlock", help="Elevate workspace permissions for teardown/cleanup.")
+    p_unlock.add_argument("--force", action="store_true", help="Bypass interactive confirmation.")
+    p_unlock.add_argument("--workspace", help="Explicit workspace root path.")
+
+    # 13. seal (SEC-02)
+    p_seal = subparsers.add_parser("seal", help="Seal task evidence and generate cryptographic seal.")
+    p_seal.add_argument("--task", required=True, help="Task identifier.")
+    p_seal.add_argument("--attempt", type=int, default=1, help="Attempt index.")
+    p_seal.add_argument("--workspace", help="Explicit workspace root path.")
+
+    # 14. log-quality (GAP-F2)
+    p_lq = subparsers.add_parser("log-quality", help="Update workspace code quality ledger.")
+    p_lq.add_argument("--task", required=True, help="Task identifier.")
+    p_lq.add_argument("--attempt", type=int, default=1, help="Attempt index.")
+    p_lq.add_argument("--workspace", help="Explicit workspace root path.")
 
     return parser
 
@@ -203,9 +229,42 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.subcommand == "sentinel":
         from stagecheck.cli.sentinel_cmd import run_sentinel
+        ready_fd = args.ready_fd if getattr(args, "ready_fd", -1) >= 0 else None
         return run_sentinel(
             action=args.sentinel_action,
             daemon=getattr(args, "daemon", True),
+            workspace=getattr(args, "workspace", None),
+            ready_fd=ready_fd,
+        )
+
+    if args.subcommand == "plan":
+        from stagecheck.cli.plan_cmd import run_plan
+        return run_plan(
+            action=args.plan_action,
+            workspace=getattr(args, "workspace", None),
+            activate=getattr(args, "activate", False),
+        )
+
+    if args.subcommand == "unlock":
+        from stagecheck.cli.ops_cmd import run_unlock
+        return run_unlock(
+            workspace=getattr(args, "workspace", None),
+            force=getattr(args, "force", False),
+        )
+
+    if args.subcommand == "seal":
+        from stagecheck.cli.ops_cmd import run_seal
+        return run_seal(
+            task_id=args.task,
+            attempt=getattr(args, "attempt", 1),
+            workspace=getattr(args, "workspace", None),
+        )
+
+    if args.subcommand == "log-quality":
+        from stagecheck.cli.ops_cmd import run_log_quality
+        return run_log_quality(
+            task_id=args.task,
+            attempt=getattr(args, "attempt", 1),
             workspace=getattr(args, "workspace", None),
         )
 

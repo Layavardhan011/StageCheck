@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -67,26 +69,12 @@ def run_stage1_preflight(ctx: AuditContext) -> StageResult:
                     except Exception:
                         pass
 
-    # 4. Gitleaks Version Check (SEC-L2)
-    try:
-        res = subprocess.run(["gitleaks", "version"], capture_output=True, text=True, check=False)
-        if res.returncode == 0:
-            match = re.search(r"v?([0-9]+)\.([0-9]+)\.([0-9]+)", res.stdout)
-            if match:
-                major, minor = int(match.group(1)), int(match.group(2))
-                if major != 8 or minor < 18:
-                    defects.append(
-                        Defect(
-                            defect_id="preflight.gitleaks_version_incompatible",
-                            message=f"Installed Gitleaks version '{res.stdout.strip()}' does not satisfy requirement (v8.18+).",
-                            stage=stage_id,
-                            severity="HIGH",
-                            blocking=True,
-                        )
-                    )
-    except FileNotFoundError:
-        # If gitleaks is not installed on host, we log an error/report-only defect
-        pass
+    # 4. Gitleaks Binary & Version Check (SEC-L2) - Fail Closed
+    from stagecheck.core.scanner import SecretScanner
+    scanner = getattr(ctx, "scanner", None) or SecretScanner()
+    is_valid, scanner_defects = scanner.verify_scanner_binary(stage=stage_id)
+    if not is_valid:
+        defects.extend(scanner_defects)
 
     status = "FAIL" if any(d.blocking for d in defects) else "CLEAR"
     return StageResult(stage_id=stage_id, status=status, defects=defects, errors=errors)

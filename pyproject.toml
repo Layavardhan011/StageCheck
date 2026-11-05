@@ -43,5 +43,9 @@ include = ["stagecheck*"]
 stagecheck = [
     "schemas/assets/*.json",
     "config/defaults/*.json",
+    "agent_instructions/*.md",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 

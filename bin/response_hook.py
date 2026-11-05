@@ -8,7 +8,7 @@ from pathlib import Path
 from common import ToolError,bindings,canonical,create,digest,encode,load,loads,symlink_component
 from response_tokens import needs_claims
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'checks'))
-from secrets import findings as secret_findings
+from secret_findings import findings as secret_findings
 from preflight import manifest_entries
 from orchestrate import history_read,EXIT
 
@@ -31,10 +31,11 @@ def settings(tool,root):
         raise ToolError('hook settings shape refused')
     for key in ['repairs_per_answer','failed_answers_in_a_row','session_backstop','stagecheck_timeout_seconds','claims_max_bytes']:
         if type(value[key]) is not int or value[key]<=0:raise ToolError('hook positive setting refused')
-    if not isinstance(value['claims_folder'],dict) or set(value['claims_folder'])!={'codex','claude'}:
+    if not isinstance(value['claims_folder'],dict) or len(value['claims_folder'])==0 or not all(isinstance(k,str) and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}',k) for k in value['claims_folder']):
         raise ToolError('hook claims roots refused')
     claims={a:confined(root,r) for a,r in value['claims_folder'].items()};records=confined(root,value['records_folder'])
-    if claims['codex']==claims['claude'] or any(a.resolve().is_relative_to(b.resolve()) or b.resolve().is_relative_to(a.resolve()) for a,b in [(claims['codex'],claims['claude']),(records,claims['codex']),(records,claims['claude'])]):
+    claim_items=list(claims.values())
+    if any(claim_items[i]==claim_items[j] or claim_items[i].resolve().is_relative_to(claim_items[j].resolve()) or claim_items[j].resolve().is_relative_to(claim_items[i].resolve()) for i in range(len(claim_items)) for j in range(i+1,len(claim_items))) or any(records==c or records.resolve().is_relative_to(c.resolve()) or c.resolve().is_relative_to(records.resolve()) for c in claim_items):
         raise ToolError('hook overlapping roots refused')
     ids=load(tool/'config/required_outcomes.json');rules=value['send_back_rules']
     if not isinstance(rules,list) or len(set(rules))!=len(rules) or any(not isinstance(r,str) or r not in ids or r.startswith(DENIED) or r in NON_SEND for r in rules):
@@ -76,15 +77,15 @@ def prior_records(folder,current):
                    'response_task_id':None,'decision':'tool_error','finding_ids':[],
                    'disputed_ids':[],'incomplete_attempt':p.name,
                    'tool_error':'interrupted attempt: record.json absent'}
-        if not isinstance(value,dict) or value.get('agent') not in ['codex','claude'] or value.get('decision') not in ['sent_back','would_send_back','stopped_clean','stopped_open','stopped_no_progress','stopped_disputed','stopped_session','stopped_off','stopped_no_answer','tool_error'] or not isinstance(value.get('session_id'),str) or not isinstance(value.get('finding_ids'),list) or not isinstance(value.get('disputed_ids'),list):
+        if not isinstance(value,dict) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}',str(value.get('agent',''))) or value.get('decision') not in ['sent_back','would_send_back','stopped_clean','stopped_open','stopped_no_progress','stopped_disputed','stopped_session','stopped_off','stopped_no_answer','tool_error'] or not isinstance(value.get('session_id'),str) or not isinstance(value.get('finding_ids'),list) or not isinstance(value.get('disputed_ids'),list):
             raise ToolError('hook history refused')
         records.append(value)
     return records
 
 def task_counts(agent,session,event,records):
     previous=records[-1] if records else None
-    repair=bool(previous and previous['decision']=='sent_back' and (event.get('stop_hook_active') or agent=='codex' and previous['turn_id']==event.get('turn_id')))
-    turn=event.get('turn_id') if agent=='codex' else str(len({r['response_task_id'] for r in records if r.get('response_task_id')})+1)
+    repair=bool(previous and previous['decision']=='sent_back' and (event.get('stop_hook_active') or (previous.get('turn_id') is not None and previous.get('turn_id')==event.get('turn_id'))))
+    turn=str(event.get('turn_id')) if event.get('turn_id') is not None else str(len({r['response_task_id'] for r in records if r.get('response_task_id')})+1)
     if repair:task=previous['response_task_id']
     else:
         if not isinstance(turn,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,50}',turn):raise ToolError('hook turn id refused')
@@ -275,7 +276,11 @@ def main():
     output={}
     try:
         import argparse
-        parser=argparse.ArgumentParser();parser.add_argument('--agent',required=True,choices=['codex','claude']);parser.add_argument('--root');parser.add_argument('--contract')
+        parser=argparse.ArgumentParser()
+        def _check_agent_slug(s):
+            if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}',s):raise argparse.ArgumentTypeError('invalid agent slug')
+            return s
+        parser.add_argument('--agent',required=True,type=_check_agent_slug);parser.add_argument('--root');parser.add_argument('--contract')
         args=parser.parse_args();tool=Path(__file__).resolve().parents[1];root=canonical(args.root) if args.root else tool.parent
         contract=canonical(args.contract) if args.contract else canonical(root.parent.parent/'AGENTS.md')
         event=loads(sys.stdin.buffer.read())

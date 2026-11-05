@@ -16,7 +16,12 @@ from stagecheck.core.agents_md import write_agents_contract
 from stagecheck.core.git import GitError, RepoBaseline, discover_multi_repositories, discover_repository
 from stagecheck.core.locking import LockCollisionError, acquire_bootstrap_lock
 from stagecheck.core.permissions import apply_at_rest_permissions, elevate_permissions_for_teardown
-from stagecheck.core.scaffold import ScaffoldingError, scaffold_controls_atomic
+from stagecheck.core.scaffold import (
+    ScaffoldingError,
+    scaffold_agent_instructions,
+    scaffold_controls_atomic,
+    scaffold_task_plan,
+)
 
 
 def run_init(
@@ -92,6 +97,21 @@ def run_init(
                 manifest_sha256=manifest_sha256,
             )
 
+            # Step 4b: Scaffold agent instructions & role definitions (Specs 03, 08)
+            print("Scaffolding agent instructions under instructions/...")
+            scaffold_agent_instructions(
+                workspace_root=workspace_root,
+                agent1_name="agent1",
+                agent2_name="agent2",
+            )
+
+            # Step 4c: Scaffold specs/ and initial TASK_PLAN.json roadmap (Specs 04, 10 / GAP-05)
+            print("Scaffolding initial specs/TASK_PLAN.json roadmap...")
+            scaffold_task_plan(
+                workspace_root=workspace_root,
+                target_repos=list(baselines.keys()) if baselines else ["default"],
+            )
+
             # Preserve previous dispositions if force reinit
             if existing_dispositions:
                 disp_file = controls_dir / "DISPOSITIONS.json"
@@ -105,6 +125,8 @@ def run_init(
             evidence_dir = workspace_root / "evidence"
             tasks_dir = evidence_dir / "tasks"
             tasks_dir.mkdir(parents=True, exist_ok=True)
+            (evidence_dir / "sentinel.log").touch(mode=0o644, exist_ok=True)
+            (evidence_dir / "sentinel_daemon.log").touch(mode=0o644, exist_ok=True)
 
             # Step 7: Create runtime lock file
             runtime_lock = controls_dir / ".stagecheck.lock"

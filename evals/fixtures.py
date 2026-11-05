@@ -70,7 +70,12 @@ def _git_fixture(repo: Path, files: Dict[str, bytes]) -> str:
 
 def manifest(tool: Path) -> None:
     """Computes MANIFEST.sha256 for the copied tool directory, including external tools."""
-    paths = sorted(p for p in tool.rglob("*") if p.is_file() and p.name != "MANIFEST.sha256")
+    paths = sorted(
+        p for p in tool.rglob("*")
+        if p.is_file() and not p.is_symlink() and p.name != "MANIFEST.sha256"
+        and ".venv" not in p.parts and "dist" not in p.parts and "build" not in p.parts
+        and "__pycache__" not in p.parts and ".pytest_cache" not in p.parts
+    )
     extra = [
         tool / "../evidence/claude_audits/tools/verify_manifest.py",
         tool / "../evidence/claude_audits/tools/verify_state_chain.py",
@@ -132,7 +137,9 @@ def create_test_fixture(
     shutil.copytree(
         tool_source,
         tool,
-        ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc", ".pytest_cache", ".stagecheck.lock"),
+        ignore=shutil.ignore_patterns(
+            ".git", ".venv", "__pycache__", "*.pyc", ".pytest_cache", ".stagecheck.lock", "dist", "build", "*.egg-info", "tests", "docs", "evals"
+        ),
     )
 
     # Disable real commands / agents in test fixtures
@@ -267,7 +274,12 @@ if __name__ == "__main__":
         )
     )
 
-    # Compute manifest.sha256
+    copy = workspace / "instruction_fixture.txt"
+    paths = load(tool / "config/paths.json")
+    paths["instruction_copies"] = [str(copy)]
+    (tool / "config/paths.json").write_bytes(encode(paths))
+
+    # Compute manifest.sha256 after all tool configuration edits are complete
     manifest(tool)
     stagecheck_manifest_hash = digest((tool / "MANIFEST.sha256").read_bytes())
 
@@ -303,12 +315,7 @@ Historical citations
     contract = workspace / "contract.txt"
     contract.write_text(contract_text)
     (workspace / "AGENTS.md").write_text(contract_text)
-    copy = workspace / "instruction_fixture.txt"
     copy.write_text(contract_text)
-
-    paths = load(tool / "config/paths.json")
-    paths["instruction_copies"] = [str(copy)]
-    (tool / "config/paths.json").write_bytes(encode(paths))
 
     # Synthetic Git Repos
     repo = root / "build/product"

@@ -2,7 +2,7 @@
 
 **Task ID:** P1-T1  
 **Phase:** Phase 1 — Repository Baseline, Packaging, and Architecture Foundations  
-**Target Repository:** `/home/laya/Development/StageCheck-Tool/StageCheck`  
+**Target Repository:** `<workspace_root>`  
 **Base Commit:** `b29c0e0` (branch: `main`, upstream: `https://github.com/Layavardhan011/StageCheck.git`)  
 **Active Phase Branch:** `phase/phase-1-foundation`  
 **Date of Audit:** 2026-11-04  

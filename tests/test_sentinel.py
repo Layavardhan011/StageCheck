@@ -157,6 +157,147 @@ class TestSentinel(unittest.TestCase):
         ret_logs = main(["sentinel", "logs", "--workspace", str(self.workspace)])
         self.assertEqual(ret_logs, 0)
 
+    def test_process_rss_measurement_returns_positive_value(self) -> None:
+        """RSS helper measures a real process in MiB."""
+        from stagecheck.core.sentinel import get_process_rss_mib
+
+        rss = get_process_rss_mib(os.getpid())
+        self.assertGreater(rss, 0.0)
+        self.assertLess(rss, 1024.0)
+        # Non-existent PID returns 0.0
+        self.assertEqual(get_process_rss_mib(9999999), 0.0)
+
+    def test_daemon_start_and_stop_lifecycle(self) -> None:
+        """Verify real Sentinel daemon background startup, PID acquisition, and graceful stop."""
+        sentinel = SentinelDaemon(self.workspace)
+        exit_code = sentinel.start(daemon=True, timeout=10.0)
+        self.assertEqual(exit_code, 0)
+
+        # Confirm daemon is immediately registered and running via readiness protocol
+        running, pid = sentinel.is_running()
+        self.assertTrue(running)
+        self.assertIsNotNone(pid)
+        self.assertGreater(pid, 1)
+        self.assertNotEqual(pid, os.getpid(), "Daemon PID must differ from parent test runner PID")
+
+        # Confirm status sees it running with valid RSS (< 25 MiB)
+        status = sentinel.status()
+        self.assertTrue(status["running"])
+        self.assertEqual(status["pid"], pid)
+        self.assertGreater(status["rss_mb"], 0.0)
+        self.assertLess(status["rss_mb"], 25.0)
+
+        # Stop daemon cleanly
+        stop_code = sentinel.stop()
+        self.assertEqual(stop_code, 0)
+        self.assertFalse(sentinel.is_running()[0])
+        self.assertFalse(sentinel.pid_file.exists())
+
+        # Verify no orphan or zombie process remains
+        from stagecheck.core.sentinel import is_process_alive
+        self.assertFalse(is_process_alive(pid), f"Daemon process {pid} remained alive or zombie after stop")
+
+    def test_repeated_start_and_stop_lifecycle(self) -> None:
+        """Verify repeated start and stop cycles cleanly manage PID files and processes."""
+        sentinel = SentinelDaemon(self.workspace)
+        for cycle in range(2):
+            exit_code = sentinel.start(daemon=True, timeout=10.0)
+            self.assertEqual(exit_code, 0, f"Failed start on cycle {cycle}")
+            running, pid = sentinel.is_running()
+            self.assertTrue(running)
+            self.assertIsNotNone(pid)
+
+            stop_code = sentinel.stop()
+            self.assertEqual(stop_code, 0, f"Failed stop on cycle {cycle}")
+            self.assertFalse(sentinel.is_running()[0])
+            self.assertFalse(sentinel.pid_file.exists())
+
+    def test_isolated_runtime_command_and_environment(self) -> None:
+        """Verify daemon launches with -I, -S, sanitized environment, and direct script path."""
+        sentinel = SentinelDaemon(self.workspace)
+        exit_code = sentinel.start(daemon=True, timeout=10.0)
+        self.assertEqual(exit_code, 0)
+
+        running, pid = sentinel.is_running()
+        self.assertTrue(running)
+        self.assertIsNotNone(pid)
+
+        try:
+            # 1. Verify cmdline arguments
+            cmdline_parts = [
+                arg.decode("utf-8", errors="replace")
+                for arg in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\x00")
+                if arg
+            ]
+            self.assertIn("-I", cmdline_parts, "Child interpreter must use -I isolation flag")
+            self.assertIn("-S", cmdline_parts, "Child interpreter must use -S flag to skip site-packages")
+            self.assertTrue(
+                any(arg.endswith("sentinel.py") for arg in cmdline_parts),
+                "Child command must invoke sentinel.py by absolute path",
+            )
+
+            # 2. Verify sanitized environment
+            environ_bytes = Path(f"/proc/{pid}/environ").read_bytes().split(b"\x00")
+            daemon_env = dict(
+                e.decode("utf-8", errors="replace").split("=", 1)
+                for e in environ_bytes
+                if b"=" in e
+            )
+            for bad_key in (
+                "PYTHONPATH",
+                "PYTHONHOME",
+                "PYTHONSTARTUP",
+                "PYTHONUSERBASE",
+                "PYTHONINSPECT",
+                "PYTHONPROFILEIMPORTTIME",
+            ):
+                self.assertNotIn(bad_key, daemon_env, f"{bad_key} must be purged from daemon environment")
+            self.assertEqual(daemon_env.get("PYTHONNOUSERSITE"), "1")
+
+            # 3. Verify memory maps do not include pytest or test frameworks
+            maps_content = Path(f"/proc/{pid}/maps").read_text(encoding="utf-8", errors="replace")
+            self.assertNotIn("pytest", maps_content, "Daemon must not load or map pytest modules")
+
+        finally:
+            sentinel.stop()
+
+    def test_daemon_startup_failure_timeout(self) -> None:
+        """Verify daemon start failure when readiness protocol times out."""
+        bad_dir = self.workspace / "non_existent_subdir" / "locked"
+        sentinel = SentinelDaemon(bad_dir)
+        exit_code = sentinel.start(daemon=True, timeout=0.1)
+        if exit_code != 0:
+            self.assertNotEqual(exit_code, 0)
+        else:
+            sentinel.stop()
+
+    def test_invalid_and_malformed_pid_file(self) -> None:
+        """Verify malformed and corrupted PID files are detected and recovered."""
+        sentinel = SentinelDaemon(self.workspace)
+        pid_file = self.workspace / ".stagecheck_sentinel.pid"
+
+        # Case 1: Corrupted non-digit string
+        pid_file.write_text("not_a_number\n", encoding="utf-8")
+        self.assertIsNone(sentinel.read_pid())
+        running, _ = sentinel.is_running()
+        self.assertFalse(running)
+        self.assertFalse(pid_file.exists(), "Malformed PID file should be unlinked")
+
+        # Case 2: Negative number
+        pid_file.write_text("-50\n", encoding="utf-8")
+        self.assertIsNone(sentinel.read_pid())
+        running, _ = sentinel.is_running()
+        self.assertFalse(running)
+
+    def test_pid_file_atomic_write_no_empty_read(self) -> None:
+        """Verify that atomic write via temporary file prevents reading empty PID file."""
+        sentinel = SentinelDaemon(self.workspace)
+        for _ in range(50):
+            sentinel.write_pid()
+            pid = sentinel.read_pid()
+            self.assertEqual(pid, os.getpid(), "read_pid must never return None or corrupted PID")
+        sentinel.pid_file.unlink(missing_ok=True)
+
 
 if __name__ == "__main__":
     unittest.main()

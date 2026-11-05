@@ -15,7 +15,7 @@ from render_report import render
 from agents import resolve_output,call_agent,validate_instruction
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'checks'))
 from citations import validate_citation
-from secrets import findings
+from secret_findings import findings
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from improve import compare,resolve_evaluation
 
@@ -23,7 +23,12 @@ CHECK_MODULES=['preflight','scope_paths','citations','report_lint','authority','
 
 
 def manifest(tool):
-    paths=sorted(p for p in tool.rglob('*') if p.is_file() and p.name!='MANIFEST.sha256')
+    paths = sorted(
+        p for p in tool.rglob('*')
+        if p.is_file() and not p.is_symlink() and p.name != 'MANIFEST.sha256'
+        and '.venv' not in p.parts and 'dist' not in p.parts and 'build' not in p.parts
+        and '__pycache__' not in p.parts and '.pytest_cache' not in p.parts
+    )
     extra=[tool/'../evidence/claude_audits/tools/verify_manifest.py',tool/'../evidence/claude_audits/tools/verify_state_chain.py',tool/'../qualification/reviews/capture_sp1_evidence.py']
     text=''.join(digest(p.read_bytes())+'  '+str(p.relative_to(tool))+'\n' for p in paths)
     for p in extra:

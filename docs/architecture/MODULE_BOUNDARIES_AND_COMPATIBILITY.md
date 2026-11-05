@@ -2,7 +2,7 @@
 
 **Task ID:** P1-T2  
 **Phase:** Phase 1 — Repository Baseline, Packaging, and Architecture Foundations  
-**Target Repository:** `/home/laya/Development/StageCheck-Tool/StageCheck`  
+**Target Repository:** `<workspace_root>`  
 **Active Phase Branch:** `phase/phase-1-foundation`  
 **Date:** 2026-11-04  
 

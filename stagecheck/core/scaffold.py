@@ -55,6 +55,123 @@ anti-regression invariants that all AI agents must follow during implementation.
 4. Never introduce unencrypted API credentials or secret tokens.
 """
 
+DEFAULT_AGENT1_INSTRUCTIONS_MD = """# Agent 1 Instructions: Prompt Architecture & Governance Auditor
+
+Role: `prompt_and_audit`.
+
+## Purpose
+Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define declared scope (`declared_scope.json`), perform Phase 2A pre-commit cooperative differential reviews, and conduct Phase 3 independent audit reviews.
+
+## Inputs
+- `specs/TASK_PLAN.json`
+- `specs/ARCHITECTURE.md`
+- `controls/ACTIVE_STATE.json`
+- `evidence/tasks/<task_id>/attempt_<N>/`
+
+## Checks
+- Verify task decomposition against architectural contracts.
+- Review uncommitted diffs for scope compliance and secret exposure.
+- Record defect history in `TASK_<ID>_ISSUE_HISTORY.md`.
+
+## Must Not
+- MUST NOT execute mutating Git commands (`git commit`, `git push`, `git merge`, `git rebase`).
+- MUST NOT write product code in `repos/*`.
+- MUST NOT alter control descriptors in `controls/*` or edit `.stagecheck.lock`.
+- Permitted Git commands are strictly read-only: `git status`, `git log`, `git diff`, `git show`, `git blame`, `git branch`.
+"""
+
+DEFAULT_AGENT2_INSTRUCTIONS_MD = """# Agent 2 Instructions: Code Implementation & Test Authoring
+
+Role: `code_implementation`.
+
+## Purpose
+Implement source code, unit tests, and regression coverage for approved tasks on permitted sprint branches.
+
+## Inputs
+- `evidence/tasks/<task_id>/attempt_<N>/Phase-1/prompt.md`
+- `evidence/tasks/<task_id>/attempt_<N>/Phase-1/declared_scope.json`
+- `controls/ACTIVE_STATE.json`
+
+## Checks
+- Ensure code satisfies declared scope without modifying forbidden paths.
+- Ensure all unit tests pass locally before submitting for Phase 2A review.
+- Run local Gitleaks secret check (`gitleaks protect --staged`) prior to commit.
+
+## Must Not
+- MUST NOT execute remote push operations (`git push` is strictly forbidden).
+- MUST NOT commit directly to `main` or `master` branch.
+- MUST NOT modify control descriptors in `controls/*`.
+- MUST NOT alter Gitleaks configuration or create `.gitleaksignore` override files.
+"""
+
+
+def scaffold_agent_instructions(
+    workspace_root: Path,
+    agent1_name: str = "agent1",
+    agent2_name: str = "agent2",
+) -> Dict[str, Path]:
+    """Scaffold instructions/ directory and role instruction markdown files (Specs 03, 08)."""
+    root = Path(workspace_root).resolve()
+    instructions_dir = root / "instructions"
+    instructions_dir.mkdir(parents=True, exist_ok=True)
+
+    paths: Dict[str, Path] = {}
+    if agent1_name == agent2_name:
+        # Single-agent unified dual role
+        single_path = instructions_dir / f"{agent1_name}_dual_role.md"
+        if not single_path.exists():
+            single_content = f"# {agent1_name.capitalize()} Dual-Role Instructions\n\nRole: `dual_role`.\n\n" + DEFAULT_AGENT1_INSTRUCTIONS_MD + "\n---\n" + DEFAULT_AGENT2_INSTRUCTIONS_MD
+            single_path.write_text(single_content, encoding="utf-8")
+        paths[single_path.name] = single_path
+    else:
+        # Dual-agent separate instructions
+        a1_path = instructions_dir / f"{agent1_name}_prompt_and_audit.md"
+        if not a1_path.exists():
+            a1_path.write_text(DEFAULT_AGENT1_INSTRUCTIONS_MD, encoding="utf-8")
+        paths[a1_path.name] = a1_path
+
+        a2_path = instructions_dir / f"{agent2_name}_code_implementation.md"
+        if not a2_path.exists():
+            a2_path.write_text(DEFAULT_AGENT2_INSTRUCTIONS_MD, encoding="utf-8")
+        paths[a2_path.name] = a2_path
+
+    return paths
+
+
+def scaffold_task_plan(
+    workspace_root: Path,
+    target_repos: Optional[List[str]] = None,
+    project_name: str = "stagecheck-workspace",
+) -> Path:
+    """Scaffold initial specs/TASK_PLAN.json roadmap (Specs 04, 10 / GAP-05)."""
+    root = Path(workspace_root).resolve()
+    specs_dir = root / "specs"
+    specs_dir.mkdir(parents=True, exist_ok=True)
+
+    plan_file = specs_dir / "TASK_PLAN.json"
+    if not plan_file.exists():
+        repos = target_repos if target_repos else ["default"]
+        initial_plan = {
+            "schema_version": 1,
+            "project_name": project_name,
+            "created_at": "2026-11-04T00:00:00Z",
+            "updated_at": "2026-11-04T00:00:00Z",
+            "tasks": [
+                {
+                    "task_id": "TASK-01",
+                    "title": "Initial workspace bootstrap and baseline verification",
+                    "description": "Establish baseline repository structure and execute initial preflight validation.",
+                    "status": "planned",
+                    "priority": "HIGH",
+                    "dependencies": [],
+                    "target_repositories": repos,
+                }
+            ],
+        }
+        plan_file.write_text(canonical_json_dumps(initial_plan), encoding="utf-8")
+
+    return plan_file
+
 
 def build_control_descriptors(
     baselines: Dict[str, RepoBaseline],

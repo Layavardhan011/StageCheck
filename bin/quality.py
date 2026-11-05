@@ -126,8 +126,9 @@ def record_shape(record):
         if not re.fullmatch('[0-9a-f]{64}',record['policy_sha256']) or not isinstance(record['evidence'],list):raise ToolError('invalid policy/evidence shape')
     if 'replaces' in record and not re.fullmatch('[0-9a-f]{64}',record['replaces']):raise ToolError('invalid replacement hash')
     if 'note' in record:
-        from secrets import findings
-        if not isinstance(record['note'],str) or '\n' in record['note'] or '\r' in record['note'] or findings('quality-note.txt',record['note']):raise ToolError('invalid or credential-shaped note')
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'checks'))
+        from secret_findings import findings as _sec_findings
+        if not isinstance(record['note'],str) or '\n' in record['note'] or '\r' in record['note'] or _sec_findings('quality-note.txt',record['note']):raise ToolError('invalid or credential-shaped note')
 
 def read_chain(folder):
     """Damage is structural; bad individual record semantics are revalidated later."""
