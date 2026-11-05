@@ -1,0 +1,48 @@
+name: StageCheck Production CI Release Gates
+
+on:
+  push:
+    branches: [ main, master, "fix/**", "feat/**", "release/**" ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  release-gates:
+    name: Production Release Gates & Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install build and test dependencies
+        run: |
+          python -m pip install --upgrade pip build uv pytest
+
+      - name: Gate 1 — Fast Unit and Integration Test Suite
+        run: |
+          uv run pytest -v tests/
+
+      - name: Gate 2 — Full Evaluation and Scenario Mutation Suite
+        run: |
+          uv run pytest -q evals/
+
+      - name: Gate 3 — Sentinel Runtime RSS (<25MB) and Lifecycle Benchmark
+        run: |
+          python3 bin/benchmark_sentinel.py
+
+      - name: Gate 4 — PEP 517 Clean Wheel Build
+        run: |
+          uv build --wheel
+
+      - name: Gate 5 — Clean Isolated Venv Wheel Installation & CLI Smoke Tests
+        run: |
+          bash bin/ci_release_gate.sh --verify-wheel-only
+

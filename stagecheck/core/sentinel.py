@@ -369,7 +369,23 @@ class SentinelDaemon:
             os.set_inheritable(w_pipe, True)
 
             log_path = self.root / "evidence" / "sentinel_daemon.log"
-            log_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                if not log_path.exists():
+                    log_path.touch(mode=0o644, exist_ok=True)
+                else:
+                    try:
+                        os.chmod(str(log_path), 0o644)
+                    except OSError:
+                        pass
+            except (PermissionError, OSError):
+                try:
+                    from stagecheck.core.permissions import controlled_write_transaction
+                    with controlled_write_transaction(self.root / "evidence"):
+                        log_path.touch(mode=0o644, exist_ok=True)
+                        (self.root / "evidence" / "sentinel.log").touch(mode=0o644, exist_ok=True)
+                except Exception:
+                    pass
 
             # Launch Sentinel with a clean, isolated Python runtime.
             # -I: ignore Python environment variables and user site-packages

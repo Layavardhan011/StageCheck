@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 import stagecheck
@@ -41,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     # 2. start
     p_start = subparsers.add_parser("start", help="Activate a new task under exclusive lock.")
     p_start.add_argument("--task", required=True, help="Task identifier (e.g. task-101).")
+    p_start.add_argument("--workspace", help="Explicit workspace root path.")
 
     # 3. verify-prompt
     p_vp = subparsers.add_parser("verify-prompt", help="Verify Phase 1 prompt blueprint and freeze hash.")

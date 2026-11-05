@@ -20,7 +20,7 @@ class TestSmoke(unittest.TestCase):
         self.assertEqual(stagecheck.__version__, "1.0.0")
 
     def test_cli_parser_subcommands(self) -> None:
-        """Verify CLI parser has all 9 lifecycle subcommands registered."""
+        """Verify CLI parser has all 14 lifecycle subcommands registered."""
         parser = build_parser()
         expected_commands = {
             "init",
@@ -32,12 +32,17 @@ class TestSmoke(unittest.TestCase):
             "resume",
             "reset-attempts",
             "disposition",
+            "sentinel",
+            "plan",
+            "unlock",
+            "seal",
+            "log-quality",
         }
         # inspect subparsers
         subparsers_action = next(
             action for action in parser._actions if action.dest == "subcommand"
         )
-        self.assertTrue(expected_commands.issubset(set(subparsers_action.choices.keys())))
+        self.assertEqual(expected_commands, set(subparsers_action.choices.keys()))
 
     def test_cli_execution_smoke(self) -> None:
         """Verify running main() with subcommands."""

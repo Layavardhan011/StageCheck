@@ -54,7 +54,10 @@ def apply_at_rest_permissions(workspace_root: Union[str, Path]) -> None:
                 os.chmod(str(tasks_dir), MODE_DIR_RW)
             for item in evidence_dir.iterdir():
                 if item.is_file():
-                    os.chmod(str(item), MODE_FILE_RO)
+                    if item.name.startswith("sentinel"):
+                        os.chmod(str(item), MODE_FILE_RW)
+                    else:
+                        os.chmod(str(item), MODE_FILE_RO)
         finally:
             os.chmod(str(evidence_dir), MODE_DIR_RO)
 
@@ -100,7 +103,10 @@ def controlled_write_transaction(target_dir: Path) -> Generator[None, None, None
         for item in directory.iterdir():
             if item.is_file() and not item.name.endswith(".lock"):
                 try:
-                    os.chmod(str(item), MODE_FILE_RO)
+                    if item.name.startswith("sentinel"):
+                        os.chmod(str(item), MODE_FILE_RW)
+                    else:
+                        os.chmod(str(item), MODE_FILE_RO)
                 except OSError:
                     pass
         os.chmod(str(directory), MODE_DIR_RO)

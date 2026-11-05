@@ -125,6 +125,8 @@ def run_init(
             evidence_dir = workspace_root / "evidence"
             tasks_dir = evidence_dir / "tasks"
             tasks_dir.mkdir(parents=True, exist_ok=True)
+            (evidence_dir / "sentinel.log").touch(mode=0o644, exist_ok=True)
+            (evidence_dir / "sentinel_daemon.log").touch(mode=0o644, exist_ok=True)
 
             # Step 7: Create runtime lock file
             runtime_lock = controls_dir / ".stagecheck.lock"
