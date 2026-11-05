@@ -57,6 +57,9 @@
     "circuit_breaker_tripped": {
       "type": "boolean"
     },
+    "single_agent_mode": {
+      "type": "boolean"
+    },
     "halt_reason": {
       "type": "string"
     },
@@ -109,6 +112,7 @@
         "max_total_attempts": {"type": "integer"},
         "max_repairs": {"type": "integer"},
         "circuit_breaker_enabled": {"type": "boolean"},
+        "single_agent_mode": {"type": "boolean"},
         "review_timeout_seconds": {"type": "integer"},
         "registered_agents": {
           "type": "array",

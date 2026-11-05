@@ -64,7 +64,7 @@ class TestEndToEndLifecycle(unittest.TestCase):
         """Scenario 1: Happy path lifecycle (init -> verify-prompt -> review -> audit -> seal)."""
         # 1. Setup repository and initialize
         self._setup_git_repo("repos/core-service", "service.py")
-        rc = run_init(self.ws)
+        rc = run_init(self.ws, agent1="agent1", agent2="agent2")
         self.assertEqual(rc, 0, "stagecheck init failed")
 
         # 2. Start task-101
@@ -169,7 +169,7 @@ class TestEndToEndLifecycle(unittest.TestCase):
     def test_e2e_scenario2_adversarial_tampering_detection(self):
         """Scenario 2: Adversarial tampering detected if sealed attempt artifacts are mutated."""
         self._setup_git_repo("repos/core-service", "service.py")
-        run_init(self.ws)
+        run_init(self.ws, agent1="agent1", agent2="agent2")
         run_start(workspace=self.ws, task="task-202")
 
         attempt_dir = self.ws / "evidence/tasks/task-202/attempt_1"
@@ -203,7 +203,7 @@ class TestEndToEndLifecycle(unittest.TestCase):
     def test_e2e_scenario3_adversarial_scope_escape_blocked(self):
         """Scenario 3: Adversarial modification of files outside declared scope is blocked."""
         self._setup_git_repo("repos/core-service", "service.py")
-        run_init(self.ws)
+        run_init(self.ws, agent1="agent1", agent2="agent2")
         run_start(workspace=self.ws, task="task-303")
 
         task_dir = self.ws / "evidence/tasks/task-303/attempt_1/Phase-1"
@@ -256,7 +256,7 @@ class TestEndToEndLifecycle(unittest.TestCase):
         """Scenario 4: Multi-repo aggregate audit rejects completely if any repo fails."""
         self._setup_git_repo("repos/backend", "api.py")
         self._setup_git_repo("repos/frontend", "App.js")
-        run_init(self.ws)
+        run_init(self.ws, agent1="agent1", agent2="agent2")
         run_start(workspace=self.ws, task="task-404")
 
         task_dir = self.ws / "evidence/tasks/task-404/attempt_1/Phase-1"
@@ -313,7 +313,7 @@ class TestEndToEndLifecycle(unittest.TestCase):
     def test_e2e_scenario5_circuit_breaker_and_recovery(self):
         """Scenario 5: 3 attempt failures trip breaker; human reset safely unlatches to attempt 4."""
         self._setup_git_repo("repos/core-service", "service.py")
-        run_init(self.ws)
+        run_init(self.ws, agent1="agent1", agent2="agent2")
         run_start(workspace=self.ws, task="task-505")
 
         # Trip the circuit breaker for task-505 after 3 attempts

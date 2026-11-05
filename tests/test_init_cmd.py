@@ -46,6 +46,8 @@ class TestInitCommand(unittest.TestCase):
             workspace=str(self.workspace),
             repos="payment-service",
             force=False,
+            agent1="agent1",
+            agent2="agent2",
         )
         self.assertEqual(ret, 0)
 
@@ -67,15 +69,15 @@ class TestInitCommand(unittest.TestCase):
     def test_init_rejects_already_initialized_without_force(self) -> None:
         """Verify reinit halt when workspace is already initialized."""
         # Initial run
-        run_init(workspace=str(self.workspace), repos="payment-service", force=False)
+        run_init(workspace=str(self.workspace), repos="payment-service", force=False, agent1="agent1", agent2="agent2")
 
         # Second run without force
-        ret = run_init(workspace=str(self.workspace), repos="payment-service", force=False)
+        ret = run_init(workspace=str(self.workspace), repos="payment-service", force=False, agent1="agent1", agent2="agent2")
         self.assertEqual(ret, 1)
 
     def test_init_with_force_preserves_dispositions(self) -> None:
         """Verify reinit with --force succeeds and preserves prior dispositions."""
-        run_init(workspace=str(self.workspace), repos="payment-service", force=False)
+        run_init(workspace=str(self.workspace), repos="payment-service", force=False, agent1="agent1", agent2="agent2")
 
         # Add a custom disposition waiver
         disp_file = self.workspace / "controls" / "DISPOSITIONS.json"
@@ -83,7 +85,7 @@ class TestInitCommand(unittest.TestCase):
         disp_file.write_text('{"schema_version": "2.0", "dispositions": [{"defect_id": "PRESERVED"}]}', encoding="utf-8")
 
         # Reinit with force
-        ret = run_init(workspace=str(self.workspace), repos="payment-service", force=True)
+        ret = run_init(workspace=str(self.workspace), repos="payment-service", force=True, agent1="agent1", agent2="agent2")
         self.assertEqual(ret, 0)
 
         # Check disposition preserved
@@ -97,6 +99,8 @@ class TestInitCommand(unittest.TestCase):
             workspace=str(self.workspace),
             repos="nonexistent-repo",
             force=False,
+            agent1="agent1",
+            agent2="agent2",
         )
         self.assertEqual(ret, 1)
 
@@ -107,7 +111,7 @@ class TestInitCommand(unittest.TestCase):
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
         try:
-            ret = run_init(workspace=str(self.workspace), repos="payment-service")
+            ret = run_init(workspace=str(self.workspace), repos="payment-service", agent1="agent1", agent2="agent2")
             self.assertEqual(ret, 1)
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -136,10 +140,10 @@ class TestInitCommand(unittest.TestCase):
     def test_init_cli_reinit_flag(self) -> None:
         """Verify CLI parser accepts --reinit as alias for --force."""
         from stagecheck.cli.main import main
-        ret1 = main(["init", "--workspace", str(self.workspace), "--repos", "payment-service"])
+        ret1 = main(["init", "--workspace", str(self.workspace), "--repos", "payment-service", "--agent1", "agent1", "--agent2", "agent2"])
         self.assertEqual(ret1, 0)
         # Calling again with --reinit must succeed
-        ret2 = main(["init", "--workspace", str(self.workspace), "--repos", "payment-service", "--reinit"])
+        ret2 = main(["init", "--workspace", str(self.workspace), "--repos", "payment-service", "--reinit", "--agent1", "agent1", "--agent2", "agent2"])
         self.assertEqual(ret2, 0)
 
 

@@ -38,6 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--repos", help="Comma-separated target repository names.")
     p_init.add_argument("--workspace", help="Explicit workspace root path.")
     p_init.add_argument("--force", "--reinit", action="store_true", dest="force", help="Force re-initialization with owner grant.")
+    p_init.add_argument("--agent1", help="Agent 1 name (Prompt Architect & Auditor).")
+    p_init.add_argument("--agent2", help="Agent 2 name (Code Implementer).")
 
     # 2. start
     p_start = subparsers.add_parser("start", help="Activate a new task under exclusive lock.")
@@ -147,6 +149,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             workspace=getattr(args, "workspace", None),
             repos=getattr(args, "repos", None),
             force=getattr(args, "force", False),
+            agent1=getattr(args, "agent1", None),
+            agent2=getattr(args, "agent2", None),
         )
 
     if args.subcommand == "start":

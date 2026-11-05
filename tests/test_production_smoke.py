@@ -58,7 +58,7 @@ class TestProductionSmoke(unittest.TestCase):
         ws = str(self.workspace_dir)
 
         # 1. Workspace initialization
-        init_exit = main(["init", "--workspace", ws])
+        init_exit = main(["init", "--workspace", ws, "--agent1", "agent1", "--agent2", "agent2"])
         self.assertEqual(init_exit, 0, "stagecheck init failed")
         self.assertTrue((self.workspace_dir / "controls" / "ACTIVE_STATE.json").is_file())
         self.assertTrue((self.workspace_dir / "specs" / "TASK_PLAN.json").is_file())
