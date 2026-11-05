@@ -61,37 +61,16 @@ def run_real_sentinel_benchmark() -> int:
         (workspace_dir / "repos").mkdir(parents=True, exist_ok=True)
         (workspace_dir / "controls" / "ACTIVE_STATE.json").write_text("{}", encoding="utf-8")
 
-        # 2. Launch real Sentinel daemon in background
+        # 2. Launch real Sentinel daemon in background with verified IPC readiness handshake
         daemon = SentinelDaemon(workspace_dir)
-        exit_code = daemon.start(daemon=True)
+        exit_code = daemon.start(daemon=True, timeout=10.0)
         if exit_code != 0:
             print("[FAIL] Failed to initiate daemon start.")
             return 1
 
-        # Wait for daemon process initialization and PID acquisition
-        pid = None
-        for _ in range(100):
-            time.sleep(0.05)
-            running, active_pid = daemon.is_running()
-            if running and active_pid:
-                pid = active_pid
-                break
-
-        if not pid:
-            print("[FAIL] Sentinel daemon PID was not registered within startup timeout.")
-            daemon_log = workspace_dir / "evidence" / "sentinel_daemon.log"
-            if daemon_log.is_file() and daemon_log.stat().st_size > 0:
-                print(f"Daemon process stderr/stdout log:\n{daemon_log.read_text(encoding='utf-8')}")
-            else:
-                print("No daemon process log captured.")
-            sentinel_log = workspace_dir / "evidence" / "sentinel.log"
-            if sentinel_log.is_file() and sentinel_log.stat().st_size > 0:
-                print(f"Sentinel log:\n{sentinel_log.read_text(encoding='utf-8')}")
-            pid_file = workspace_dir / ".stagecheck_sentinel.pid"
-            if pid_file.is_file():
-                print(f"PID file content: '{pid_file.read_text(encoding='utf-8').strip()}'")
-            else:
-                print("PID file does not exist.")
+        running, pid = daemon.is_running()
+        if not running or not pid:
+            print("[FAIL] Sentinel daemon was reported started but is_running check failed.")
             return 1
 
         print(f"Daemon Status: RUNNING (PID {pid})")

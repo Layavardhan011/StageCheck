@@ -95,6 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sentinel.add_argument("--daemon", action="store_true", default=True, help="Run as background daemon (default).")
     p_sentinel.add_argument("--foreground", action="store_false", dest="daemon", help="Run in foreground.")
     p_sentinel.add_argument("--workspace", help="Explicit workspace root path.")
+    p_sentinel.add_argument("--ready-fd", type=int, default=-1, help=argparse.SUPPRESS)
 
     # 11. plan (GAP-05, GAP-H4, GAP-L1)
     p_plan = subparsers.add_parser("plan", help="Manage and validate project task roadmap.")
@@ -226,10 +227,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.subcommand == "sentinel":
         from stagecheck.cli.sentinel_cmd import run_sentinel
+        ready_fd = args.ready_fd if getattr(args, "ready_fd", -1) >= 0 else None
         return run_sentinel(
             action=args.sentinel_action,
             daemon=getattr(args, "daemon", True),
             workspace=getattr(args, "workspace", None),
+            ready_fd=ready_fd,
         )
 
     if args.subcommand == "plan":

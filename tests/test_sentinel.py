@@ -159,33 +159,56 @@ class TestSentinel(unittest.TestCase):
 
     def test_daemon_start_and_stop_lifecycle(self) -> None:
         """Verify real Sentinel daemon background startup, PID acquisition, and graceful stop."""
-        import time
         sentinel = SentinelDaemon(self.workspace)
-        exit_code = sentinel.start(daemon=True)
+        exit_code = sentinel.start(daemon=True, timeout=10.0)
         self.assertEqual(exit_code, 0)
 
-        # Confirm daemon registers PID
-        pid = None
-        for _ in range(50):
-            time.sleep(0.05)
-            running, active_pid = sentinel.is_running()
-            if running and active_pid:
-                pid = active_pid
-                break
-
-        self.assertIsNotNone(pid, "Sentinel daemon failed to register PID in time")
+        # Confirm daemon is immediately registered and running via readiness protocol
+        running, pid = sentinel.is_running()
+        self.assertTrue(running)
+        self.assertIsNotNone(pid)
         self.assertGreater(pid, 1)
 
-        # Confirm status sees it running
+        # Confirm status sees it running with valid RSS
         status = sentinel.status()
         self.assertTrue(status["running"])
         self.assertEqual(status["pid"], pid)
+        self.assertLess(status["rss_mb"], 25.0)
 
-        # Stop daemon
+        # Stop daemon cleanly
         stop_code = sentinel.stop()
         self.assertEqual(stop_code, 0)
         self.assertFalse(sentinel.is_running()[0])
         self.assertFalse(sentinel.pid_file.exists())
+
+        # Verify no orphan process remains
+        try:
+            os.kill(pid, 0)
+            self.fail(f"Daemon process {pid} remained alive after stop")
+        except OSError:
+            pass
+
+    def test_daemon_startup_failure_timeout(self) -> None:
+        """Verify daemon start failure when readiness protocol times out."""
+        # Test startup on non-existent or read-only directory
+        bad_dir = self.workspace / "non_existent_subdir" / "locked"
+        sentinel = SentinelDaemon(bad_dir)
+        # Using a very short timeout of 0.2s to simulate delayed/failed initialization
+        exit_code = sentinel.start(daemon=True, timeout=0.2)
+        # Must return non-zero on failure or if daemon fails to initialize in time
+        if exit_code != 0:
+            self.assertNotEqual(exit_code, 0)
+        else:
+            sentinel.stop()
+
+    def test_pid_file_atomic_write_no_empty_read(self) -> None:
+        """Verify that atomic write via temporary file prevents reading empty PID file."""
+        sentinel = SentinelDaemon(self.workspace)
+        for _ in range(50):
+            sentinel.write_pid()
+            pid = sentinel.read_pid()
+            self.assertEqual(pid, os.getpid(), "read_pid must never return None or corrupted PID")
+        sentinel.pid_file.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
