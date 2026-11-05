@@ -147,6 +147,53 @@ def _is_path_in_scope(rel_path: str, declared_scope: Dict[str, Any]) -> bool:
     return False
 
 
+def get_process_rss_mib(pid: int) -> float:
+    """Return current resident memory (RSS) for a process in MiB."""
+    statm_path = Path(f"/proc/{pid}/statm")
+    if not statm_path.is_file():
+        return 0.0
+
+    try:
+        fields = statm_path.read_text(encoding="utf-8").split()
+        if len(fields) < 2:
+            return 0.0
+
+        resident_pages = int(fields[1])
+        page_size_bytes = os.sysconf("SC_PAGE_SIZE")
+        rss_bytes = resident_pages * page_size_bytes
+        return rss_bytes / (1024.0 * 1024.0)
+    except (OSError, ValueError):
+        return 0.0
+
+
+def is_process_alive(pid: int) -> bool:
+    """Check if process is alive and not a zombie/dead process."""
+    if pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+
+    proc_status = Path(f"/proc/{pid}/status")
+    if proc_status.is_file():
+        try:
+            for line in proc_status.read_text(encoding="utf-8").splitlines():
+                if line.startswith("State:"):
+                    state = line.split()[1]
+                    if state.upper() in ("Z", "X"):
+                        # Reaping child if directly owned
+                        try:
+                            os.waitpid(pid, os.WNOHANG)
+                        except OSError:
+                            pass
+                        return False
+                    break
+        except OSError:
+            return False
+    return True
+
+
 def classify_event_path(
     workspace_root: Union[str, Path],
     rel_path: str,
@@ -267,7 +314,7 @@ class SentinelDaemon:
 
         try:
             content = self.pid_file.read_text(encoding="utf-8").strip()
-            return int(content) if content else None
+            return int(content) if content.isdigit() else None
         except Exception:
             return None
 
@@ -275,16 +322,19 @@ class SentinelDaemon:
         """Check whether the Sentinel daemon process is currently alive."""
         pid = self.read_pid()
         if not pid or pid <= 1:
+            if self.pid_file.is_file() and not self.pid_file.is_symlink():
+                try:
+                    content = self.pid_file.read_text(encoding="utf-8").strip()
+                    if not content.isdigit():
+                        self.pid_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
             return False, None
 
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not is_process_alive(pid):
             # Stale PID file: auto-recover
             self.pid_file.unlink(missing_ok=True)
             return False, None
-        except PermissionError:
-            raise PidConflictError(f"PID {pid} in .stagecheck_sentinel.pid belongs to another user.")
 
         return True, pid
 
@@ -316,30 +366,84 @@ class SentinelDaemon:
 
         if daemon:
             r_pipe, w_pipe = os.pipe()
-            os.set_inheritable(r_pipe, False)
             os.set_inheritable(w_pipe, True)
 
-            pid1 = os.fork()
-            if pid1 > 0:
+            log_path = self.root / "evidence" / "sentinel_daemon.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Launch Sentinel with a clean, isolated Python runtime.
+            # -I: ignore Python environment variables and user site-packages
+            # -S: do not initialize site-packages or sitecustomize
+            # Execute this module by absolute file path so the daemon does not
+            # depend on PYTHONPATH or the parent's imported Python environment.
+            sentinel_script = Path(__file__).resolve()
+            python_bin = os.path.realpath(sys.executable or "/usr/bin/python3")
+
+            env = os.environ.copy()
+
+            # Remove Python startup configuration inherited from pytest, IDEs,
+            # application launchers, or other instrumented parent processes.
+            for key in (
+                "PYTHONPATH",
+                "PYTHONHOME",
+                "PYTHONSTARTUP",
+                "PYTHONUSERBASE",
+                "PYTHONINSPECT",
+                "PYTHONPROFILEIMPORTTIME",
+            ):
+                env.pop(key, None)
+
+            env["PYTHONNOUSERSITE"] = "1"
+
+            cmd = [
+                python_bin,
+                "-I",
+                "-S",
+                str(sentinel_script),
+                "--workspace",
+                str(self.root),
+                "--ready-fd",
+                str(w_pipe),
+            ]
+
+            process: Optional[subprocess.Popen] = None
+            try:
+                with open(log_path, "ab", buffering=0) as daemon_log:
+                    process = subprocess.Popen(
+                        cmd,
+                        stdin=subprocess.DEVNULL,
+                        stdout=daemon_log,
+                        stderr=daemon_log,
+                        env=env,
+                        cwd=str(self.root),
+                        close_fds=True,
+                        pass_fds=(w_pipe,),
+                        start_new_session=True,
+                    )
+
                 os.close(w_pipe)
-                os.waitpid(pid1, 0)
+                w_pipe = -1
 
-                # Wait for daemon readiness notification over IPC pipe
-                t_deadline = time.time() + timeout
+                deadline = time.monotonic() + timeout
                 ready_data = b""
-                while time.time() < t_deadline:
-                    remaining = max(0.05, t_deadline - time.time())
-                    rlist, _, _ = select.select([r_pipe], [], [], min(remaining, 0.2))
-                    if rlist:
-                        chunk = os.read(r_pipe, 1024)
-                        if not chunk:
-                            # Child closed write end without emitting readiness
-                            break
-                        ready_data += chunk
-                        if b"\n" in ready_data:
-                            break
 
-                os.close(r_pipe)
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        break
+
+                    remaining = max(0.01, deadline - time.monotonic())
+                    readable, _, _ = select.select([r_pipe], [], [], min(remaining, 0.2))
+                    if not readable:
+                        continue
+
+                    chunk = os.read(r_pipe, 1024)
+                    if not chunk:
+                        break
+
+                    ready_data += chunk
+                    if b"\n" in ready_data:
+                        break
+
                 marker = ready_data.decode("utf-8", errors="replace").strip()
                 actual_pid = None
                 if marker.startswith("READY "):
@@ -348,78 +452,51 @@ class SentinelDaemon:
                     except (IndexError, ValueError):
                         actual_pid = None
 
-                is_alive = False
-                if actual_pid:
-                    try:
-                        os.kill(actual_pid, 0)
-                        is_alive = True
-                    except OSError:
-                        is_alive = False
-
-                if is_alive and self.read_pid() == actual_pid:
+                if actual_pid is not None and is_process_alive(actual_pid) and self.read_pid() == actual_pid:
                     print(f"Started StageCheck Sentinel daemon in background (PID {actual_pid}).")
                     return 0
 
-                # Startup failure diagnostics
-                print(f"[FAIL] Sentinel daemon failed to initialize within {timeout:.1f}s timeout.")
-                daemon_log = self.root / "evidence" / "sentinel_daemon.log"
-                if daemon_log.is_file() and daemon_log.stat().st_size > 0:
-                    print(f"Daemon process stderr/stdout log:\n{daemon_log.read_text(encoding='utf-8')}")
-                else:
-                    print("No daemon process log captured.")
+                print(f"[FAIL] Sentinel daemon failed to initialize within {timeout:.1f}s.")
+                if process and process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=2.0)
+
+                if log_path.is_file():
+                    try:
+                        log_content = log_path.read_text(encoding="utf-8", errors="replace").strip()
+                        if log_content:
+                            print(f"Daemon process log:\n{log_content}")
+                    except Exception:
+                        pass
+
                 return 1
 
-            os.close(r_pipe)
-            os.setsid()
+            except Exception as exc:
+                print(f"[FAIL] Sentinel startup error: {exc}")
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=2.0)
+                return 1
 
-            pid2 = os.fork()
-            if pid2 > 0:
-                # Intermediate child exits, reparenting pid2 to init (PID 1)
-                os._exit(0)
-
-            # Child 2 (Daemon process)
-            # Set up daemon stdout/stderr log
-            (self.root / "evidence").mkdir(parents=True, exist_ok=True)
-            log_path = str(self.root / "evidence" / "sentinel_daemon.log")
-            log_fd = os.open(log_path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
-            devnull_r = os.open(os.devnull, os.O_RDONLY)
-
-            # Use literal standard file descriptors 0 (stdin), 1 (stdout), 2 (stderr)
-            # Avoid sys.stdin.fileno() which raises UnsupportedOperation in pytest/test runners
-            os.dup2(devnull_r, 0)
-            os.dup2(log_fd, 1)
-            os.dup2(log_fd, 2)
-            os.close(devnull_r)
-            os.close(log_fd)
-
-            # Cleanly replace child memory with fresh Python process running minimal sentinel module
-            # This purges parent heap/test fixtures and guarantees < 25MB RSS
-            env = os.environ.copy()
-            tool_root = str(Path(__file__).resolve().parents[2])
-            all_paths = [p for p in sys.path if p and os.path.exists(p)]
-            if tool_root not in all_paths:
-                all_paths.insert(0, tool_root)
-            env["PYTHONPATH"] = os.pathsep.join(all_paths)
-            env["STAGECHECK_SENTINEL_READY_FD"] = str(w_pipe)
-
-            python_bin = sys.executable or shutil.which("python3") or "/usr/bin/python3"
-            cmd = [
-                python_bin,
-                "-m",
-                "stagecheck.core.sentinel",
-                "--workspace",
-                str(self.root),
-                "--ready-fd",
-                str(w_pipe),
-            ]
-            sys.stdout.flush()
-            sys.stderr.flush()
-            try:
-                os.execvpe(python_bin, cmd, env)
-            except Exception as e:
-                sys.stderr.write(f"execvpe failed: {e}\n")
-                sys.stderr.flush()
-                os._exit(1)
+            finally:
+                if r_pipe >= 0:
+                    try:
+                        os.close(r_pipe)
+                    except OSError:
+                        pass
+                if w_pipe >= 0:
+                    try:
+                        os.close(w_pipe)
+                    except OSError:
+                        pass
         else:
             def _handle_term(signum, frame):
                 sys.exit(0)
@@ -451,13 +528,21 @@ class SentinelDaemon:
         for _ in range(50):
             time.sleep(0.1)
             try:
-                os.kill(pid, 0)
+                reaped, _ = os.waitpid(pid, os.WNOHANG)
+                if reaped == pid:
+                    break
             except OSError:
+                pass
+            if not is_process_alive(pid):
                 break
         else:
             # Escalate to SIGKILL
             try:
                 os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                os.waitpid(pid, os.WNOHANG)
             except OSError:
                 pass
 
@@ -484,15 +569,16 @@ class SentinelDaemon:
                 pass
 
         if running and pid:
-            proc_statm = Path(f"/proc/{pid}/statm")
-            if proc_statm.is_file():
-                try:
-                    parts = proc_statm.read_text(encoding="utf-8").split()
-                    resident_pages = int(parts[1])
-                    page_size_kb = os.sysconf("SC_PAGE_SIZE") / 1024
-                    rss_mb = (resident_pages * page_size_kb) / 1024
-                except Exception:
-                    pass
+            rss_mb = get_process_rss_mib(pid)
+
+        return {
+            "running": running,
+            "pid": pid,
+            "rss_mb": round(rss_mb, 2),
+            "active_task": active_task,
+            "single_agent_mode": single_agent,
+            "log_file": str(self.log_file),
+        }
 
         return {
             "running": running,

@@ -28,7 +28,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from stagecheck.core.sentinel import SentinelDaemon
+from stagecheck.core.sentinel import SentinelDaemon, get_process_rss_mib, is_process_alive
 
 
 def parse_proc_stat(pid: int) -> tuple[int, int]:
@@ -44,12 +44,14 @@ def parse_proc_stat(pid: int) -> tuple[int, int]:
 def run_real_sentinel_benchmark() -> int:
     bench_start = time.perf_counter()
     workspace_dir = Path(tempfile.mkdtemp(prefix="stagecheck_sentinel_bench_"))
+    parent_pid = os.getpid()
 
     print("=" * 72)
     print("STAGECHECK SENTINEL RUNTIME PERFORMANCE BENCHMARK")
     print("=" * 72)
     print(f"Platform:      {platform.system()} {platform.release()} ({platform.machine()})")
     print(f"Python:        {platform.python_version()} ({platform.python_implementation()})")
+    print(f"Parent PID:    {parent_pid}")
     print(f"Workspace:     {workspace_dir}")
     print("-" * 72)
 
@@ -62,8 +64,12 @@ def run_real_sentinel_benchmark() -> int:
         (workspace_dir / "controls" / "ACTIVE_STATE.json").write_text("{}", encoding="utf-8")
 
         # 2. Launch real Sentinel daemon in background with verified IPC readiness handshake
+        t_start_init = time.perf_counter()
         daemon = SentinelDaemon(workspace_dir)
         exit_code = daemon.start(daemon=True, timeout=10.0)
+        t_ready = time.perf_counter()
+        readiness_duration_ms = (t_ready - t_start_init) * 1000.0
+
         if exit_code != 0:
             print("[FAIL] Failed to initiate daemon start.")
             return 1
@@ -74,21 +80,12 @@ def run_real_sentinel_benchmark() -> int:
             return 1
 
         print(f"Daemon Status: RUNNING (PID {pid})")
+        print(f"Readiness:     {readiness_duration_ms:.2f} ms to achieve full IPC readiness")
 
         # 3. Measure real memory RSS via /proc/<pid>/statm
-        statm_path = Path(f"/proc/{pid}/statm")
-        if not statm_path.is_file():
-            print(f"[FAIL] Cannot access {statm_path}")
-            return 1
-
-        statm_parts = statm_path.read_text(encoding="utf-8").split()
-        rss_pages = int(statm_parts[1])
-        page_size_bytes = os.sysconf("SC_PAGE_SIZE")
-        rss_bytes = rss_pages * page_size_bytes
-        rss_mib = rss_bytes / (1024.0 * 1024.0)
-
+        rss_mib = get_process_rss_mib(pid)
         rss_passed = rss_mib < 25.0
-        print(f"Memory RSS:    {rss_mib:.2f} MiB (Target: < 25.00 MiB) -> {'PASS' if rss_passed else 'FAIL'}")
+        print(f"Initial RSS:   {rss_mib:.2f} MiB (Target: < 25.00 MiB) -> {'PASS' if rss_passed else 'FAIL'}")
 
         # 4. Measure real idle CPU usage via /proc/<pid>/stat sampling
         u1, s1 = parse_proc_stat(pid)
@@ -167,7 +164,12 @@ def run_real_sentinel_benchmark() -> int:
             f"-> {'PASS' if throughput_passed else 'FAIL'}"
         )
 
-        # 7. Verify event correctness in sentinel.log
+        # 7. Measure sustained RSS after workload
+        sustained_rss_mib = get_process_rss_mib(pid)
+        sustained_rss_passed = sustained_rss_mib < 25.0
+        print(f"Sustained RSS:  {sustained_rss_mib:.2f} MiB (Target: < 25.00 MiB) -> {'PASS' if sustained_rss_passed else 'FAIL'}")
+
+        # 8. Verify event correctness in sentinel.log
         log_content = log_file.read_text(encoding="utf-8") if log_file.is_file() else ""
         correctness_passed = (
             "Tier 1" in log_content
@@ -176,22 +178,17 @@ def run_real_sentinel_benchmark() -> int:
         )
         print(f"Correctness:   {'PASS' if correctness_passed else 'FAIL'} (Verified Tier 1 router labels)")
 
-        # 8. Clean shutdown & verify no leaked processes
+        # 9. Clean shutdown & verify no leaked processes
+        t_stop_start = time.perf_counter()
         stop_exit = daemon.stop()
+        t_stop_end = time.perf_counter()
+        shutdown_ms = (t_stop_end - t_stop_start) * 1000.0
+
         stopped_cleanly = stop_exit == 0 and not daemon.is_running()[0]
-
-        # Detect leaked processes: verify pid is no longer active
-        process_leaked = True
-        for _ in range(30):
-            try:
-                os.kill(pid, 0)
-                time.sleep(0.05)
-            except OSError:
-                process_leaked = False
-                break
-
-        no_leaks = stopped_cleanly and not process_leaked
-        print(f"Clean Stop:    {'PASS' if no_leaks else 'FAIL'} (PID file unlinked, zero orphan processes)")
+        alive_after_stop = is_process_alive(pid)
+        no_leaks = stopped_cleanly and not alive_after_stop
+        print(f"Shutdown Time: {shutdown_ms:.2f} ms")
+        print(f"Clean Stop:    {'PASS' if no_leaks else 'FAIL'} (PID file unlinked, zero orphan/zombie processes)")
 
         total_duration = time.perf_counter() - bench_start
         print("-" * 72)
@@ -200,6 +197,7 @@ def run_real_sentinel_benchmark() -> int:
 
         all_passed = (
             rss_passed
+            and sustained_rss_passed
             and cpu_passed
             and latency_passed
             and throughput_passed

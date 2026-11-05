@@ -139,8 +139,8 @@ uv run --extra dev pytest -q tests/test_task_plan.py
 - **Investigation Finding:** `evals/fixtures.py` and `evals/run_evals.py` previously copied the repository root into synthetic workspace fixtures without excluding `.venv` or build artifacts. This caused massive file copying (800+ files) and SHA-256 manifest hashing overhead (~60s per test), as well as symlink rejection on `.venv/bin/python`.
 - **Remediation:** Pruned `.venv`, `dist`, `build`, and cache directories from synthetic fixtures and manifest calculations.
 - **Documented Execution Commands:**
-  - Fast Unit & Integration Suite: `uv run pytest -q tests/` (186 passed in ~8s).
-  - Comprehensive Evaluation Mutation Suite: `uv run pytest -q evals/` (164 tests).
+  - Fast Unit & Integration Suite: `uv run pytest -q tests/` (204 passed, 62 subtests passed in ~11s).
+  - Comprehensive Evaluation Mutation Suite: `uv run pytest -q evals/` (164 passed, 239 subtests passed).
 
 ---
 
@@ -172,14 +172,15 @@ Confirmed: All 14 subcommands, embedded schemas, default configs, and agent inst
 Measured directly on the live system via `python3 bin/benchmark_sentinel.py` against a real spawned background daemon process (`SentinelDaemon`) using kernel `/proc` interfaces and Linux `inotify`:
 
 - **Platform:** Linux 7.0.0-38-generic (x86_64), CPython 3.12.3
-- **Background Daemon:** Spawns real detached process via canonical double-fork `os.execvpe` + `os.setsid()`, verified via `os.kill(pid, 0)`
-- **Memory RSS (Active Process via `/proc/<pid>/statm`):** `16.15 MiB` (Target: `< 25.00 MiB`) -> **PASS**
+- **Background Daemon:** Spawns detached process session via `subprocess.Popen(start_new_session=True)` using POSIX spawn, completely eliminating multithreaded `fork()` deprecation warnings and deadlocks.
+- **Runtime Interpreter Isolation:** Launches Python with `-I` (ignore Python environment variables and user site-packages) and `-S` (skip site-packages and sitecustomize), invoking `sentinel.py` directly by absolute path with sanitized `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `PYTHONUSERBASE`, `PYTHONINSPECT`, and `PYTHONPROFILEIMPORTTIME`.
+- **Memory RSS (Active Process via `/proc/<pid>/statm`):** `17.31 MiB` initial, `17.40 MiB` sustained (Target: `< 25.00 MiB`) -> **PASS**
 - **Idle CPU Load (via `/proc/<pid>/stat` sampling):** `0.00%` (raw ticks: 0, interval: 1.00s) (Target: `0.00%` / `< 1.00%`) -> **PASS**
-- **Real Inotify Event Latency:** `0.23 ms avg` (min: `0.09 ms`, max: `0.76 ms`) (Target: `< 50.00 ms`) -> **PASS**
-- **Throughput:** `14,608.7 events/sec` (50 events in 0.003s) -> **PASS**
+- **Real Inotify Event Latency:** `0.22 ms avg` (min: `0.09 ms`, max: `0.73 ms`) (Target: `< 50.00 ms`) -> **PASS**
+- **Throughput:** `13,421.7 events/sec` (50 events in 0.004s) -> **PASS**
 - **Correctness:** `PASS` (Verified Tier 1 router labels)
-- **Clean Daemon Termination:** Verified via SIGTERM, PID file unlinking, and zero orphan/zombie processes -> **PASS**
-- **Total Benchmark Execution Time:** `1.15 s`
+- **Clean Daemon Termination:** Verified via SIGTERM, atomic PID file unlinking, and zombie auto-reaping (`is_process_alive`) -> **PASS** (100.26 ms shutdown)
+- **Total Benchmark Execution Time:** `1.41 s`
 
 ---
 
@@ -190,8 +191,8 @@ Measured directly on the live system via `python3 bin/benchmark_sentinel.py` aga
 - [x] Universal provider support works with zero hardcoded provider assumptions in shared logic.
 - [x] Required secret scanning fails closed across all 9 operational conditions and is verified across Stage 1, Stage 6, and Pre-commit.
 - [x] Test harness portability verified (works after clean extraction without executable bit, zero reliance on host tools).
-- [x] Root-level test collection succeeds across all test suites (`361 tests collected, 0 errors`).
-- [x] Fast unit & integration test suite succeeds (`197 passed, 62 subtests passed in 9.65s`).
+- [x] Root-level test collection succeeds across all test suites (`368 tests collected, 0 errors`).
+- [x] Fast unit & integration test suite succeeds (`204 passed, 62 subtests passed in 10.79s`).
 - [x] Evaluation suite performance investigated, remediated, and fully passing (`164 passed, 239 subtests passed`).
 - [x] Cooperative review is enforced with uncommitted diff fidelity and secret scan gate.
 - [x] Formal attempt limits are enforced with circuit breaker trips at attempt 3.
