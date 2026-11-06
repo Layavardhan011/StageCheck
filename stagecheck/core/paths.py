@@ -134,7 +134,17 @@ def safe_resolve(
             )
         candidate = (root_path / normalized)
 
-    # Symlink validation
+    # Check intermediate parent components up to root_path to prevent symlink traversal (SEC-02)
+    curr = candidate
+    while curr != curr.parent and curr != root_path:
+        if curr.is_symlink():
+            if not allow_symlinks or (curr != candidate):
+                raise SymlinkPathEscapeError(
+                    f"Security violation [INTERMEDIATE_SYMLINK]: Component '{curr}' is a symbolic link."
+                )
+        curr = curr.parent
+
+    # Symlink validation on leaf
     if candidate.is_symlink():
         if not allow_symlinks:
             raise SymlinkPathEscapeError(
@@ -154,6 +164,61 @@ def safe_resolve(
         )
 
     return resolved_candidate
+
+
+def validate_attempt_root_symlinks(
+    attempt_dir: Union[str, Path],
+    workspace_root: Union[str, Path],
+) -> Path:
+    """Pre-resolution validation: inspects path components for symlinks BEFORE resolving (FR-12 / SEC-02).
+
+    Inspects attempt root and each parent directory component up to workspace_root
+    using os.path.islink() before invoking resolve(), strictly failing closed on any symlinks.
+
+    Args:
+        attempt_dir: Path to attempt directory.
+        workspace_root: Governing workspace root boundary.
+
+    Returns:
+        Canonical, resolved Path object to the attempt directory.
+
+    Raises:
+        PathTraversalError: If traversal escapes the root.
+        SymlinkPathEscapeError: If the attempt root or any intermediate component is a symlink.
+        PathOutsideBoundaryError: If the resolved path escapes workspace_root.
+    """
+    ws_root = Path(workspace_root).resolve()
+    raw_attempt = Path(attempt_dir)
+
+    # 1. Path traversal check on raw path parts
+    if ".." in raw_attempt.parts:
+        raise PathTraversalError(f"Forbidden directory traversal '..' in attempt root: '{attempt_dir}'.")
+
+    cand = raw_attempt if raw_attempt.is_absolute() else (ws_root / raw_attempt)
+
+    # 2. Check if attempt root itself is a symlink
+    if os.path.islink(cand):
+        raise SymlinkPathEscapeError(
+            f"Evidence integrity defect [ATTEMPT_ROOT_SYMLINK]: Attempt root '{cand}' is a symbolic link."
+        )
+
+    # 3. Check every parent component up to workspace root BEFORE resolving
+    curr = cand
+    while curr != curr.parent and curr != ws_root:
+        if os.path.islink(curr):
+            raise SymlinkPathEscapeError(
+                f"Evidence integrity defect [PARENT_SYMLINK]: Parent component '{curr}' is a symbolic link."
+            )
+        curr = curr.parent
+
+    # 4. Resolve and verify containment
+    resolved = cand.resolve()
+    if not is_path_contained(resolved, ws_root):
+        raise PathOutsideBoundaryError(
+            f"Attempt directory '{resolved}' escapes workspace root '{ws_root}'."
+        )
+
+    return resolved
 
 
 def to_portable_posix(path: Union[str, Path]) -> str:
