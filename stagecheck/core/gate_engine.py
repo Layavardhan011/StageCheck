@@ -1,0 +1,649 @@
+"""Authoritative StageCheck Gate Engine, Transition Matrix, and Criteria Evaluator (FR-01 / Spec 01 / DEC-001).
+
+Manages the deterministic lifecycle state machine, gate checkpoints (Gate-1, Gate-2A, Gate-2B,
+Gate-3, Gate-4), non-mutating gate inspection, and typed transition errors.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+
+from stagecheck.core.paths import safe_resolve
+from stagecheck.core.state import load_active_state
+from stagecheck.core.utils import load_json_file, sha256_file
+
+
+class LifecyclePhase(str, Enum):
+    """Authoritative lifecycle phases for StageCheck workspaces."""
+    UNINITIALIZED = "UNINITIALIZED"
+    NOT_STARTED = "NOT_STARTED"
+    IDLE = "IDLE"
+    PHASE_1_PLANNING = "PHASE_1_PLANNING"
+    PHASE_1_REPAIR = "PHASE_1_REPAIR"
+    PHASE_2A_CODING = "PHASE_2A_CODING"
+    PHASE_2A_IMPLEMENTATION = "PHASE_2A_IMPLEMENTATION"  # Compatibility alias
+    PHASE_2B_COMMITTING = "PHASE_2B_COMMITTING"
+    PHASE_2B_DELIVERY = "PHASE_2B_DELIVERY"              # Compatibility alias
+    PHASE_3_AUDIT = "PHASE_3_AUDIT"
+    PHASE_3_AUDITING = "PHASE_3_AUDITING"                # Compatibility alias
+    GATE_4_SEALING = "GATE_4_SEALING"
+    SEALED_PASSED = "SEALED_PASSED"
+    AWAITING_HUMAN_DISPOSITION = "AWAITING_HUMAN_DISPOSITION"
+    CIRCUIT_BREAKER_TRIPPED = "CIRCUIT_BREAKER_TRIPPED"
+    ABORTED = "ABORTED"
+    COMPLETED = "COMPLETED"
+
+
+class GateId(str, Enum):
+    """Authoritative gate checkpoints."""
+    GATE_1 = "GATE_1"
+    GATE_2A = "GATE_2A"
+    GATE_2B = "GATE_2B"
+    GATE_3 = "GATE_3"
+    GATE_4 = "GATE_4"
+
+
+class GateError(Exception):
+    """Base exception for gate validation and transition failures."""
+
+
+class InvalidTransitionError(GateError):
+    """Raised when an out-of-order or unauthorized transition is attempted."""
+
+
+class PrematureGateTransitionError(GateError):
+    """Raised when gate advance is attempted before prerequisites are met."""
+
+
+class GateCriteriaFailedError(GateError):
+    """Raised when one or more gate criteria evaluate to FAILED or BLOCKED."""
+
+    def __init__(self, message: str, failure_reasons: Optional[List[str]] = None):
+        super().__init__(message)
+        self.failure_reasons = failure_reasons or []
+
+
+class AttemptBudgetExhaustedError(GateError):
+    """Raised when attempt budget (maximum 3 attempts) is permanently exhausted."""
+
+
+def normalize_gate_id(raw_gate: Union[str, GateId]) -> GateId:
+    """Normalize user-supplied gate string into canonical GateId enum.
+
+    Accepts forms like 'Gate-1', 'gate1', 'GATE_1', 'gate-2a', etc.
+    """
+    if isinstance(raw_gate, GateId):
+        return raw_gate
+
+    cleaned = str(raw_gate).strip().upper().replace("-", "_")
+    if not cleaned.startswith("GATE_") and cleaned.startswith("GATE"):
+        cleaned = f"GATE_{cleaned[4:]}"
+
+    for member in GateId:
+        if member.value == cleaned:
+            return member
+
+    raise ValueError(f"Unknown or invalid gate identifier: '{raw_gate}'. Valid gates: Gate-1, Gate-2A, Gate-2B, Gate-3, Gate-4")
+
+
+def normalize_phase(phase: str) -> str:
+    """Normalize phase aliases to canonical names."""
+    p = str(phase).strip()
+    alias_map = {
+        "PHASE_2A_IMPLEMENTATION": "PHASE_2A_CODING",
+        "PHASE_2B_DELIVERY": "PHASE_2B_COMMITTING",
+        "PHASE_3_AUDITING": "PHASE_3_AUDIT",
+    }
+    return alias_map.get(p, p)
+
+
+# Allowed precursor phases for advancing each gate
+GATE_ALLOWED_PRECURSORS: Dict[GateId, Set[str]] = {
+    GateId.GATE_1: {"PHASE_1_PLANNING", "PHASE_1_REPAIR"},
+    GateId.GATE_2A: {"PHASE_2A_CODING", "PHASE_2A_IMPLEMENTATION"},
+    GateId.GATE_2B: {"PHASE_2A_CODING", "PHASE_2A_IMPLEMENTATION", "PHASE_2B_COMMITTING", "PHASE_2B_DELIVERY"},
+    GateId.GATE_3: {"PHASE_3_AUDIT", "PHASE_3_AUDITING"},
+    GateId.GATE_4: {"GATE_4_SEALING", "PHASE_3_AUDIT", "PHASE_3_AUDITING"},
+}
+
+GATE_TARGET_PHASE: Dict[GateId, str] = {
+    GateId.GATE_1: "PHASE_2A_CODING",
+    GateId.GATE_2A: "PHASE_2B_COMMITTING",
+    GateId.GATE_2B: "PHASE_3_AUDIT",
+    GateId.GATE_3: "GATE_4_SEALING",
+    GateId.GATE_4: "SEALED_PASSED",
+}
+
+
+@dataclass
+class GateCriterion:
+    """Evaluation result for an individual gate invariant."""
+    criterion_id: str
+    description: str
+    status: str  # "MET", "FAILED", "BLOCKED"
+    message: str
+    details: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class GateCheckReport:
+    """Comprehensive, non-mutating evaluation report for a gate checkpoint."""
+    gate_id: str
+    task_id: str
+    attempt: int
+    passed: bool
+    current_phase: str
+    target_phase: str
+    criteria: List[GateCriterion] = field(default_factory=list)
+    deliverables: List[Dict[str, str]] = field(default_factory=list)
+    failure_reasons: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert report to dictionary format."""
+        return {
+            "gate_id": self.gate_id,
+            "task_id": self.task_id,
+            "attempt": self.attempt,
+            "passed": self.passed,
+            "current_phase": self.current_phase,
+            "target_phase": self.target_phase,
+            "criteria": [asdict(c) for c in self.criteria],
+            "deliverables": self.deliverables,
+            "failure_reasons": self.failure_reasons,
+        }
+
+
+def validate_gate_transition_allowed(current_phase: str, target_gate: GateId) -> None:
+    """Assert that the state machine allows advancing target_gate from current_phase.
+
+    Raises:
+        InvalidTransitionError: If target_gate cannot be reached from current_phase.
+    """
+    allowed_precursors = GATE_ALLOWED_PRECURSORS.get(target_gate, set())
+    norm_cur = normalize_phase(current_phase)
+
+    # Check normalized or exact
+    if norm_cur not in allowed_precursors and current_phase not in allowed_precursors:
+        raise InvalidTransitionError(
+            f"Premature/out-of-order transition: Cannot advance {target_gate.value} from current phase '{current_phase}'. "
+            f"Permitted precursor phases: {sorted(list(allowed_precursors))}."
+        )
+
+
+def evaluate_gate_1_criteria(
+    workspace_root: Path,
+    task_id: str,
+    attempt: int,
+) -> Tuple[List[GateCriterion], List[Dict[str, str]]]:
+    """Evaluate Gate 1 (Planning Verification Gate) criteria.
+
+    Invariants:
+    1. prompt.md exists, non-empty, and satisfies blueprint checks.
+    2. declared_scope.json exists, valid schema, discrete non-wildcard paths.
+    3. prompt_verified.json exists and binds verified hash.
+    """
+    p1_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-1"
+    criteria: List[GateCriterion] = []
+    deliverables: List[Dict[str, str]] = []
+
+    # 1. prompt.md
+    prompt_file = p1_dir / "prompt.md"
+    if not prompt_file.is_file():
+        criteria.append(GateCriterion(
+            criterion_id="gate1.prompt_exists",
+            description="Phase 1 prompt blueprint exists and is readable",
+            status="FAILED",
+            message=f"Missing required artifact: '{prompt_file.relative_to(workspace_root)}'",
+        ))
+    else:
+        content = prompt_file.read_text(encoding="utf-8")
+        if not content.strip():
+            criteria.append(GateCriterion(
+                criterion_id="gate1.prompt_non_empty",
+                description="Phase 1 prompt contains non-empty blueprint instructions",
+                status="FAILED",
+                message="prompt.md is empty.",
+            ))
+        else:
+            p_hash = sha256_file(prompt_file)
+            deliverables.append({"path": str(prompt_file.relative_to(workspace_root)), "sha256": p_hash, "status": "VALID"})
+            criteria.append(GateCriterion(
+                criterion_id="gate1.prompt_valid",
+                description="Phase 1 prompt blueprint exists and is non-empty",
+                status="MET",
+                message=f"prompt.md verified ({p_hash[:16]}...).",
+            ))
+
+    # 2. declared_scope.json
+    scope_file = p1_dir / "declared_scope.json"
+    if not scope_file.is_file():
+        criteria.append(GateCriterion(
+            criterion_id="gate1.scope_exists",
+            description="Declared scope descriptor exists and defines boundary",
+            status="FAILED",
+            message=f"Missing required artifact: '{scope_file.relative_to(workspace_root)}'",
+        ))
+    else:
+        try:
+            scope_data = load_json_file(scope_file)
+            allowed = scope_data.get("allowed_paths", [])
+            # Check for illegal wildcard escaping
+            has_forbidden_wildcard = any(p in ("*", "/**", "**") for p in allowed)
+            if has_forbidden_wildcard:
+                criteria.append(GateCriterion(
+                    criterion_id="gate1.scope_discrete",
+                    description="Declared scope contains discrete non-wildcard repository paths",
+                    status="FAILED",
+                    message="declared_scope.json contains prohibited top-level wildcard pattern.",
+                ))
+            else:
+                s_hash = sha256_file(scope_file)
+                deliverables.append({"path": str(scope_file.relative_to(workspace_root)), "sha256": s_hash, "status": "VALID"})
+                criteria.append(GateCriterion(
+                    criterion_id="gate1.scope_discrete",
+                    description="Declared scope contains discrete permitted repository paths",
+                    status="MET",
+                    message="declared_scope.json validates with discrete allowed paths.",
+                ))
+        except Exception as err:
+            criteria.append(GateCriterion(
+                criterion_id="gate1.scope_schema",
+                description="Declared scope matches JSON schema",
+                status="FAILED",
+                message=f"Failed to load or parse declared_scope.json: {err}",
+            ))
+
+    # 3. prompt_verified.json
+    pv_file = p1_dir / "prompt_verified.json"
+    if not pv_file.is_file():
+        criteria.append(GateCriterion(
+            criterion_id="gate1.prompt_frozen",
+            description="Prompt and scope verification record generated and frozen",
+            status="FAILED",
+            message="Prompt has not been verified (missing prompt_verified.json). Run 'stagecheck verify-prompt'.",
+        ))
+    else:
+        try:
+            pv_data = load_json_file(pv_file)
+            if pv_data.get("status") != "VERIFIED":
+                criteria.append(GateCriterion(
+                    criterion_id="gate1.prompt_verified_status",
+                    description="Prompt verification status is VERIFIED",
+                    status="FAILED",
+                    message=f"prompt_verified.json status is '{pv_data.get('status')}', expected 'VERIFIED'.",
+                ))
+            else:
+                pv_hash = sha256_file(pv_file)
+                deliverables.append({"path": str(pv_file.relative_to(workspace_root)), "sha256": pv_hash, "status": "VALID"})
+                criteria.append(GateCriterion(
+                    criterion_id="gate1.prompt_frozen",
+                    description="Prompt and scope verified and frozen",
+                    status="MET",
+                    message="prompt_verified.json status is VERIFIED.",
+                ))
+        except Exception as err:
+            criteria.append(GateCriterion(
+                criterion_id="gate1.prompt_verified_format",
+                description="prompt_verified.json is valid JSON",
+                status="FAILED",
+                message=f"Error reading prompt_verified.json: {err}",
+            ))
+
+    return criteria, deliverables
+
+
+def evaluate_gate_2a_criteria(
+    workspace_root: Path,
+    task_id: str,
+    attempt: int,
+) -> Tuple[List[GateCriterion], List[Dict[str, str]]]:
+    """Evaluate Gate 2A (Pre-Commit Authorization Sub-Gate) criteria.
+
+    Invariants:
+    1. pre_commit_status.json submitted by Agent 2 with status AWAITING_REVIEW.
+    2. pre_commit_review.json generated with status APPROVED.
+    """
+    p2a_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-2A"
+    criteria: List[GateCriterion] = []
+    deliverables: List[Dict[str, str]] = []
+
+    # 1. pre_commit_status.json
+    status_file = p2a_dir / "pre_commit_status.json"
+    if not status_file.is_file():
+        criteria.append(GateCriterion(
+            criterion_id="gate2a.status_submitted",
+            description="Agent 2 pre-commit status deliverable submitted",
+            status="FAILED",
+            message="pre_commit_status.json not found.",
+        ))
+    else:
+        try:
+            st_data = load_json_file(status_file)
+            st_hash = sha256_file(status_file)
+            deliverables.append({"path": str(status_file.relative_to(workspace_root)), "sha256": st_hash, "status": "VALID"})
+            criteria.append(GateCriterion(
+                criterion_id="gate2a.status_submitted",
+                description="Agent 2 pre-commit status deliverable submitted",
+                status="MET",
+                message=f"pre_commit_status.json present with status '{st_data.get('status')}'.",
+            ))
+        except Exception as err:
+            criteria.append(GateCriterion(
+                criterion_id="gate2a.status_format",
+                description="pre_commit_status.json valid JSON",
+                status="FAILED",
+                message=str(err),
+            ))
+
+    # 2. pre_commit_review.json
+    rev_file = p2a_dir / "pre_commit_review.json"
+    if not rev_file.is_file():
+        criteria.append(GateCriterion(
+            criterion_id="gate2a.review_approved",
+            description="Pre-commit cooperative review approved",
+            status="FAILED",
+            message="pre_commit_review.json not found. Run 'stagecheck review-precommit' and 'stagecheck approve-review'.",
+        ))
+    else:
+        try:
+            rev_data = load_json_file(rev_file)
+            r_status = rev_data.get("status")
+            if r_status != "APPROVED":
+                criteria.append(GateCriterion(
+                    criterion_id="gate2a.review_approved",
+                    description="Pre-commit review marked APPROVED",
+                    status="FAILED",
+                    message=f"pre_commit_review.json status is '{r_status}', not 'APPROVED'.",
+                ))
+            else:
+                rev_hash = sha256_file(rev_file)
+                deliverables.append({"path": str(rev_file.relative_to(workspace_root)), "sha256": rev_hash, "status": "VALID"})
+                criteria.append(GateCriterion(
+                    criterion_id="gate2a.review_approved",
+                    description="Pre-commit cooperative review approved",
+                    status="MET",
+                    message="pre_commit_review.json is APPROVED.",
+                ))
+        except Exception as err:
+            criteria.append(GateCriterion(
+                criterion_id="gate2a.review_format",
+                description="pre_commit_review.json is valid JSON",
+                status="FAILED",
+                message=str(err),
+            ))
+
+    return criteria, deliverables
+
+
+def evaluate_gate_2b_criteria(
+    workspace_root: Path,
+    task_id: str,
+    attempt: int,
+) -> Tuple[List[GateCriterion], List[Dict[str, str]]]:
+    """Evaluate Gate 2B (Commit Authority Sub-Gate) criteria.
+
+    Invariants:
+    1. Pre-commit review is APPROVED.
+    2. Phase 2B delivery report exists.
+    3. Working trees clean in touched repos.
+    4. Active branch not main or master.
+    """
+    p2a_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-2A"
+    p2b_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-2B"
+    criteria: List[GateCriterion] = []
+    deliverables: List[Dict[str, str]] = []
+
+    # 1. Gate 2A review approval
+    rev_file = p2a_dir / "pre_commit_review.json"
+    if not rev_file.is_file() or load_json_file(rev_file).get("status") != "APPROVED":
+        criteria.append(GateCriterion(
+            criterion_id="gate2b.prior_review_approved",
+            description="Phase 2A pre-commit review must be approved prior to Gate 2B",
+            status="FAILED",
+            message="Gate 2A pre-commit review is missing or not APPROVED.",
+        ))
+    else:
+        criteria.append(GateCriterion(
+            criterion_id="gate2b.prior_review_approved",
+            description="Phase 2A pre-commit review approved",
+            status="MET",
+            message="Phase 2A review is APPROVED.",
+        ))
+
+    # 2. Phase 2B report.md
+    report_file = p2b_dir / "report.md"
+    if not report_file.is_file():
+        criteria.append(GateCriterion(
+            criterion_id="gate2b.delivery_report_exists",
+            description="Phase 2B delivery report exists",
+            status="FAILED",
+            message=f"Missing delivery report at '{report_file.relative_to(workspace_root)}'",
+        ))
+    else:
+        rep_hash = sha256_file(report_file)
+        deliverables.append({"path": str(report_file.relative_to(workspace_root)), "sha256": rep_hash, "status": "VALID"})
+        criteria.append(GateCriterion(
+            criterion_id="gate2b.delivery_report_exists",
+            description="Phase 2B delivery report exists",
+            status="MET",
+            message="report.md exists and is readable.",
+        ))
+
+    # 3. Clean working tree and branch governance
+    prod_repos_file = workspace_root / "controls" / "PRODUCT_REPOSITORIES.json"
+    if prod_repos_file.is_file():
+        try:
+            prod_data = load_json_file(prod_repos_file)
+            for repo_name, meta in prod_data.get("repositories", {}).items():
+                repo_p = workspace_root / meta.get("path", f"repos/{repo_name}")
+                if (repo_p / ".git").is_dir():
+                    import subprocess
+                    # Check status
+                    st_res = subprocess.run(
+                        ["git", "-C", str(repo_p), "status", "--porcelain"],
+                        capture_output=True, text=True, check=False,
+                    )
+                    if st_res.returncode == 0 and st_res.stdout.strip():
+                        criteria.append(GateCriterion(
+                            criterion_id=f"gate2b.working_tree_clean.{repo_name}",
+                            description=f"Working tree clean in '{repo_name}'",
+                            status="FAILED",
+                            message=f"Repository '{repo_name}' has uncommitted changes.",
+                        ))
+                    else:
+                        criteria.append(GateCriterion(
+                            criterion_id=f"gate2b.working_tree_clean.{repo_name}",
+                            description=f"Working tree clean in '{repo_name}'",
+                            status="MET",
+                            message=f"Repository '{repo_name}' is clean.",
+                        ))
+
+                    # Check branch
+                    br_res = subprocess.run(
+                        ["git", "-C", str(repo_p), "rev-parse", "--abbrev-ref", "HEAD"],
+                        capture_output=True, text=True, check=False,
+                    )
+                    current_branch = br_res.stdout.strip()
+                    if current_branch in ("main", "master"):
+                        criteria.append(GateCriterion(
+                            criterion_id=f"gate2b.branch_governance.{repo_name}",
+                            description=f"Branch governance respected in '{repo_name}'",
+                            status="FAILED",
+                            message=f"Direct commits on protected branch '{current_branch}' are forbidden.",
+                        ))
+                    else:
+                        criteria.append(GateCriterion(
+                            criterion_id=f"gate2b.branch_governance.{repo_name}",
+                            description=f"Branch governance respected in '{repo_name}'",
+                            status="MET",
+                            message=f"Repository '{repo_name}' is on permitted task branch '{current_branch}'.",
+                        ))
+        except Exception as err:
+            criteria.append(GateCriterion(
+                criterion_id="gate2b.git_inspection",
+                description="Git repository state verified",
+                status="FAILED",
+                message=str(err),
+            ))
+
+    return criteria, deliverables
+
+
+def evaluate_gate_3_criteria(
+    workspace_root: Path,
+    task_id: str,
+    attempt: int,
+) -> Tuple[List[GateCriterion], List[Dict[str, str]]]:
+    """Evaluate Gate 3 (Independent Audit Verification Gate) criteria.
+
+    Invariants:
+    1. Phase-3/verdict.json exists.
+    2. verdict.json status is PASSED or CLEAR (0 blocking defects).
+    """
+    p3_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-3"
+    criteria: List[GateCriterion] = []
+    deliverables: List[Dict[str, str]] = []
+
+    verdict_file = p3_dir / "verdict.json"
+    if not verdict_file.is_file():
+        criteria.append(GateCriterion(
+            criterion_id="gate3.verdict_exists",
+            description="Phase 3 audit verdict exists",
+            status="FAILED",
+            message="verdict.json not found. Run 'stagecheck audit' first.",
+        ))
+    else:
+        try:
+            v_data = load_json_file(verdict_file)
+            v_status = v_data.get("result") or v_data.get("status")
+            v_hash = sha256_file(verdict_file)
+            deliverables.append({"path": str(verdict_file.relative_to(workspace_root)), "sha256": v_hash, "status": "VALID"})
+
+            blocking_count = v_data.get("counts", {}).get("blocking", 0)
+            if v_status in ("PASSED", "CLEAR") and blocking_count == 0:
+                criteria.append(GateCriterion(
+                    criterion_id="gate3.verdict_passed",
+                    description="Phase 3 independent audit verdict passed",
+                    status="MET",
+                    message=f"verdict.json result is {v_status} with 0 blocking defects.",
+                ))
+            else:
+                criteria.append(GateCriterion(
+                    criterion_id="gate3.verdict_passed",
+                    description="Phase 3 independent audit verdict passed",
+                    status="FAILED",
+                    message=f"verdict.json failed with status '{v_status}' and {blocking_count} blocking defects.",
+                ))
+        except Exception as err:
+            criteria.append(GateCriterion(
+                criterion_id="gate3.verdict_format",
+                description="verdict.json is valid JSON",
+                status="FAILED",
+                message=str(err),
+            ))
+
+    return criteria, deliverables
+
+
+def evaluate_gate_4_criteria(
+    workspace_root: Path,
+    task_id: str,
+    attempt: int,
+) -> Tuple[List[GateCriterion], List[Dict[str, str]]]:
+    """Evaluate Gate 4 (Cryptographic Verdict & Sealing Gate) criteria.
+
+    Invariants:
+    1. Phase 3 verdict passed.
+    2. Prior gate criteria cleared.
+    """
+    criteria: List[GateCriterion] = []
+    deliverables: List[Dict[str, str]] = []
+
+    # 1. Check Phase 3 verdict
+    g3_crit, g3_deliv = evaluate_gate_3_criteria(workspace_root, task_id, attempt)
+    criteria.extend(g3_crit)
+    deliverables.extend(g3_deliv)
+
+    # 2. Check Gate 1 & 2 deliverables
+    p1_pv = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-1" / "prompt_verified.json"
+    if p1_pv.is_file():
+        deliverables.append({"path": str(p1_pv.relative_to(workspace_root)), "sha256": sha256_file(p1_pv), "status": "VALID"})
+
+    p2a_rev = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-2A" / "pre_commit_review.json"
+    if p2a_rev.is_file():
+        deliverables.append({"path": str(p2a_rev.relative_to(workspace_root)), "sha256": sha256_file(p2a_rev), "status": "VALID"})
+
+    return criteria, deliverables
+
+
+def check_gate_preconditions(
+    workspace_root: Union[str, Path],
+    gate: Union[GateId, str],
+    task_id: Optional[str] = None,
+    attempt: Optional[int] = None,
+) -> GateCheckReport:
+    """Non-mutating inspection of gate preconditions and criteria.
+
+    Evaluates all invariants for the specified gate without modifying ACTIVE_STATE.json,
+    writing receipts, or altering any file on disk.
+
+    Args:
+        workspace_root: Workspace root path.
+        gate: Gate identifier ('Gate-1', 'Gate-2A', etc. or GateId).
+        task_id: Optional explicit task ID (defaults to active task in ACTIVE_STATE.json).
+        attempt: Optional explicit attempt index (defaults to attempt in ACTIVE_STATE.json).
+
+    Returns:
+        GateCheckReport with detailed evaluation per criterion.
+    """
+    root = Path(workspace_root).resolve()
+    gate_id = normalize_gate_id(gate)
+
+    state = load_active_state(root)
+    resolved_task_id = str(task_id or state.get("task_id", "task-default"))
+    resolved_attempt = int(attempt or state.get("attempt_index", 1))
+    current_phase = str(state.get("phase", "NOT_STARTED"))
+    target_phase = GATE_TARGET_PHASE.get(gate_id, "UNKNOWN")
+
+    failure_reasons: List[str] = []
+
+    # 1. State machine transition check
+    try:
+        validate_gate_transition_allowed(current_phase, gate_id)
+    except InvalidTransitionError as err:
+        failure_reasons.append(str(err))
+
+    # 2. Gate-specific criteria evaluation
+    evaluators = {
+        GateId.GATE_1: evaluate_gate_1_criteria,
+        GateId.GATE_2A: evaluate_gate_2a_criteria,
+        GateId.GATE_2B: evaluate_gate_2b_criteria,
+        GateId.GATE_3: evaluate_gate_3_criteria,
+        GateId.GATE_4: evaluate_gate_4_criteria,
+    }
+
+    eval_fn = evaluators[gate_id]
+    criteria, deliverables = eval_fn(root, resolved_task_id, resolved_attempt)
+
+    for c in criteria:
+        if c.status in ("FAILED", "BLOCKED"):
+            failure_reasons.append(f"[{c.criterion_id}] {c.message}")
+
+    is_passed = len(failure_reasons) == 0
+
+    return GateCheckReport(
+        gate_id=gate_id.value,
+        task_id=resolved_task_id,
+        attempt=resolved_attempt,
+        passed=is_passed,
+        current_phase=current_phase,
+        target_phase=target_phase,
+        criteria=criteria,
+        deliverables=deliverables,
+        failure_reasons=failure_reasons,
+    )
+

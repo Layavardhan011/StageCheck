@@ -29,6 +29,22 @@ def get_active_state_schema() -> Dict[str, Any]:
     return load_json_file(schema_path)
 
 
+def get_gate_receipt_schema() -> Dict[str, Any]:
+    """Load and return the Gate Receipt Schema."""
+    schema_path = get_schema_path("gate_receipt.schema.json")
+    return load_json_file(schema_path)
+
+
+def validate_gate_receipt(data: Dict[str, Any]) -> None:
+    """Validate a Gate Receipt descriptor against gate_receipt.schema.json.
+
+    Raises:
+        SchemaValidationError: If data violates schema requirements.
+    """
+    schema = get_gate_receipt_schema()
+    validate_schema(data, schema)
+
+
 def get_control_descriptors_schema() -> Dict[str, Any]:
     """Load and return the multi-descriptor schemas."""
     schema_path = get_schema_path("control_descriptors.schema.json")

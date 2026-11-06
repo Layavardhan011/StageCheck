@@ -27,13 +27,21 @@
       "type": "string",
       "enum": [
         "NOT_STARTED",
+        "UNINITIALIZED",
+        "IDLE",
         "PHASE_1_PLANNING",
         "PHASE_1_REPAIR",
+        "PHASE_2A_CODING",
         "PHASE_2A_IMPLEMENTATION",
+        "PHASE_2B_COMMITTING",
         "PHASE_2B_DELIVERY",
+        "PHASE_3_AUDIT",
         "PHASE_3_AUDITING",
+        "GATE_4_SEALING",
+        "SEALED_PASSED",
         "AWAITING_HUMAN_DISPOSITION",
         "CIRCUIT_BREAKER_TRIPPED",
+        "ABORTED",
         "COMPLETED"
       ]
     },

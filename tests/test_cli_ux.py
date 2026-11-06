@@ -120,6 +120,7 @@ class TestCLIUX(unittest.TestCase):
             "active_state.schema.json",
             "control_descriptors.schema.json",
             "declared_scope.schema.json",
+            "gate_receipt.schema.json",
             "pre_commit_review.schema.json",
             "pre_commit_status.schema.json",
             "product_repositories.schema.json",

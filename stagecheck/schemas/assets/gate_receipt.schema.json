@@ -1,0 +1,107 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StageCheck Gate Receipt Schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "gate_id",
+    "task_id",
+    "attempt",
+    "from_phase",
+    "to_phase",
+    "status",
+    "verified_at",
+    "verified_by",
+    "deliverables",
+    "receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "2.0.0"
+    },
+    "gate_id": {
+      "type": "string",
+      "enum": [
+        "GATE_1",
+        "GATE_2A",
+        "GATE_2B",
+        "GATE_3",
+        "GATE_4"
+      ]
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9._-]+$"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "attempt_index": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "from_phase": {
+      "type": "string"
+    },
+    "to_phase": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "PASSED",
+        "FAILED",
+        "BLOCKED"
+      ]
+    },
+    "verified_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "verified_by": {
+      "type": "string"
+    },
+    "deliverables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "sha256",
+          "status"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "VALID",
+              "MISSING",
+              "TAMPERED"
+            ]
+          }
+        }
+      }
+    },
+    "checks_evaluated": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "receipt_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "additionalProperties": false
+}
+
