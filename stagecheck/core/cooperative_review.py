@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
+from stagecheck.core.git import SAFE_GIT_SECURITY_FLAGS
 from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest, validate_schema
 from stagecheck.schemas import get_schema_path
 
@@ -214,6 +215,19 @@ def compute_uncommitted_diff_hashes(
 
     for repo_name in sorted(touched_repos):
         repo_path = repos_dir / repo_name
+        if not repo_path.is_dir():
+            prod_repos_file = root / "controls" / "PRODUCT_REPOSITORIES.json"
+            if prod_repos_file.is_file():
+                try:
+                    p_data = json.loads(prod_repos_file.read_text(encoding="utf-8"))
+                    custom_rel = p_data.get("repositories", {}).get(repo_name, {}).get("path")
+                    if custom_rel and (root / custom_rel).is_dir():
+                        repo_path = root / custom_rel
+                except Exception:
+                    pass
+            if not repo_path.is_dir() and (root / ".git").is_dir():
+                repo_path = root
+
         base_commit = base_commits.get(repo_name)
         if not base_commit:
             raise ReviewGateError(f"Missing required base_commit for repository '{repo_name}'.")
@@ -231,6 +245,7 @@ def compute_uncommitted_diff_hashes(
 
         cmd = [
             "git",
+            *SAFE_GIT_SECURITY_FLAGS,
             "-C",
             str(repo_path),
             "diff",
@@ -506,6 +521,19 @@ def verify_committed_diff_fidelity(
 
     for repo_name in touched_repos:
         repo_path = repos_dir / repo_name
+        if not repo_path.is_dir():
+            prod_repos_file = root / "controls" / "PRODUCT_REPOSITORIES.json"
+            if prod_repos_file.is_file():
+                try:
+                    p_data = json.loads(prod_repos_file.read_text(encoding="utf-8"))
+                    custom_rel = p_data.get("repositories", {}).get(repo_name, {}).get("path")
+                    if custom_rel and (root / custom_rel).is_dir():
+                        repo_path = root / custom_rel
+                except Exception:
+                    pass
+            if not repo_path.is_dir() and (root / ".git").is_dir():
+                repo_path = root
+
         base_commit = base_commits.get(repo_name)
         target_commit = target_commits.get(repo_name)
         approved_hash = approved_diff_hashes.get(repo_name)
@@ -517,6 +545,7 @@ def verify_committed_diff_fidelity(
 
         cmd = [
             "git",
+            *SAFE_GIT_SECURITY_FLAGS,
             "-C",
             str(repo_path),
             "diff",

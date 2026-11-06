@@ -180,7 +180,11 @@ class TestGateReceipts(unittest.TestCase):
         self._setup_valid_gate1_deliverables()
         res = advance_gate_atomic(self.workspace, "Gate-1")
 
-        # Delete receipt file
+        # Delete receipt file (simulate attacker tampering)
+        try:
+            os.chmod(res.receipt_path.parent, 0o755)
+        except OSError:
+            pass
         os.chmod(res.receipt_path, 0o644)
         res.receipt_path.unlink()
 

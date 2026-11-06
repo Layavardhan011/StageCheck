@@ -68,12 +68,37 @@ def elevate_permissions_for_teardown(workspace_root: Union[str, Path]) -> None:
     for dir_name in ["controls", "evidence"]:
         target_dir = root / dir_name
         if target_dir.is_dir():
-            os.chmod(str(target_dir), MODE_DIR_RW)
-            for item in target_dir.iterdir():
-                if item.is_file():
-                    os.chmod(str(item), MODE_FILE_RW)
-                elif item.is_dir():
-                    os.chmod(str(item), MODE_DIR_RW)
+            try:
+                os.chmod(str(target_dir), MODE_DIR_RW)
+            except OSError:
+                pass
+            for item in target_dir.rglob("*"):
+                try:
+                    if item.is_file():
+                        os.chmod(str(item), MODE_FILE_RW)
+                    elif item.is_dir():
+                        os.chmod(str(item), MODE_DIR_RW)
+                except OSError:
+                    pass
+
+
+def freeze_phase_directory(phase_dir: Union[str, Path]) -> None:
+    """Freeze a completed phase or attempt directory (0555 dir / 0444 files) per Table 10."""
+    p = Path(phase_dir).resolve()
+    if not p.is_dir():
+        return
+    for item in p.rglob("*"):
+        try:
+            if item.is_file():
+                os.chmod(str(item), MODE_FILE_RO)
+            elif item.is_dir():
+                os.chmod(str(item), MODE_DIR_RO)
+        except OSError:
+            pass
+    try:
+        os.chmod(str(p), MODE_DIR_RO)
+    except OSError:
+        pass
 
 
 @contextlib.contextmanager

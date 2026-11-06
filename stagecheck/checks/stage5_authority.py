@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from stagecheck.checks.base import AuditContext, Defect, StageResult
 from stagecheck.core.cooperative_review import (
     CommitDivergenceError,
     CommitUnauthorizedError,
     assert_commit_authorization,
     verify_committed_diff_fidelity,
+)
+from stagecheck.core.git import (
+    approved_remote,
+    get_approved_remote_urls,
+    get_repo_remote_push_urls,
 )
 
 
@@ -55,6 +61,27 @@ def run_stage5_authority(ctx: AuditContext) -> StageResult:
                     blocking=True,
                 )
             )
+
+    # 3. Verify Remote Push URL Authority (FP-ORG / SR-08)
+    approved_urls = get_approved_remote_urls(ctx.workspace_root)
+    repos_dir = Path(ctx.workspace_root) / "repos"
+    for repo_name in ctx.touched_repos:
+        repo_p = repos_dir / repo_name
+        if not repo_p.is_dir() and (Path(ctx.workspace_root) / ".git").is_dir():
+            repo_p = Path(ctx.workspace_root)
+        if (repo_p / ".git").exists():
+            push_urls = get_repo_remote_push_urls(repo_p)
+            for u in push_urls:
+                if not approved_remote(u, approved_urls):
+                    defects.append(
+                        Defect(
+                            defect_id="authority.remote",
+                            message=f"Unauthorized or blacklisted remote push URL '{u}' in repo '{repo_name}'.",
+                            stage=stage_id,
+                            severity="CRITICAL",
+                            blocking=True,
+                        )
+                    )
 
     status = "FAIL" if any(d.blocking for d in defects) else "CLEAR"
     return StageResult(stage_id=stage_id, status=status, defects=defects, errors=errors)

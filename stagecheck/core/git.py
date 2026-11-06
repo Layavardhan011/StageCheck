@@ -6,11 +6,13 @@ unborn HEAD handling, commit baseline capture, and clean working tree validation
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Set, Union
+from urllib.parse import urlparse
 
 
 class GitError(Exception):
@@ -224,4 +226,96 @@ def discover_multi_repositories(
         baselines[repo_name] = baseline
 
     return baselines
+
+
+def approved_remote(url: str, approved: Union[Set[str], List[str]]) -> bool:
+    """Validate git remote push URLs against configuration whitelist (FP-ORG / SR-08)."""
+    if url == "DISABLED":
+        return True
+    if not approved or url not in approved:
+        return False
+
+    # Normalize SSH (git@host:path) and URI formats (https://host/path, ssh://host/path)
+    if url.startswith("git@"):
+        host_and_path = url.split("@", 1)[1]
+        host, path = host_and_path.split(":", 1)
+        scheme = "ssh"
+    else:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        path = parsed.path.lstrip("/")
+        scheme = parsed.scheme
+
+    # Disallow blacklisted legacy endpoints while permitting all approved repos
+    if host in ("multiversx.com", "elrond.com") or host.endswith(
+        (".multiversx.com", ".elrond.com")
+    ):
+        return False
+
+    return scheme in ("https", "ssh", "git")
+
+
+def get_repo_remote_push_urls(repo_path: Union[str, Path]) -> List[str]:
+    """Inspect all git remote push URLs for a repository."""
+    p = Path(repo_path).resolve()
+    if not (p / ".git").exists():
+        return []
+    remotes_proc = _run_git_cmd(p, ["remote"])
+    if remotes_proc.returncode != 0 or not remotes_proc.stdout.strip():
+        return []
+    push_urls: List[str] = []
+    for remote_name in remotes_proc.stdout.splitlines():
+        remote_name = remote_name.strip()
+        if not remote_name:
+            continue
+        url_proc = _run_git_cmd(p, ["remote", "get-url", "--push", "--all", remote_name])
+        if url_proc.returncode == 0:
+            for url_line in url_proc.stdout.splitlines():
+                u = url_line.strip()
+                if u:
+                    push_urls.append(u)
+    return push_urls
+
+
+def get_approved_remote_urls(workspace_root: Union[str, Path]) -> Set[str]:
+    """Resolve approved push URLs from workspace controls and configuration."""
+    root = Path(workspace_root).resolve()
+    approved: Set[str] = set()
+
+    # 1. controls/remotes.json
+    c_remotes = root / "controls" / "remotes.json"
+    if c_remotes.is_file():
+        try:
+            data = json.loads(c_remotes.read_text(encoding="utf-8"))
+            for u in data.get("approved_push_urls", []):
+                approved.add(u)
+        except Exception:
+            pass
+
+    # 2. config/remotes.json
+    cfg_remotes = root / "config" / "remotes.json"
+    if cfg_remotes.is_file():
+        try:
+            data = json.loads(cfg_remotes.read_text(encoding="utf-8"))
+            for u in data.get("approved_push_urls", []):
+                approved.add(u)
+        except Exception:
+            pass
+
+    # 3. controls/PRODUCT_REPOSITORIES.json
+    prod_repos = root / "controls" / "PRODUCT_REPOSITORIES.json"
+    if prod_repos.is_file():
+        try:
+            data = json.loads(prod_repos.read_text(encoding="utf-8"))
+            for u in data.get("approved_push_urls", []):
+                approved.add(u)
+            for repo_meta in data.get("repositories", {}).values():
+                for u in repo_meta.get("approved_push_urls", []):
+                    approved.add(u)
+                if repo_meta.get("push_url"):
+                    approved.add(repo_meta["push_url"])
+        except Exception:
+            pass
+
+    return approved
 

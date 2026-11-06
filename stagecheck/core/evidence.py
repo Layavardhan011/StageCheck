@@ -230,8 +230,23 @@ def create_task_seal(
     # Also update Phase-3 copy if Phase-3 directory exists
     p3_dir = attempt_dir / "Phase-3"
     if p3_dir.is_dir():
-        with open(p3_dir / "seal.json", "w", encoding="utf-8") as f:
-            f.write(pretty_json_dumps(seal_data))
+        p3_is_ro = not os.access(p3_dir, os.W_OK)
+        if p3_is_ro:
+            try:
+                os.chmod(str(p3_dir), 0o755)
+            except OSError:
+                pass
+        try:
+            (p3_dir / "seal.json").write_text(pretty_json_dumps(seal_data), encoding="utf-8")
+            os.chmod(str(p3_dir / "seal.json"), stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        except OSError:
+            pass
+        finally:
+            if p3_is_ro:
+                try:
+                    os.chmod(str(p3_dir), 0o555)
+                except OSError:
+                    pass
 
     # If final PASSED outcome, write master task seal at task root
     if outcome == "PASSED":

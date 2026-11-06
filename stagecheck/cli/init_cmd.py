@@ -11,7 +11,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from stagecheck.core.agents_md import write_agents_contract
 from stagecheck.core.git import GitError, RepoBaseline, discover_multi_repositories, discover_repository
@@ -55,7 +55,7 @@ def _prompt_for_agent(prompt_text: str) -> Optional[str]:
 
 def run_init(
     workspace: Optional[str] = None,
-    repos: Optional[str] = None,
+    repos: Optional[Union[str, List[str]]] = None,
     force: bool = False,
     manifest_sha256: str = "0" * 64,
     agent1: Optional[str] = None,
@@ -172,7 +172,9 @@ def run_init(
 
             # Step 3: Parse and discover target repositories
             repo_list: List[str] = []
-            if repos:
+            if isinstance(repos, list):
+                repo_list = [str(r).strip() for r in repos if str(r).strip()]
+            elif repos:
                 repo_list = [r.strip() for r in repos.split(",") if r.strip()]
             else:
                 # Autodiscover subdirectories under repos/

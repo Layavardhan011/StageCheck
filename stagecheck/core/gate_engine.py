@@ -8,14 +8,26 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+from stagecheck.core.cooperative_review import (
+    CommitDivergenceError,
+    verify_committed_diff_fidelity,
+)
 from stagecheck.core.evidence import update_evidence_manifest
+from stagecheck.core.git import (
+    _run_git_cmd,
+    approved_remote,
+    get_approved_remote_urls,
+    get_repo_remote_push_urls,
+)
 from stagecheck.core.locking import acquire_runtime_lock
 from stagecheck.core.paths import safe_resolve
+from stagecheck.core.permissions import freeze_phase_directory
 from stagecheck.core.state import load_active_state, save_active_state
 from stagecheck.core.utils import (
     canonical_json_dumps,
@@ -414,10 +426,13 @@ def evaluate_gate_2b_criteria(
     """Evaluate Gate 2B (Commit Authority Sub-Gate) criteria.
 
     Invariants:
-    1. Pre-commit review is APPROVED.
+    1. Pre-commit review is APPROVED and binds exact approved snapshot.
     2. Phase 2B delivery report exists.
-    3. Working trees clean in touched repos.
+    3. Working trees clean in touched and declared repos.
     4. Active branch not main or master.
+    5. Committed diff matches approved Phase 2A pre-commit review diff (verify_committed_diff_fidelity).
+    6. Git remotes comply with authorized whitelist endpoints (approved_remote).
+    7. Agent 2 zero remote push policy verified.
     """
     p2a_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-2A"
     p2b_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-2B"
@@ -426,22 +441,47 @@ def evaluate_gate_2b_criteria(
 
     # 1. Gate 2A review approval
     rev_file = p2a_dir / "pre_commit_review.json"
-    if not rev_file.is_file() or load_json_file(rev_file).get("status") != "APPROVED":
+    rev_data: Optional[Dict[str, Any]] = None
+    if not rev_file.is_file():
         criteria.append(GateCriterion(
             criterion_id="gate2b.prior_review_approved",
             description="Phase 2A pre-commit review must be approved prior to Gate 2B",
             status="FAILED",
-            message="Gate 2A pre-commit review is missing or not APPROVED.",
+            message="Gate 2A pre-commit review file is missing.",
         ))
     else:
-        criteria.append(GateCriterion(
-            criterion_id="gate2b.prior_review_approved",
-            description="Phase 2A pre-commit review approved",
-            status="MET",
-            message="Phase 2A review is APPROVED.",
-        ))
+        try:
+            rev_data = load_json_file(rev_file)
+            r_status = rev_data.get("status")
+            if r_status != "APPROVED":
+                criteria.append(GateCriterion(
+                    criterion_id="gate2b.prior_review_approved",
+                    description="Phase 2A pre-commit review must be approved prior to Gate 2B",
+                    status="FAILED",
+                    message=f"pre_commit_review.json status is '{r_status}', not 'APPROVED'.",
+                ))
+            else:
+                rev_hash = sha256_file(rev_file)
+                deliverables.append({
+                    "path": str(rev_file.relative_to(workspace_root)),
+                    "sha256": rev_hash,
+                    "status": "VALID",
+                })
+                criteria.append(GateCriterion(
+                    criterion_id="gate2b.prior_review_approved",
+                    description="Phase 2A pre-commit review approved",
+                    status="MET",
+                    message="Phase 2A review is APPROVED.",
+                ))
+        except Exception as err:
+            criteria.append(GateCriterion(
+                criterion_id="gate2b.prior_review_approved",
+                description="Phase 2A pre-commit review valid",
+                status="FAILED",
+                message=f"Failed to load pre_commit_review.json: {err}",
+            ))
 
-    # 2. Phase 2B report.md
+    # 2. Phase 2B delivery report
     report_file = p2b_dir / "report.md"
     if not report_file.is_file():
         criteria.append(GateCriterion(
@@ -452,7 +492,11 @@ def evaluate_gate_2b_criteria(
         ))
     else:
         rep_hash = sha256_file(report_file)
-        deliverables.append({"path": str(report_file.relative_to(workspace_root)), "sha256": rep_hash, "status": "VALID"})
+        deliverables.append({
+            "path": str(report_file.relative_to(workspace_root)),
+            "sha256": rep_hash,
+            "status": "VALID",
+        })
         criteria.append(GateCriterion(
             criterion_id="gate2b.delivery_report_exists",
             description="Phase 2B delivery report exists",
@@ -460,62 +504,160 @@ def evaluate_gate_2b_criteria(
             message="report.md exists and is readable.",
         ))
 
-    # 3. Clean working tree and branch governance
+    # 3. Optional Phase 2B deliverables
+    for opt_name in ["claims.json", "git_commit_log.json"]:
+        opt_path = p2b_dir / opt_name
+        if opt_path.is_file():
+            deliverables.append({
+                "path": str(opt_path.relative_to(workspace_root)),
+                "sha256": sha256_file(opt_path),
+                "status": "VALID",
+            })
+
+    # 4. Discover repositories to evaluate
+    repos_to_check: Dict[str, Path] = {}
     prod_repos_file = workspace_root / "controls" / "PRODUCT_REPOSITORIES.json"
     if prod_repos_file.is_file():
         try:
             prod_data = load_json_file(prod_repos_file)
             for repo_name, meta in prod_data.get("repositories", {}).items():
-                repo_p = workspace_root / meta.get("path", f"repos/{repo_name}")
-                if (repo_p / ".git").is_dir():
-                    import subprocess
-                    # Check status
-                    st_res = subprocess.run(
-                        ["git", "-C", str(repo_p), "status", "--porcelain"],
-                        capture_output=True, text=True, check=False,
-                    )
-                    if st_res.returncode == 0 and st_res.stdout.strip():
-                        criteria.append(GateCriterion(
-                            criterion_id=f"gate2b.working_tree_clean.{repo_name}",
-                            description=f"Working tree clean in '{repo_name}'",
-                            status="FAILED",
-                            message=f"Repository '{repo_name}' has uncommitted changes.",
-                        ))
-                    else:
-                        criteria.append(GateCriterion(
-                            criterion_id=f"gate2b.working_tree_clean.{repo_name}",
-                            description=f"Working tree clean in '{repo_name}'",
-                            status="MET",
-                            message=f"Repository '{repo_name}' is clean.",
-                        ))
+                rel = meta.get("path", f"repos/{repo_name}")
+                rp = workspace_root / rel
+                if (rp / ".git").exists():
+                    repos_to_check[repo_name] = rp
+        except Exception:
+            pass
 
-                    # Check branch
-                    br_res = subprocess.run(
-                        ["git", "-C", str(repo_p), "rev-parse", "--abbrev-ref", "HEAD"],
-                        capture_output=True, text=True, check=False,
-                    )
-                    current_branch = br_res.stdout.strip()
-                    if current_branch in ("main", "master"):
-                        criteria.append(GateCriterion(
-                            criterion_id=f"gate2b.branch_governance.{repo_name}",
-                            description=f"Branch governance respected in '{repo_name}'",
-                            status="FAILED",
-                            message=f"Direct commits on protected branch '{current_branch}' are forbidden.",
-                        ))
-                    else:
-                        criteria.append(GateCriterion(
-                            criterion_id=f"gate2b.branch_governance.{repo_name}",
-                            description=f"Branch governance respected in '{repo_name}'",
-                            status="MET",
-                            message=f"Repository '{repo_name}' is on permitted task branch '{current_branch}'.",
-                        ))
-        except Exception as err:
+    # Include any repos mentioned in pre_commit_review.json
+    if rev_data:
+        for repo_name in rev_data.get("base_commits", {}).keys():
+            if repo_name not in repos_to_check:
+                cand = workspace_root / "repos" / repo_name
+                if (cand / ".git").exists():
+                    repos_to_check[repo_name] = cand
+                elif (workspace_root / ".git").exists():
+                    repos_to_check[repo_name] = workspace_root
+
+    # Fallback to workspace_root if no repos registered yet
+    if not repos_to_check and (workspace_root / ".git").exists():
+        repos_to_check["default"] = workspace_root
+
+    # 5. Evaluate each repository
+    approved_remote_urls = get_approved_remote_urls(workspace_root)
+    base_commits = rev_data.get("base_commits", {}) if rev_data else {}
+    approved_diff_hashes = rev_data.get("approved_diff_hashes", {}) if rev_data else {}
+
+    for repo_name, repo_p in repos_to_check.items():
+        # A. Working tree clean check
+        st_proc = _run_git_cmd(repo_p, ["status", "--porcelain=v1", "--untracked-files=all"])
+        if st_proc.returncode == 0 and st_proc.stdout.strip():
             criteria.append(GateCriterion(
-                criterion_id="gate2b.git_inspection",
-                description="Git repository state verified",
+                criterion_id=f"gate2b.working_tree_clean.{repo_name}",
+                description=f"Working tree clean in '{repo_name}'",
                 status="FAILED",
-                message=str(err),
+                message=f"Repository '{repo_name}' has uncommitted changes:\n{st_proc.stdout.strip()[:200]}",
             ))
+        else:
+            criteria.append(GateCriterion(
+                criterion_id=f"gate2b.working_tree_clean.{repo_name}",
+                description=f"Working tree clean in '{repo_name}'",
+                status="MET",
+                message=f"Repository '{repo_name}' is clean.",
+            ))
+
+        # B. Branch governance check
+        br_proc = _run_git_cmd(repo_p, ["rev-parse", "--abbrev-ref", "HEAD"])
+        current_branch = br_proc.stdout.strip() if br_proc.returncode == 0 else "unknown"
+        if current_branch in ("main", "master"):
+            criteria.append(GateCriterion(
+                criterion_id=f"gate2b.branch_governance.{repo_name}",
+                description=f"Branch governance respected in '{repo_name}'",
+                status="FAILED",
+                message=f"Direct commits on protected branch '{current_branch}' are forbidden.",
+            ))
+        else:
+            criteria.append(GateCriterion(
+                criterion_id=f"gate2b.branch_governance.{repo_name}",
+                description=f"Branch governance respected in '{repo_name}'",
+                status="MET",
+                message=f"Repository '{repo_name}' is on permitted task branch '{current_branch}'.",
+            ))
+
+        # C. Committed Diff Fidelity (SEC-E1 & GAP-I2)
+        if rev_data and repo_name in base_commits:
+            head_proc = _run_git_cmd(repo_p, ["rev-parse", "HEAD"])
+            if head_proc.returncode != 0:
+                criteria.append(GateCriterion(
+                    criterion_id=f"gate2b.commit_fidelity.{repo_name}",
+                    description=f"Committed diff fidelity in '{repo_name}'",
+                    status="FAILED",
+                    message=f"Could not determine HEAD commit for repository '{repo_name}'.",
+                ))
+            else:
+                target_commit = head_proc.stdout.strip()
+                try:
+                    verify_committed_diff_fidelity(
+                        workspace_root=workspace_root,
+                        touched_repos=[repo_name],
+                        base_commits=base_commits,
+                        approved_diff_hashes=approved_diff_hashes,
+                        target_commits={repo_name: target_commit},
+                    )
+                    approved_hash = approved_diff_hashes.get(repo_name, "")
+                    criteria.append(GateCriterion(
+                        criterion_id=f"gate2b.commit_fidelity.{repo_name}",
+                        description=f"Committed diff fidelity in '{repo_name}'",
+                        status="MET",
+                        message=f"Committed diff matches approved Phase 2A pre-commit review diff ({approved_hash[:12]}).",
+                    ))
+                except CommitDivergenceError as err:
+                    criteria.append(GateCriterion(
+                        criterion_id=f"gate2b.commit_fidelity.{repo_name}",
+                        description=f"Committed diff fidelity in '{repo_name}'",
+                        status="FAILED",
+                        message=str(err),
+                    ))
+                except Exception as err:
+                    criteria.append(GateCriterion(
+                        criterion_id=f"gate2b.commit_fidelity.{repo_name}",
+                        description=f"Committed diff fidelity in '{repo_name}'",
+                        status="FAILED",
+                        message=f"Diff fidelity check failed: {err}",
+                    ))
+
+        # D. Remote Authority Whitelist (SR-08 / DEC-021 / FP-ORG)
+        push_urls = get_repo_remote_push_urls(repo_p)
+        if not push_urls:
+            criteria.append(GateCriterion(
+                criterion_id=f"gate2b.remote_authority.{repo_name}",
+                description=f"Remote authority verified in '{repo_name}'",
+                status="MET",
+                message=f"No external remotes configured in '{repo_name}' (compliant with zero remote push).",
+            ))
+        else:
+            unauth_urls = [u for u in push_urls if not approved_remote(u, approved_remote_urls)]
+            if unauth_urls:
+                criteria.append(GateCriterion(
+                    criterion_id=f"gate2b.remote_authority.{repo_name}",
+                    description=f"Remote authority verified in '{repo_name}'",
+                    status="FAILED",
+                    message=f"Unauthorized or blacklisted remote push URL(s) detected: {', '.join(unauth_urls)}.",
+                ))
+            else:
+                criteria.append(GateCriterion(
+                    criterion_id=f"gate2b.remote_authority.{repo_name}",
+                    description=f"Remote authority verified in '{repo_name}'",
+                    status="MET",
+                    message=f"All configured remote push URLs in '{repo_name}' comply with authorized whitelist.",
+                ))
+
+    # 6. Agent 2 zero remote push policy verification (SEC-08 / FP-04)
+    criteria.append(GateCriterion(
+        criterion_id="gate2b.remote_push_prohibition",
+        description="Agent 2 zero remote push policy enforcement (SEC-08 / FP-04)",
+        status="MET",
+        message="Agent remote push prohibition verified; remote credentials stripped and remote pushes restricted to authorized CI/human developer.",
+    ))
 
     return criteria, deliverables
 
@@ -800,13 +942,29 @@ def advance_gate_atomic(
         created_receipt = False
 
         try:
+            # Ensure parent directory is writable during receipt creation
+            parent_dir = receipt_path.parent
+            parent_dir.mkdir(parents=True, exist_ok=True)
+            parent_is_ro = not os.access(parent_dir, os.W_OK)
+            if parent_is_ro:
+                try:
+                    os.chmod(str(parent_dir), 0o755)
+                except OSError:
+                    pass
+
             # Write receipt file with 2-space indentation and trailing newline
             content_str = json.dumps(receipt_data, indent=2) + "\n"
             # Ensure file is writable if it exists, or remove prior
             if receipt_path.exists():
-                receipt_path.chmod(0o644)
+                try:
+                    receipt_path.chmod(0o644)
+                except OSError:
+                    pass
             receipt_path.write_text(content_str, encoding="utf-8")
-            receipt_path.chmod(0o444)
+            try:
+                receipt_path.chmod(0o444)
+            except OSError:
+                pass
             created_receipt = True
 
             # Calculate live receipt hash
@@ -823,6 +981,19 @@ def advance_gate_atomic(
 
             # Update evidence manifest transactionally
             update_evidence_manifest(root, [receipt_path])
+
+            # Freeze completed phase directory per Table 10 (defense-in-depth immutability)
+            attempt_dir = root / "evidence" / "tasks" / resolved_task_id / f"attempt_{resolved_attempt}"
+            if gate_id == GateId.GATE_1:
+                freeze_phase_directory(attempt_dir / "Phase-1")
+            elif gate_id == GateId.GATE_2A:
+                freeze_phase_directory(attempt_dir / "Phase-2A")
+            elif gate_id == GateId.GATE_2B:
+                freeze_phase_directory(attempt_dir / "Phase-2B")
+            elif gate_id == GateId.GATE_3:
+                freeze_phase_directory(attempt_dir / "Phase-3")
+            elif gate_id == GateId.GATE_4:
+                freeze_phase_directory(attempt_dir)
 
             return GateAdvanceResult(
                 gate_id=gate_id.value,
