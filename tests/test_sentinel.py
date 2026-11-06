@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import datetime
+import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from stagecheck.cli.main import main
+from stagecheck.core.permissions import controlled_write_transaction
 from stagecheck.core.sentinel import (
     SentinelDaemon,
     SentinelError,
     classify_event_path,
     send_desktop_notification,
 )
+from stagecheck.core.state import load_active_state, save_active_state
+from stagecheck.core.supervisor import evaluate_watchdog
 
 
 class TestSentinel(unittest.TestCase):
@@ -299,6 +305,148 @@ class TestSentinel(unittest.TestCase):
             pid = sentinel.read_pid()
             self.assertEqual(pid, os.getpid(), "read_pid must never return None or corrupted PID")
         sentinel.pid_file.unlink(missing_ok=True)
+
+    def test_watchdog_restart_and_monotonic_tracking(self) -> None:
+        """Verify DEC-027: Sentinel daemon restores monotonic timing from ACTIVE_STATE.json upon restart."""
+        # 1. Setup ACTIVE_STATE with last_active_timestamp 650s ago
+        old_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=650)
+        state_data = {
+            "schema_version": "2.0",
+            "task_id": "task-wd-01",
+            "attempt_index": 1,
+            "repair_index": 0,
+            "max_total_attempts": 3,
+            "max_repairs": 3,
+            "circuit_breaker_tripped": False,
+            "target_repositories": ["backend"],
+            "phase": "PHASE_2A_CODING",
+            "turn": "AGENT2_CODING",
+            "status": "IN_PROGRESS",
+            "watchdog": {
+                "last_active_timestamp": old_time.isoformat(),
+            },
+        }
+        state_file = self.workspace / "controls" / "ACTIVE_STATE.json"
+        state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+
+        # 2. Instantiate SentinelDaemon and verify restored monotonic offset
+        daemon = SentinelDaemon(self.workspace)
+        elapsed_in_daemon = time.monotonic() - daemon.last_activity_monotonic
+        self.assertGreaterEqual(elapsed_in_daemon, 640.0)
+
+        # 3. Evaluate watchdog -> must trip into AWAITING_HUMAN_DISPOSITION
+        tripped, msg, meta = evaluate_watchdog(self.workspace, timeout_seconds=600.0)
+        self.assertTrue(tripped)
+        self.assertIn("WATCHDOG_INACTIVITY_TIMEOUT", msg)
+
+        state_after = load_active_state(self.workspace)
+        self.assertEqual(state_after["phase"], "AWAITING_HUMAN_DISPOSITION")
+
+    def test_watchdog_resets_on_relevant_repo_inotify_event(self) -> None:
+        """Verify Issue 4: Inotify event under repos/ resets watchdog monotonic timer and ACTIVE_STATE timestamp."""
+        old_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=200)
+        state_data = {
+            "schema_version": "2.0",
+            "task_id": "task-wd-02",
+            "attempt_index": 1,
+            "repair_index": 0,
+            "max_total_attempts": 3,
+            "max_repairs": 3,
+            "circuit_breaker_tripped": False,
+            "target_repositories": ["backend"],
+            "phase": "PHASE_2A_CODING",
+            "turn": "AGENT2_CODING",
+            "status": "IN_PROGRESS",
+            "watchdog": {
+                "last_active_timestamp": old_time.isoformat(),
+            },
+        }
+        state_file = self.workspace / "controls" / "ACTIVE_STATE.json"
+        state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+
+        daemon = SentinelDaemon(self.workspace)
+        start_mono = daemon.last_activity_monotonic
+
+        # Log event for relevant repo path
+        daemon._log_event("repos/backend/service.py", tier=4, label="ALLOWED_SCOPE")
+
+        # Verify monotonic timer refreshed
+        self.assertGreater(daemon.last_activity_monotonic, start_mono)
+
+        # Verify ACTIVE_STATE.json was updated with new timestamp
+        state_after = load_active_state(self.workspace)
+        new_ts_str = state_after["watchdog"]["last_active_timestamp"]
+        self.assertNotEqual(new_ts_str, old_time.isoformat())
+
+    def test_watchdog_ignores_unrelated_file_events(self) -> None:
+        """Verify Issue 4: Unrelated file events (.git/logs, /tmp) do NOT reset the watchdog timer."""
+        fixed_ts = "2026-11-06T12:00:00+00:00"
+        state_data = {
+            "schema_version": "2.0",
+            "task_id": "task-wd-03",
+            "attempt_index": 1,
+            "repair_index": 0,
+            "max_total_attempts": 3,
+            "max_repairs": 3,
+            "circuit_breaker_tripped": False,
+            "target_repositories": ["backend"],
+            "phase": "PHASE_2A_CODING",
+            "turn": "AGENT2_CODING",
+            "status": "IN_PROGRESS",
+            "watchdog": {
+                "last_active_timestamp": fixed_ts,
+            },
+        }
+        state_file = self.workspace / "controls" / "ACTIVE_STATE.json"
+        state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+
+        daemon = SentinelDaemon(self.workspace)
+        mono_before = daemon.last_activity_monotonic
+
+        # Log event for unrelated git log file
+        daemon._log_event(".git/logs/HEAD", tier=1, label="GOVERNANCE_BREACH")
+
+        # Monotonic timer and state timestamp must remain UNCHANGED
+        self.assertEqual(daemon.last_activity_monotonic, mono_before)
+        state_after = load_active_state(self.workspace)
+        self.assertEqual(state_after["watchdog"]["last_active_timestamp"], fixed_ts)
+
+    def test_watchdog_suspended_in_audit_and_sealing_phases(self) -> None:
+        """Verify watchdog is automatically suspended in PHASE_3_AUDIT and GATE_4_SEALING."""
+        for suspended_phase in ("PHASE_3_AUDIT", "GATE_4_SEALING", "IDLE", "COMPLETED"):
+            with self.subTest(phase=suspended_phase):
+                state_data = {
+                    "schema_version": "2.0",
+                    "task_id": "task-wd-04",
+                    "attempt_index": 1,
+                    "repair_index": 0,
+                    "max_total_attempts": 3,
+                    "max_repairs": 3,
+                    "circuit_breaker_tripped": False,
+                    "target_repositories": ["backend"],
+                    "phase": suspended_phase,
+                    "turn": "IDLE",
+                    "status": "IN_PROGRESS",
+                    "watchdog": {
+                        "last_active_timestamp": "2020-01-01T00:00:00+00:00",
+                    },
+                }
+                state_file = self.workspace / "controls" / "ACTIVE_STATE.json"
+                state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+
+                tripped, msg, meta = evaluate_watchdog(self.workspace, timeout_seconds=600.0)
+                self.assertFalse(tripped)
+                self.assertFalse(meta.get("active"))
+                self.assertIn("suspended", msg.lower())
+
+    def test_daemon_graceful_degradation_without_libc(self) -> None:
+        """Verify SentinelDaemon degrades cleanly when libc or inotify support is unavailable."""
+        daemon = SentinelDaemon(self.workspace)
+        daemon._libc = None
+        daemon._init_libc = lambda: None
+        # Should exit gracefully without unhandled exception
+        daemon._run_loop(ready_fd=None)
+        self.assertFalse(daemon.is_running()[0])
 
 
 if __name__ == "__main__":

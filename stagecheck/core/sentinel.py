@@ -275,6 +275,22 @@ class SentinelDaemon:
         self._libc: Optional[ctypes.CDLL] = None
         self._inotify_fd: Optional[int] = None
         self._watch_descriptors: Dict[int, str] = {}
+        self.last_activity_monotonic: float = time.monotonic()
+
+        # Restore monotonic tracking from ACTIVE_STATE.json if present (DEC-027)
+        state_file = self.root / "controls" / "ACTIVE_STATE.json"
+        if state_file.is_file():
+            try:
+                from stagecheck.core.state import load_active_state
+                state = load_active_state(self.root)
+                last_ts_str = state.get("watchdog", {}).get("last_active_timestamp")
+                if last_ts_str:
+                    last_ts = datetime.datetime.fromisoformat(last_ts_str.replace("Z", "+00:00"))
+                    now = datetime.datetime.now(datetime.timezone.utc)
+                    elapsed = max(0.0, (now - last_ts).total_seconds())
+                    self.last_activity_monotonic = time.monotonic() - elapsed
+            except Exception:
+                pass
 
     def _init_libc(self) -> None:
         if self._libc is None:
@@ -697,7 +713,7 @@ class SentinelDaemon:
         try:
             while True:
                 try:
-                    events = epoll.poll(timeout=-1)
+                    events = epoll.poll(timeout=1.0)
                 except (InterruptedError, OSError):
                     break
                 for fd, event in events:
@@ -707,6 +723,13 @@ class SentinelDaemon:
                             self._process_inotify_buffer(data)
                         except BlockingIOError:
                             pass
+
+                # Check watchdog periodically for active agent phases
+                try:
+                    from stagecheck.core.supervisor import evaluate_watchdog
+                    evaluate_watchdog(self.root, timeout_seconds=600.0)
+                except Exception:
+                    pass
         finally:
             try:
                 epoll.unregister(self._inotify_fd)
@@ -735,7 +758,7 @@ class SentinelDaemon:
                 self._log_event(rel_path, tier, label)
 
     def _log_event(self, rel_path: str, tier: int, label: str) -> None:
-        """Append event to sentinel.log."""
+        """Append event to sentinel.log and update watchdog activity for relevant paths (FR-05 / DEC-027)."""
         if tier == 2 or rel_path.endswith("sentinel.log") or rel_path.endswith(".stagecheck_sentinel.pid"):
             return  # Silently drop Tier 2 and internal daemon log/pid files
 
@@ -746,6 +769,22 @@ class SentinelDaemon:
                 f.write(entry)
         except OSError:
             pass
+
+        # Relevant path filtering (FR-05 / Issue 4)
+        from stagecheck.core.supervisor import is_relevant_sentinel_path
+        if is_relevant_sentinel_path(rel_path):
+            self.last_activity_monotonic = time.monotonic()
+            try:
+                state_file = self.root / "controls" / "ACTIVE_STATE.json"
+                if state_file.is_file():
+                    from stagecheck.core.permissions import controlled_write_transaction
+                    from stagecheck.core.state import load_active_state, save_active_state
+                    with controlled_write_transaction(self.root / "controls"):
+                        state = load_active_state(self.root)
+                        state.setdefault("watchdog", {})["last_active_timestamp"] = ts
+                        save_active_state(self.root, state)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

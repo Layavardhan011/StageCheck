@@ -134,11 +134,11 @@ def evaluate_watchdog(
     ts_fs = get_last_relevant_filesystem_timestamp(root)
     ts_turn = get_last_turn_heartbeat_timestamp(root)
 
-    # Fallback to state mtime if neither event recorded yet
+    # Fallback to recorded watchdog timestamp or state mtime if events not recorded yet
     state_file = root / "controls" / "ACTIVE_STATE.json"
     fallback_time = datetime.datetime.fromtimestamp(state_file.stat().st_mtime, tz=datetime.timezone.utc)
-    effective_fs = ts_fs or fallback_time
-    effective_turn = ts_turn or fallback_time
+    effective_fs = ts_fs or ts_turn or fallback_time
+    effective_turn = ts_turn or ts_fs or fallback_time
 
     delta_fs = max(0.0, (now - effective_fs).total_seconds())
     delta_turn = max(0.0, (now - effective_turn).total_seconds())
