@@ -6,15 +6,25 @@ Gate-3, Gate-4), non-mutating gate inspection, and typed transition errors.
 
 from __future__ import annotations
 
+import datetime
 import json
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+from stagecheck.core.evidence import update_evidence_manifest
+from stagecheck.core.locking import acquire_runtime_lock
 from stagecheck.core.paths import safe_resolve
-from stagecheck.core.state import load_active_state
-from stagecheck.core.utils import load_json_file, sha256_file
+from stagecheck.core.state import load_active_state, save_active_state
+from stagecheck.core.utils import (
+    canonical_json_dumps,
+    load_json_file,
+    pretty_json_dumps,
+    sha256_canonical,
+    sha256_file,
+)
+from stagecheck.schemas.validator import validate_gate_receipt
 
 
 class LifecyclePhase(str, Enum):
@@ -69,6 +79,23 @@ class GateCriteriaFailedError(GateError):
 
 class AttemptBudgetExhaustedError(GateError):
     """Raised when attempt budget (maximum 3 attempts) is permanently exhausted."""
+
+
+class ReceiptTamperDetectedError(GateError):
+    """Raised when a gate receipt is missing, altered, or not registered in ACTIVE_STATE."""
+
+
+@dataclass
+class GateAdvanceResult:
+    """Result of an atomic gate advancement."""
+    gate_id: str
+    task_id: str
+    attempt: int
+    receipt_path: Path
+    receipt_sha256: str
+    from_phase: str
+    to_phase: str
+    turn: str
 
 
 def normalize_gate_id(raw_gate: Union[str, GateId]) -> GateId:
@@ -646,4 +673,242 @@ def check_gate_preconditions(
         deliverables=deliverables,
         failure_reasons=failure_reasons,
     )
+
+
+GATE_TURN_ROTATION: Dict[GateId, str] = {
+    GateId.GATE_1: "AGENT2_CODING",
+    GateId.GATE_2A: "AGENT2_COMMITTING",
+    GateId.GATE_2B: "STAGECHECK_AUDITING",
+    GateId.GATE_3: "STAGECHECK_SEALING",
+    GateId.GATE_4: "IDLE",
+}
+
+
+def get_gate_receipt_path(
+    workspace_root: Path,
+    gate_id: GateId,
+    task_id: str,
+    attempt: int,
+) -> Path:
+    """Return canonical path where the gate receipt is stored."""
+    attempt_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}"
+    mapping = {
+        GateId.GATE_1: attempt_dir / "Phase-1" / "gate1_receipt.json",
+        GateId.GATE_2A: attempt_dir / "Phase-2A" / "gate2a_receipt.json",
+        GateId.GATE_2B: attempt_dir / "Phase-2B" / "gate2b_receipt.json",
+        GateId.GATE_3: attempt_dir / "Phase-3" / "gate3_receipt.json",
+        GateId.GATE_4: attempt_dir / "gate4_receipt.json",
+    }
+    return mapping[gate_id]
+
+
+def generate_gate_receipt(
+    workspace_root: Path,
+    gate_id: GateId,
+    task_id: str,
+    attempt: int,
+    from_phase: str,
+    to_phase: str,
+    deliverables: List[Dict[str, str]],
+    checks_evaluated: List[str],
+    verified_by: str = "stagecheck-core",
+) -> Tuple[Path, Dict[str, Any], str]:
+    """Build and validate a schema-compliant Gate Receipt without writing to disk."""
+    receipt_path = get_gate_receipt_path(workspace_root, gate_id, task_id, attempt)
+
+    # Base dictionary
+    receipt_data: Dict[str, Any] = {
+        "schema_version": "2.0.0",
+        "gate_id": gate_id.value,
+        "task_id": task_id,
+        "attempt": attempt,
+        "attempt_index": attempt,
+        "from_phase": from_phase,
+        "to_phase": to_phase,
+        "status": "PASSED",
+        "verified_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "verified_by": verified_by,
+        "deliverables": deliverables,
+        "checks_evaluated": checks_evaluated,
+    }
+
+    # Calculate receipt digest
+    digest = sha256_canonical(receipt_data)
+    receipt_data["receipt_sha256"] = digest
+
+    # Validate against schema
+    validate_gate_receipt(receipt_data)
+
+    return receipt_path, receipt_data, digest
+
+
+def advance_gate_atomic(
+    workspace_root: Union[str, Path],
+    gate: Union[GateId, str],
+    task_id: Optional[str] = None,
+    attempt: Optional[int] = None,
+    verified_by: str = "stagecheck-core",
+) -> GateAdvanceResult:
+    """Atomically advance the workspace through the specified gate under lock.
+
+    Guarantees:
+    1. Acquires runtime lock (.stagecheck.lock).
+    2. Runs non-mutating check_gate_preconditions; fails closed if criteria unmet.
+    3. Backs up active state for clean rollback upon error.
+    4. Writes gate receipt formatted with 2 spaces and trailing newline (mode 0444).
+    5. Updates ACTIVE_STATE.json with new phase, turn, and cleared_gates[gate_id].
+    6. Updates EVIDENCE_MANIFEST.json with receipt file.
+    7. Cleans up and rolls back state if any operation fails.
+    """
+    root = Path(workspace_root).resolve()
+    gate_id = normalize_gate_id(gate)
+
+    with acquire_runtime_lock(root):
+        state = load_active_state(root)
+        resolved_task_id = str(task_id or state.get("task_id", "task-default"))
+        resolved_attempt = int(attempt or state.get("attempt_index", 1))
+
+        # 1. Non-mutating precondition check
+        report = check_gate_preconditions(root, gate_id, resolved_task_id, resolved_attempt)
+        if not report.passed:
+            raise GateCriteriaFailedError(
+                f"Cannot advance {gate_id.value}: criteria unmet ({'; '.join(report.failure_reasons)})",
+                failure_reasons=report.failure_reasons,
+            )
+
+        target_phase = GATE_TARGET_PHASE[gate_id]
+        new_turn = GATE_TURN_ROTATION.get(gate_id, "IDLE")
+
+        # 2. Build receipt
+        check_ids = [c.criterion_id for c in report.criteria]
+        receipt_path, receipt_data, digest = generate_gate_receipt(
+            workspace_root=root,
+            gate_id=gate_id,
+            task_id=resolved_task_id,
+            attempt=resolved_attempt,
+            from_phase=report.current_phase,
+            to_phase=target_phase,
+            deliverables=report.deliverables,
+            checks_evaluated=check_ids,
+            verified_by=verified_by,
+        )
+
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Snapshot state for rollback
+        state_backup = dict(state)
+        created_receipt = False
+
+        try:
+            # Write receipt file with 2-space indentation and trailing newline
+            content_str = json.dumps(receipt_data, indent=2) + "\n"
+            # Ensure file is writable if it exists, or remove prior
+            if receipt_path.exists():
+                receipt_path.chmod(0o644)
+            receipt_path.write_text(content_str, encoding="utf-8")
+            receipt_path.chmod(0o444)
+            created_receipt = True
+
+            # Calculate live receipt hash
+            live_hash = sha256_file(receipt_path)
+
+            # Update ACTIVE_STATE
+            state["phase"] = target_phase
+            state["turn"] = new_turn
+            state.setdefault("cleared_gates", {})[gate_id.value] = live_hash
+            if gate_id == GateId.GATE_4:
+                state["status"] = "SEALED_PASSED"
+
+            save_active_state(root, state)
+
+            # Update evidence manifest transactionally
+            update_evidence_manifest(root, [receipt_path])
+
+            return GateAdvanceResult(
+                gate_id=gate_id.value,
+                task_id=resolved_task_id,
+                attempt=resolved_attempt,
+                receipt_path=receipt_path,
+                receipt_sha256=live_hash,
+                from_phase=report.current_phase,
+                to_phase=target_phase,
+                turn=new_turn,
+            )
+
+        except Exception as err:
+            # Rollback
+            if created_receipt and receipt_path.exists():
+                try:
+                    receipt_path.chmod(0o644)
+                    receipt_path.unlink()
+                except Exception:
+                    pass
+            try:
+                save_active_state(root, state_backup)
+            except Exception:
+                pass
+            raise GateError(f"Atomic gate advancement failed; state rolled back: {err}") from err
+
+
+def verify_gate_receipts(
+    workspace_root: Union[str, Path],
+    task_id: Optional[str] = None,
+    attempt: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Verify that all recorded gate receipts on disk match ACTIVE_STATE.json cleared_gates.
+
+    Detects:
+    1. Missing receipt file on disk -> ReceiptTamperDetectedError.
+    2. Altered receipt bytes (hash mismatch) -> ReceiptTamperDetectedError.
+    3. Unregistered receipt files in the attempt directory -> ReceiptTamperDetectedError.
+    """
+    root = Path(workspace_root).resolve()
+    state = load_active_state(root)
+    resolved_task_id = str(task_id or state.get("task_id", "task-default"))
+    resolved_attempt = int(attempt or state.get("attempt_index", 1))
+
+    cleared_gates = state.get("cleared_gates", {})
+    verified_gates: List[str] = []
+
+    # 1. Verify every registered gate receipt
+    for gate_name, expected_hash in sorted(cleared_gates.items()):
+        gate_enum = normalize_gate_id(gate_name)
+        receipt_path = get_gate_receipt_path(root, gate_enum, resolved_task_id, resolved_attempt)
+        if not receipt_path.is_file():
+            raise ReceiptTamperDetectedError(
+                f"Gate receipt for '{gate_name}' registered in ACTIVE_STATE.json is missing on disk: '{receipt_path.relative_to(root)}'"
+            )
+
+        live_hash = sha256_file(receipt_path)
+        if live_hash.lower() != expected_hash.lower():
+            raise ReceiptTamperDetectedError(
+                f"Gate receipt for '{gate_name}' has been altered! Expected SHA-256 {expected_hash}, actual {live_hash}."
+            )
+
+        receipt_data = load_json_file(receipt_path)
+        validate_gate_receipt(receipt_data)
+        verified_gates.append(gate_name)
+
+    # 2. Check for unregistered gate receipt files on disk in attempt directory
+    attempt_dir = root / "evidence" / "tasks" / resolved_task_id / f"attempt_{resolved_attempt}"
+    if attempt_dir.is_dir():
+        for f in attempt_dir.rglob("*receipt*.json"):
+            if f.is_file():
+                # Check if it corresponds to a gate receipt
+                matched_gate = None
+                for g in GateId:
+                    expected_p = get_gate_receipt_path(root, g, resolved_task_id, resolved_attempt)
+                    if f.resolve() == expected_p.resolve():
+                        matched_gate = g.value
+                        break
+                if matched_gate and matched_gate not in cleared_gates:
+                    raise ReceiptTamperDetectedError(
+                        f"Unregistered gate receipt detected on disk: '{f.relative_to(root)}' is not recorded in ACTIVE_STATE.json."
+                    )
+
+    return {
+        "valid": True,
+        "verified_gates": verified_gates,
+    }
+
 
