@@ -198,6 +198,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.print_help()
         return 0
 
+    # Startup auto-recovery of interrupted transactions (FR-10 / DEC-010)
+    ws_arg = getattr(args, "workspace", None)
+    try:
+        from stagecheck.core.journal import recover_interrupted_transactions
+        from stagecheck.core.paths import find_workspace_root
+        ws_root = Path(ws_arg).resolve() if ws_arg else find_workspace_root()
+        recover_interrupted_transactions(ws_root, verbose=True)
+    except Exception:
+        pass
+
     if args.subcommand == "init":
         from stagecheck.cli.init_cmd import run_init
         return run_init(
