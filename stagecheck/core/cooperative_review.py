@@ -40,7 +40,149 @@ class ExcessiveDiffSizeError(ReviewGateError):
     """Raised when uncommitted diff stream exceeds the 20 MiB safety ceiling."""
 
 
-MAX_DIFF_BYTES = 20 * 1024 * 1024  # 20 MiB (SEC-AC1)
+class UntrackedBytesExceededError(ReviewGateError):
+    """Raised when untracked non-ignored file volume exceeds 20 MiB ceiling (ARCH-03)."""
+
+
+class UntrackedCountExceededError(ReviewGateError):
+    """Raised when untracked non-ignored file count exceeds 500 file limit (ARCH-03)."""
+
+
+class GitIndexLockedError(ReviewGateError):
+    """Raised when git index lock (.git/index.lock) is detected in repository."""
+
+
+class ScopeViolationError(ReviewGateError):
+    """Raised when working tree changes modify files outside declared scope."""
+
+
+MAX_DIFF_BYTES = 20 * 1024 * 1024        # 20 MiB (SEC-AC1)
+MAX_UNTRACKED_BYTES = 20 * 1024 * 1024   # 20 MiB (ARCH-03 / FR-09)
+MAX_UNTRACKED_COUNT = 500                # 500 files (ARCH-03 / FR-09)
+MAX_REPAIR_CYCLES = 3                    # Maximum Phase 2A cooperative review repair cycles
+
+# 8-Category Finding Classification Taxonomy (Spec 04 §4.2)
+FINDING_CATEGORIES = {
+    "NEWLY_INTRODUCED": "Newly Introduced Issue",
+    "PRE_EXISTING_UPSTREAM": "Pre-existing Upstream Issue",
+    "PRE_EXISTING_REPO": "Pre-existing Repository Issue",
+    "INHERITED_DESIGN": "Inherited Design Constraint",
+    "INTEGRATION_ISSUE": "Integration Issue",
+    "CONFIG_ENVIRONMENT": "Configuration or Environment Issue",
+    "FALSE_POSITIVE": "False Positive",
+    "UNVERIFIED_FINDING": "Unverified Finding",
+}
+
+
+def inspect_untracked_files(repo_path: Path) -> Tuple[List[str], int, int]:
+    """Inspect untracked non-ignored files in a repository and enforce 20 MiB / 500 file limits.
+
+    Returns:
+        (untracked_files_list, count, total_bytes)
+
+    Raises:
+        GitIndexLockedError: If .git/index.lock is present.
+        UntrackedCountExceededError: If file count > 500.
+        UntrackedBytesExceededError: If file volume > 20 MiB.
+    """
+    index_lock = repo_path / ".git" / "index.lock"
+    if index_lock.is_file():
+        raise GitIndexLockedError(
+            f"Git index lock detected in repository '{repo_path.name}': {index_lock}. "
+            "Wait for active git operation to finish or resolve stale lock."
+        )
+
+    res = subprocess.run(
+        ["git", "-C", str(repo_path), "ls-files", "--others", "--exclude-standard"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True,
+    )
+    untracked = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+
+    if len(untracked) > MAX_UNTRACKED_COUNT:
+        raise UntrackedCountExceededError(
+            f"Untracked non-ignored file count ({len(untracked)}) exceeds maximum allowed ceiling of 500 files in repository '{repo_path.name}'."
+        )
+
+    total_bytes = 0
+    for rel_f in untracked:
+        target_f = repo_path / rel_f
+        if target_f.is_file():
+            total_bytes += target_f.stat().st_size
+            if total_bytes > MAX_UNTRACKED_BYTES:
+                raise UntrackedBytesExceededError(
+                    f"Untracked non-ignored file volume ({total_bytes} bytes) exceeds 20 MiB ceiling in repository '{repo_path.name}'."
+                )
+
+    return sorted(untracked), len(untracked), total_bytes
+
+
+def verify_precommit_scope(
+    workspace_root: Union[str, Path],
+    task_id: str,
+    attempt: int,
+    touched_repos: List[str],
+    base_commits: Dict[str, str],
+) -> List[str]:
+    """Verify that all uncommitted and modified working tree files match declared_scope.json."""
+    from stagecheck.core.prompt_gate import is_path_in_scope
+
+    root = Path(workspace_root).resolve()
+    attempt_dir = resolve_task_attempt_dir(root, task_id, attempt)
+    scope_file = attempt_dir / "Phase-1" / "declared_scope.json"
+
+    if not scope_file.is_file():
+        return ["Missing Phase-1/declared_scope.json: declared scope required for pre-commit review."]
+
+    try:
+        scope_data = json.loads(scope_file.read_text(encoding="utf-8"))
+    except Exception as err:
+        return [f"Failed to load declared_scope.json: {err}"]
+
+    allowed_paths = scope_data.get("allowed_paths", [])
+    # Check for illegal top-level wildcards
+    if any(p in ("*", "/**", "**") for p in allowed_paths):
+        return ["Prohibited top-level wildcard ('*', '**') declared in declared_scope.json allowed_paths."]
+
+    violations: List[str] = []
+
+    for repo_name in touched_repos:
+        repo_path = root / "repos" / repo_name
+        if not repo_path.is_dir():
+            continue
+
+        base_commit = base_commits.get(repo_name)
+        modified_files: Set[str] = set()
+
+        if base_commit:
+            res_tracked = subprocess.run(
+                ["git", "-C", str(repo_path), "diff", "--name-only", base_commit],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            for f in res_tracked.stdout.splitlines():
+                if f.strip():
+                    modified_files.add(f.strip())
+
+        res_untracked = subprocess.run(
+            ["git", "-C", str(repo_path), "ls-files", "--others", "--exclude-standard"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        for f in res_untracked.stdout.splitlines():
+            if f.strip():
+                modified_files.add(f.strip())
+
+        for rel_file in sorted(modified_files):
+            ws_rel = f"repos/{repo_name}/{rel_file}"
+            if not is_path_in_scope(ws_rel, scope_data):
+                violations.append(f"Out-of-scope modification: '{ws_rel}' is not permitted by declared scope.")
+
+    return violations
 
 
 def compute_uncommitted_diff_hashes(
@@ -65,13 +207,27 @@ def compute_uncommitted_diff_hashes(
     repos_dir = root / "repos"
 
     approved_diff_hashes: Dict[str, str] = {}
+    repo_untracked_hashes: Dict[str, str] = {}
     total_diff_bytes = 0
+
+    from stagecheck.core.utils import sha256_file
 
     for repo_name in sorted(touched_repos):
         repo_path = repos_dir / repo_name
         base_commit = base_commits.get(repo_name)
         if not base_commit:
             raise ReviewGateError(f"Missing required base_commit for repository '{repo_name}'.")
+
+        # Inspect untracked non-ignored files & enforce limits (ARCH-03 / FR-09)
+        untracked_files, u_count, u_bytes = inspect_untracked_files(repo_path)
+        untracked_lines: List[str] = []
+        for rel_f in untracked_files:
+            f_p = repo_path / rel_f
+            if f_p.is_file():
+                untracked_lines.append(f"{rel_f}:{sha256_file(f_p)}")
+        repo_untracked_hashes[repo_name] = (
+            sha256_digest("\n".join(untracked_lines).encode("utf-8")) if untracked_lines else "0" * 64
+        )
 
         cmd = [
             "git",
@@ -95,9 +251,10 @@ def compute_uncommitted_diff_hashes(
 
         approved_diff_hashes[repo_name] = sha256_digest(diff_bytes)
 
-    # Compute composite digest
+    # Compute composite digest: SHA-256(Tracked Git Diff || Untracked Non-Ignored Files Matrix)
     composite_raw = "|".join(
-        f"{r}:{approved_diff_hashes[r]}" for r in sorted(approved_diff_hashes.keys())
+        f"{r}:diff={approved_diff_hashes[r]}:untracked={repo_untracked_hashes[r]}"
+        for r in sorted(approved_diff_hashes.keys())
     ).encode("utf-8")
     composite_digest = sha256_digest(composite_raw)
 

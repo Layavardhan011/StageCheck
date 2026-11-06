@@ -68,7 +68,17 @@ def run_review_precommit(
     attempt: int = 1,
     workspace: Optional[str] = None,
 ) -> int:
-    """Evaluate Phase 2A pre-commit status for a task."""
+    """Evaluate Phase 2A pre-commit status for a task, enforce untracked limits, scope, and rubric."""
+    from stagecheck.core.cooperative_review import (
+        GitIndexLockedError,
+        UntrackedBytesExceededError,
+        UntrackedCountExceededError,
+        inspect_untracked_files,
+        record_pre_commit_review,
+        verify_precommit_scope,
+    )
+    from stagecheck.core.rubric_engine import run_rubric_evaluation, update_rubric_artifacts
+
     workspace_root = Path(workspace).resolve() if workspace else Path.cwd().resolve()
 
     # Enforce Gate 1 prerequisite
@@ -90,16 +100,96 @@ def run_review_precommit(
 
     try:
         data = json.loads(status_file.read_text(encoding="utf-8"))
-        print(
-            f"Phase 2A Pre-Commit Status for Task '{task}' (Attempt {attempt}, Cycle {data.get('cycle', 1)}):\n"
-            f"  Status:       {data.get('status')}\n"
-            f"  Repositories: {', '.join(data.get('touched_repositories', []))}\n"
-            f"  Summary:      {data.get('summary', 'No summary provided')}"
-        )
-        return 0
     except Exception as err:
-        print(f"ERROR: [review.error] Failed to inspect pre_commit_status: {err}", file=sys.stderr)
+        print(f"ERROR: [review.error] Failed to parse pre_commit_status.json: {err}", file=sys.stderr)
         return 1
+
+    touched_repos = data.get("touched_repositories", [])
+    base_commits = data.get("base_commits", {})
+    cycle = data.get("cycle", 1)
+
+    print(f"================================================================")
+    print(f"        STAGECHECK PHASE 2A PRE-COMMIT COOPERATIVE REVIEW       ")
+    print(f"================================================================")
+    print(f"Task ID:       {task}")
+    print(f"Attempt:       {attempt}")
+    print(f"Review Cycle:  {cycle}")
+    print(f"Repositories:  {', '.join(touched_repos)}")
+    print(f"Summary:       {data.get('summary', 'No summary provided')}")
+    print(f"----------------------------------------------------------------")
+
+    # 1. Enforce Scope Containment (FR-09 / ARCH-03)
+    scope_violations = verify_precommit_scope(workspace_root, task, attempt, touched_repos, base_commits)
+    if scope_violations:
+        print("ERROR: [review.scope_escape] Pre-commit changes violate declared scope:", file=sys.stderr)
+        for v in scope_violations:
+            print(f"  ├── {v}", file=sys.stderr)
+        return 127
+
+    # 2. Enforce Untracked Files Limits & Index Lock Contention (FR-09 / ARCH-03)
+    repos_dir = workspace_root / "repos"
+    for r_name in touched_repos:
+        r_path = repos_dir / r_name
+        if r_path.is_dir():
+            try:
+                untracked, u_count, u_bytes = inspect_untracked_files(r_path)
+                u_mb = u_bytes / (1024 * 1024)
+                print(f"Repository '{r_name}': {u_count} untracked files ({u_mb:.2f} MiB). Invariants verified.")
+            except (GitIndexLockedError, UntrackedCountExceededError, UntrackedBytesExceededError) as err:
+                print(f"ERROR: [review.untracked_limits] {err}", file=sys.stderr)
+                return 1
+
+    # 3. Execute Automated 270-Rule Rubric Evaluation
+    try:
+        rubric_payload, elapsed_ms = run_rubric_evaluation(
+            workspace_root=workspace_root,
+            task_id=task,
+            attempt=attempt,
+            cycle=cycle,
+        )
+    except Exception as err:
+        print(f"ERROR: [review.rubric_error] Rubric evaluation failed: {err}", file=sys.stderr)
+        return 1
+
+    # Update rubric artifacts
+    update_rubric_artifacts(workspace_root, rubric_payload)
+    counts = rubric_payload["counts"]
+    failed_count = counts["failed"]
+
+    if failed_count > 0:
+        new_issues = []
+        for r_entry in rubric_payload.get("evaluations", []):
+            if r_entry.get("status") == "FAIL":
+                new_issues.append({
+                    "defect_id": r_entry["rule_id"],
+                    "severity": "BLOCKING",
+                    "location": r_entry.get("witness", "codebase"),
+                    "description": r_entry.get("message", "Rubric rule failure."),
+                })
+        record_pre_commit_review(
+            workspace_root=workspace_root,
+            task_id=task,
+            attempt=attempt,
+            cycle=cycle,
+            status="REVISION_REQUIRED",
+            summary=f"Review rejected: {failed_count} rubric defects identified.",
+            base_commits=base_commits,
+            new_issues=new_issues,
+        )
+        print(f"RESULT: REVISION_REQUIRED ({failed_count} blocking defects). Remediation guidance written to response.json.")
+        return 1
+    else:
+        record_pre_commit_review(
+            workspace_root=workspace_root,
+            task_id=task,
+            attempt=attempt,
+            cycle=cycle,
+            status="APPROVED",
+            summary="All pre-commit architectural and rubric criteria satisfied.",
+            base_commits=base_commits,
+        )
+        print("RESULT: APPROVED. All 270 rubric criteria verified. Local Git commit authorized.")
+        return 0
 
 
 def run_approve_review(

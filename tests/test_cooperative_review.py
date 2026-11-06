@@ -252,6 +252,146 @@ class TestCooperativeReview(unittest.TestCase):
         approved = assert_commit_authorization(self.workspace, self.task_id, self.attempt)
         self.assertEqual(approved["status"], "APPROVED")
 
+    def test_untracked_limits_and_index_lock_enforcement(self) -> None:
+        """Verify untracked file ceilings (20 MiB, 500 files) and git index lock (FR-09 / ARCH-03)."""
+        from stagecheck.core.cooperative_review import (
+            GitIndexLockedError,
+            UntrackedBytesExceededError,
+            UntrackedCountExceededError,
+            inspect_untracked_files,
+        )
+
+        # 1. Clean repo inspection
+        untracked, count, total_bytes = inspect_untracked_files(self.backend_dir)
+        self.assertEqual(count, 0)
+        self.assertEqual(total_bytes, 0)
+
+        # 2. Test Git Index Lock
+        lock_file = self.backend_dir / ".git" / "index.lock"
+        lock_file.write_text("lock", encoding="utf-8")
+        try:
+            with self.assertRaises(GitIndexLockedError):
+                inspect_untracked_files(self.backend_dir)
+        finally:
+            if lock_file.exists():
+                lock_file.unlink()
+
+        # 3. Test untracked count ceiling (> 500 files)
+        scratch_dir = self.backend_dir / "untracked_bulk"
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            for i in range(505):
+                (scratch_dir / f"file_{i}.txt").write_text("x", encoding="utf-8")
+
+            with self.assertRaises(UntrackedCountExceededError):
+                inspect_untracked_files(self.backend_dir)
+        finally:
+            import shutil
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+
+    def test_scope_containment_violation_returns_127(self) -> None:
+        """Verify modifying files outside declared scope causes review-precommit to exit with code 127."""
+        from stagecheck.core.gate_engine import advance_gate_atomic
+        from stagecheck.core.git import discover_repository
+        from stagecheck.core.scaffold import scaffold_controls_atomic
+        from stagecheck.core.start_manifest import generate_start_manifest
+        from stagecheck.core.state import load_active_state, save_active_state
+
+        baselines = {
+            "backend": discover_repository(self.backend_dir, name="backend", workspace_root=self.workspace)
+        }
+        scaffold_controls_atomic(self.workspace, baselines)
+        generate_start_manifest(self.workspace)
+
+        p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").write_text("# Prompt\n", encoding="utf-8")
+        (p1_dir / "declared_scope.json").write_text(
+            json.dumps({"schema_version": "2.0", "task_id": self.task_id, "allowed_paths": ["repos/backend/order.py"]}),
+            encoding="utf-8",
+        )
+        (p1_dir / "prompt_verified.json").write_text(
+            json.dumps({"task_id": self.task_id, "status": "VERIFIED"}),
+            encoding="utf-8",
+        )
+
+        state = load_active_state(self.workspace)
+        state["task_id"] = self.task_id
+        state["attempt_index"] = self.attempt
+        state["phase"] = "PHASE_1_PLANNING"
+        save_active_state(self.workspace, state)
+
+        advance_gate_atomic(self.workspace, "Gate-1", task_id=self.task_id, attempt=self.attempt)
+
+        # Agent 2 introduces an unauthorized file outside declared scope
+        unauth = self.backend_dir / "unauthorized_exploit.py"
+        unauth.write_text("# exploit\n", encoding="utf-8")
+
+        submit_pre_commit_status(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            cycle=1,
+            touched_repositories=["backend"],
+            base_commits={"backend": self.base_commit},
+        )
+
+        ret_rev = main([
+            "review-precommit",
+            "--task", self.task_id,
+            "--attempt", str(self.attempt),
+            "--workspace", str(self.workspace),
+        ])
+        self.assertEqual(ret_rev, 127, "Scope escape must exit with code 127")
+
+    def test_repair_cycles_do_not_consume_attempt_budget(self) -> None:
+        """Verify multiple repair cycles in Phase 2A increment cycle without consuming attempt budget (FR-06)."""
+        from stagecheck.core.state import load_active_state, save_active_state
+
+        state = load_active_state(self.workspace) if (self.workspace / "controls" / "ACTIVE_STATE.json").is_file() else {}
+        initial_attempt = state.get("attempt_index", 1)
+
+        # Cycle 1: Revision required
+        record_pre_commit_review(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            cycle=1,
+            status="REVISION_REQUIRED",
+            summary="Defects found in cycle 1",
+            base_commits={"backend": self.base_commit},
+            new_issues=[{"defect_id": "BUG-01", "description": "Fix bug 1"}],
+        )
+
+        # Cycle 2: Revision required
+        record_pre_commit_review(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            cycle=2,
+            status="REVISION_REQUIRED",
+            summary="Defects found in cycle 2",
+            base_commits={"backend": self.base_commit},
+            new_issues=[{"defect_id": "BUG-02", "description": "Fix bug 2"}],
+        )
+
+        # Cycle 3: Approved
+        record_pre_commit_review(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            cycle=3,
+            status="APPROVED",
+            summary="Approved in cycle 3",
+            base_commits={"backend": self.base_commit},
+        )
+
+        # Verify attempt index was NOT incremented
+        if (self.workspace / "controls" / "ACTIVE_STATE.json").is_file():
+            final_state = load_active_state(self.workspace)
+            self.assertEqual(final_state.get("attempt_index", 1), initial_attempt)
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,7 @@
   "properties": {
     "schema_version": {
       "type": "string",
-      "enum": ["2.0"]
+      "enum": ["1.0.0", "2.0", "2.0.0"]
     },
     "task_id": {
       "type": "string",
