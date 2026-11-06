@@ -17,7 +17,7 @@ class TestSmoke(unittest.TestCase):
 
     def test_package_metadata(self) -> None:
         """Verify package version and exports."""
-        self.assertEqual(stagecheck.__version__, "1.0.0")
+        self.assertEqual(stagecheck.__version__, "2.0.0")
 
     def test_cli_parser_subcommands(self) -> None:
         """Verify CLI parser has all 14 lifecycle subcommands registered."""
