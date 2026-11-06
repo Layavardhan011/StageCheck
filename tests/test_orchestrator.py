@@ -615,6 +615,7 @@ class TestNineStageVerification(unittest.TestCase):
             ],
         }
         disp_file.write_text(canonical_json_dumps(disp_data), encoding="utf-8")
+        write_agents_contract(self.workspace_root)
 
         # Re-run: defect should now be waived
         ctx_waived = orchestrator.discover_context(self.task_id, self.attempt)

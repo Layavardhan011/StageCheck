@@ -37,13 +37,16 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["task_id", "defect_id", "rationale", "authorized_by", "timestamp"],
+            "required": ["task_id", "defect_id", "rationale", "authorized_by"],
             "additionalProperties": false,
             "properties": {
+              "disposition_id": {"type": "string"},
               "task_id": {"type": "string"},
               "defect_id": {"type": "string"},
+              "action": {"type": "string"},
               "rationale": {"type": "string"},
               "authorized_by": {"type": "string"},
+              "authorized_at": {"type": "string"},
               "timestamp": {"type": "string"}
             }
           }

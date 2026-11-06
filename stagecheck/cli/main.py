@@ -124,6 +124,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_lq.add_argument("--attempt", type=int, default=1, help="Attempt index.")
     p_lq.add_argument("--workspace", help="Explicit workspace root path.")
 
+    # 15. verify-manifest (DEC-008 / FR-08)
+    p_vm = subparsers.add_parser("verify-manifest", help="Verify specification integrity against START_MANIFEST.md.")
+    p_vm.add_argument("--workspace", help="Explicit workspace root path.")
+
+    # 16. update-manifest (DEC-008 / FR-08)
+    p_um = subparsers.add_parser("update-manifest", help="Explicitly update specification digests in START_MANIFEST.md.")
+    p_um.add_argument("--workspace", help="Explicit workspace root path.")
+
     return parser
 
 
@@ -269,6 +277,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         return run_log_quality(
             task_id=args.task,
             attempt=getattr(args, "attempt", 1),
+            workspace=getattr(args, "workspace", None),
+        )
+
+    if args.subcommand == "verify-manifest":
+        from stagecheck.cli.manifest_cmd import run_verify_manifest
+        return run_verify_manifest(
+            workspace=getattr(args, "workspace", None),
+        )
+
+    if args.subcommand == "update-manifest":
+        from stagecheck.cli.manifest_cmd import run_update_manifest
+        return run_update_manifest(
             workspace=getattr(args, "workspace", None),
         )
 

@@ -6,10 +6,31 @@ Renders the root workspace governance contract AGENTS.md, embedding the
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from stagecheck.core.utils import sha256_file
+
+
+class AgentsContractError(Exception):
+    """Base exception for AGENTS.md contract verification."""
+
+
+class AgentsContractNotFoundError(AgentsContractError):
+    """Raised when root AGENTS.md is missing."""
+
+
+class AgentsContractSecurityError(AgentsContractError):
+    """Raised when AGENTS.md is a symlink or unsafe traversal is detected."""
+
+
+class AgentsContractVerificationError(AgentsContractError):
+    """Raised when control hashes do not match the AGENTS.md binding table."""
+
+    def __init__(self, message: str, details: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.details = details or {}
 
 
 AGENTS_MD_TEMPLATE = """# AGENTS.md — Governed Dual-Agent Operating Contract
@@ -131,4 +152,142 @@ def write_agents_contract(workspace_root: Path) -> Path:
     agents_md_path = root / "AGENTS.md"
     agents_md_path.write_text(contract_content, encoding="utf-8")
     return agents_md_path
+
+
+def parse_agents_contract_table(contract_text: str) -> Dict[str, str]:
+    """Parse the 8-row control manifest table from AGENTS.md text.
+
+    Returns:
+        Mapping of descriptor filename -> expected 64-char lowercase SHA-256 digest.
+    """
+    entries: Dict[str, str] = {}
+    row_pattern = re.compile(
+        r"\|\s*`?([a-zA-Z0-9._\-]+)`?\s*\|\s*`?controls/([a-zA-Z0-9._\-]+)`?\s*\|\s*`?([0-9a-fA-F]{64})`?\s*\|"
+    )
+
+    for line in contract_text.splitlines():
+        line = line.strip()
+        if not line.startswith("|") or "---" in line or "Relative Path" in line:
+            continue
+        match = row_pattern.search(line)
+        if match:
+            col1_name = match.group(1).strip()
+            col2_name = match.group(2).strip()
+            digest = match.group(3).strip().lower()
+            entries[col1_name] = digest
+            entries[col2_name] = digest
+
+    return entries
+
+
+def verify_agents_contract(
+    workspace_root: Union[str, Path],
+    strict: bool = False,
+    include_active_state: bool = False,
+) -> Dict[str, Any]:
+    """Verify that live control descriptor hashes match the root AGENTS.md binding table.
+
+    Verifies:
+    1. AGENTS.md exists and is not a symbolic link.
+    2. All 8 mandatory control files are represented in the AGENTS.md table.
+    3. Each control descriptor on disk matches its recorded digest in AGENTS.md.
+       (ACTIVE_STATE.json dynamic runtime mutation is accommodated unless include_active_state=True).
+
+    Args:
+        workspace_root: Root path of the workspace.
+        strict: If True, raises AgentsContractVerificationError on failure.
+        include_active_state: If True, strictly asserts ACTIVE_STATE.json hash matches table.
+
+    Returns:
+        Dict with keys:
+          'valid': bool,
+          'verified': list of matching descriptor names,
+          'missing': list of missing descriptor names,
+          'mismatches': list of dicts with control, expected, actual.
+    """
+    root = Path(workspace_root).resolve()
+    agents_md_path = root / "AGENTS.md"
+
+    if not agents_md_path.is_file():
+        if strict:
+            raise AgentsContractNotFoundError(f"AGENTS.md not found at '{agents_md_path}'")
+        return {
+            "valid": False,
+            "error": "AGENTS.md missing",
+            "verified": [],
+            "missing": ["AGENTS.md"],
+            "mismatches": [],
+        }
+
+    if agents_md_path.is_symlink():
+        raise AgentsContractSecurityError(f"AGENTS.md at '{agents_md_path}' is a prohibited symbolic link.")
+
+    text = agents_md_path.read_text(encoding="utf-8")
+    table = parse_agents_contract_table(text)
+
+    controls_dir = root / "controls"
+    verified: List[str] = []
+    missing: List[str] = []
+    mismatches: List[Dict[str, str]] = []
+
+    required_controls = [
+        "STAGECHECK_ROOT.json",
+        "EVIDENCE_ROOT.json",
+        "PRODUCT_REPOSITORIES.json",
+        "QUALIFICATION_ROOT.json",
+        "ACTIVE_STATE.json",
+        "OWNER_GRANTS.md",
+        "FAILURE_PREVENTION.md",
+        "DISPOSITIONS.json",
+    ]
+
+    for filename in required_controls:
+        if filename not in table:
+            missing.append(filename)
+            continue
+
+        file_path = controls_dir / filename
+        if not file_path.is_file():
+            missing.append(filename)
+            continue
+
+        actual_digest = sha256_file(file_path).lower()
+        expected_digest = table[filename].lower()
+
+        # ACTIVE_STATE.json changes across transitions at runtime; verify existence
+        # and skip hash check unless strict initial state checking is requested
+        if filename == "ACTIVE_STATE.json" and not include_active_state:
+            verified.append(filename)
+            continue
+
+        if actual_digest != expected_digest:
+            mismatches.append({
+                "control": filename,
+                "expected": expected_digest,
+                "actual": actual_digest,
+            })
+        else:
+            verified.append(filename)
+
+    is_valid = len(missing) == 0 and len(mismatches) == 0 and len(verified) == len(required_controls)
+    result = {
+        "valid": is_valid,
+        "verified": verified,
+        "missing": missing,
+        "mismatches": mismatches,
+    }
+
+    if strict and not is_valid:
+        parts = []
+        if missing:
+            parts.append(f"Missing controls: {missing}")
+        if mismatches:
+            parts.append(f"Hash mismatches: {[m['control'] for m in mismatches]}")
+        raise AgentsContractVerificationError(
+            f"AGENTS.md binding contract verification failed: {'; '.join(parts)}",
+            details=result,
+        )
+
+    return result
+
 

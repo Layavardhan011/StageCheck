@@ -37,6 +37,8 @@ class TestSmoke(unittest.TestCase):
             "unlock",
             "seal",
             "log-quality",
+            "verify-manifest",
+            "update-manifest",
         }
         # inspect subparsers
         subparsers_action = next(

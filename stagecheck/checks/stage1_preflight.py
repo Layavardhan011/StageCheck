@@ -9,7 +9,9 @@ import subprocess
 from pathlib import Path
 
 from stagecheck.checks.base import AuditContext, Defect, StageResult
+from stagecheck.core.agents_md import verify_agents_contract
 from stagecheck.core.prompt_gate import PromptGateError, assert_prompt_invariance
+from stagecheck.core.start_manifest import verify_spec_manifest
 
 _PLACEHOLDER_PATTERN = re.compile(r"(\{\{[A-Za-z0-9_]+\}\}|<[A-Za-z0-9_]+_PLACEHOLDER>|TODO_IMPLEMENT)")
 
@@ -34,7 +36,7 @@ def run_stage1_preflight(ctx: AuditContext) -> StageResult:
             )
         )
 
-    # 2. Assert AGENTS.md contract existence
+    # 2. Assert AGENTS.md contract existence and cryptographic binding
     agents_md = ctx.workspace_root / "AGENTS.md"
     if not agents_md.is_file():
         defects.append(
@@ -46,8 +48,63 @@ def run_stage1_preflight(ctx: AuditContext) -> StageResult:
                 blocking=True,
             )
         )
+    else:
+        agents_res = verify_agents_contract(ctx.workspace_root)
+        if not agents_res.get("valid", False):
+            mismatches = [m["control"] for m in agents_res.get("mismatches", [])]
+            missing_ctrls = agents_res.get("missing", [])
+            detail = []
+            if mismatches:
+                detail.append(f"hash mismatches: {mismatches}")
+            if missing_ctrls:
+                detail.append(f"missing controls: {missing_ctrls}")
+            defects.append(
+                Defect(
+                    defect_id="preflight.binding_mismatch",
+                    message=f"Root AGENTS.md binding verification failed ({'; '.join(detail)}).",
+                    stage=stage_id,
+                    severity="CRITICAL",
+                    blocking=True,
+                )
+            )
 
-    # 3. Check for unresolved placeholders in touched repositories
+    # 3. Assert Specification Manifest Baseline Invariants (FR-08 / Spec 05 / DEC-008)
+    specs_dir = ctx.workspace_root / "specs"
+    if specs_dir.is_dir():
+        spec_res = verify_spec_manifest(ctx.workspace_root)
+        if not spec_res.get("valid", False):
+            if "START_MANIFEST.md" in spec_res.get("missing", []):
+                defects.append(
+                    Defect(
+                        defect_id="preflight.spec_manifest_missing",
+                        message="specs/START_MANIFEST.md baseline manifest is missing.",
+                        stage=stage_id,
+                        severity="CRITICAL",
+                        blocking=True,
+                    )
+                )
+            else:
+                tampered = [t["file"] for t in spec_res.get("tampered", [])]
+                missing_specs = spec_res.get("missing", [])
+                unregistered = spec_res.get("unregistered", [])
+                parts = []
+                if tampered:
+                    parts.append(f"tampered: {tampered}")
+                if missing_specs:
+                    parts.append(f"missing: {missing_specs}")
+                if unregistered:
+                    parts.append(f"unregistered additions: {unregistered}")
+                defects.append(
+                    Defect(
+                        defect_id="preflight.spec_manifest_tampered",
+                        message=f"Specification baseline manifest integrity violation ({'; '.join(parts)}).",
+                        stage=stage_id,
+                        severity="CRITICAL",
+                        blocking=True,
+                    )
+                )
+
+    # 4. Check for unresolved placeholders in touched repositories
     for repo_name in ctx.touched_repos:
         repo_dir = ctx.workspace_root / "repos" / repo_name
         if repo_dir.is_dir():
@@ -69,7 +126,7 @@ def run_stage1_preflight(ctx: AuditContext) -> StageResult:
                     except Exception:
                         pass
 
-    # 4. Gitleaks Binary & Version Check (SEC-L2) - Fail Closed
+    # 5. Gitleaks Binary & Version Check (SEC-L2) - Fail Closed
     from stagecheck.core.scanner import SecretScanner
     scanner = getattr(ctx, "scanner", None) or SecretScanner()
     is_valid, scanner_defects = scanner.verify_scanner_binary(stage=stage_id)

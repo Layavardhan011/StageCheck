@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.agents_md import render_agents_contract, write_agents_contract
+from stagecheck.core.agents_md import (
+    AgentsContractNotFoundError,
+    AgentsContractSecurityError,
+    AgentsContractVerificationError,
+    parse_agents_contract_table,
+    render_agents_contract,
+    verify_agents_contract,
+    write_agents_contract,
+)
 from stagecheck.core.git import RepoBaseline
 from stagecheck.core.scaffold import scaffold_controls_atomic
 from stagecheck.core.utils import sha256_file
@@ -93,6 +102,61 @@ class TestAgentsContract(unittest.TestCase):
 
         with self.assertRaises(FileNotFoundError):
             render_agents_contract(controls_dir)
+
+
+    def test_verify_agents_contract_valid_workspace(self) -> None:
+        """Verify that verify_agents_contract succeeds when all 8 controls match."""
+        write_agents_contract(self.workspace)
+        result = verify_agents_contract(self.workspace, strict=True, include_active_state=True)
+        self.assertTrue(result["valid"])
+        self.assertEqual(len(result["verified"]), 8)
+        self.assertEqual(len(result["missing"]), 0)
+        self.assertEqual(len(result["mismatches"]), 0)
+
+    def test_verify_agents_contract_detects_tampered_control(self) -> None:
+        """Verify tamper detection when a control descriptor is modified out-of-band."""
+        write_agents_contract(self.workspace)
+
+        # Tamper with OWNER_GRANTS.md
+        grants_file = self.workspace / "controls" / "OWNER_GRANTS.md"
+        # Temporarily make writable
+        os.chmod(self.workspace / "controls", 0o755)
+        os.chmod(grants_file, 0o644)
+        grants_file.write_text("# Malicious Grants\ngit push allowed\n", encoding="utf-8")
+        os.chmod(grants_file, 0o444)
+        os.chmod(self.workspace / "controls", 0o555)
+
+        result = verify_agents_contract(self.workspace, strict=False)
+        self.assertFalse(result["valid"])
+        self.assertEqual(len(result["mismatches"]), 1)
+        self.assertEqual(result["mismatches"][0]["control"], "OWNER_GRANTS.md")
+
+        with self.assertRaises(AgentsContractVerificationError):
+            verify_agents_contract(self.workspace, strict=True)
+
+    def test_verify_agents_contract_detects_missing_control(self) -> None:
+        """Verify detection when a control file is deleted after AGENTS.md was written."""
+        write_agents_contract(self.workspace)
+
+        # Delete DISPOSITIONS.json
+        disp_file = self.workspace / "controls" / "DISPOSITIONS.json"
+        os.chmod(self.workspace / "controls", 0o755)
+        disp_file.unlink()
+        os.chmod(self.workspace / "controls", 0o555)
+
+        result = verify_agents_contract(self.workspace, strict=False)
+        self.assertFalse(result["valid"])
+        self.assertIn("DISPOSITIONS.json", result["missing"])
+
+    def test_verify_agents_contract_rejects_symlink(self) -> None:
+        """Verify symbolic link AGENTS.md fails closed."""
+        real_file = self.workspace / "real_contract.md"
+        real_file.write_text("# Real\n", encoding="utf-8")
+        symlink_contract = self.workspace / "AGENTS.md"
+        symlink_contract.symlink_to(real_file)
+
+        with self.assertRaises(AgentsContractSecurityError):
+            verify_agents_contract(self.workspace)
 
 
 if __name__ == "__main__":

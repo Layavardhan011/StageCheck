@@ -84,6 +84,8 @@ class TestEndToEndLifecycle(unittest.TestCase):
         specs_dir.mkdir(parents=True, exist_ok=True)
         (specs_dir / "TASK_PLAN.md").write_text("# Plan for task-101\n")
         (specs_dir / "ARCHITECTURE.md").write_text("# Architecture for task-101\n")
+        from stagecheck.core.start_manifest import update_spec_manifest
+        update_spec_manifest(self.ws)
 
         scope_data = {
             "schema_version": "2.0",

@@ -109,6 +109,8 @@ class TestCLIUX(unittest.TestCase):
             "unlock",
             "seal",
             "log-quality",
+            "verify-manifest",
+            "update-manifest",
         }
         self.assertEqual(commands, expected)
 
