@@ -33,10 +33,13 @@ def run_start(workspace: Optional[Path] = None, task: Optional[str] = None) -> i
         with controlled_write_transaction(controls_dir):
             state = load_active_state(ws_root)
             state["task_id"] = task
-            state["current_task"] = task
-            state["attempt"] = 1
             state["phase"] = "PHASE_1_PLANNING"
-            state["status"] = "IN_PROGRESS"
+            state["attempt_index"] = 1
+            state["repair_index"] = 0
+            state["circuit_breaker_tripped"] = False
+            state.pop("attempt", None)
+            state.pop("current_task", None)
+            state.pop("status", None)
             save_active_state(ws_root, state)
 
             task_phase1_dir = ws_root / f"evidence/tasks/{task}/attempt_1/Phase-1"

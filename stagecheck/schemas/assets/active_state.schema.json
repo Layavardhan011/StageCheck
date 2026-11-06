@@ -21,7 +21,7 @@
     },
     "task_id": {
       "type": "string",
-      "pattern": "^task-[a-zA-Z0-9_-]+$"
+      "pattern": "^[a-zA-Z0-9._-]+$"
     },
     "phase": {
       "type": "string",
@@ -61,7 +61,7 @@
       "type": "boolean"
     },
     "halt_reason": {
-      "type": "string"
+      "type": ["string", "null"]
     },
     "target_repositories": {
       "type": "array",

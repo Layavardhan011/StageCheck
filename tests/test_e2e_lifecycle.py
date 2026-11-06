@@ -74,7 +74,7 @@ class TestEndToEndLifecycle(unittest.TestCase):
         state = load_active_state(self.ws)
         self.assertEqual(state["task_id"], "task-101")
         self.assertEqual(state["phase"], "PHASE_1_PLANNING")
-        self.assertEqual(state["attempt"], 1)
+        self.assertEqual(state["attempt_index"], 1)
 
         # 3. Create prompt blueprint and declared scope
         task_dir = self.ws / "evidence/tasks/task-101/attempt_1/Phase-1"
