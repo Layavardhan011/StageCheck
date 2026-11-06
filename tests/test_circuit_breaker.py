@@ -10,6 +10,7 @@ from pathlib import Path
 
 from stagecheck.cli.main import main
 from stagecheck.core.circuit_breaker import (
+    AttemptBudgetExhaustedError,
     CircuitBreakerEvaluation,
     ResetAttemptsError,
     evaluate_circuit_breaker,
@@ -217,16 +218,16 @@ class TestCircuitBreaker(unittest.TestCase):
             reset_circuit_breaker(self.workspace_root, self.task_id)
         self.assertIn("not tripped", str(cm_premature.exception))
 
-        # Trip the breaker
-        eval_tripped = CircuitBreakerEvaluation(tripped=True, trigger="max_attempts_exhausted", reason="Done")
-        trip_circuit_breaker(self.workspace_root, self.task_id, 3, eval_tripped, [])
+        # Trip the breaker at attempt 2
+        eval_tripped = CircuitBreakerEvaluation(tripped=True, trigger="stagnant_defects", reason="No progress")
+        trip_circuit_breaker(self.workspace_root, self.task_id, 2, eval_tripped, [])
 
         # 2. Reject reset when task ID mismatches
         with self.assertRaises(ResetAttemptsError) as cm_mismatch:
             reset_circuit_breaker(self.workspace_root, "different-task-999")
         self.assertIn("Task ID mismatch", str(cm_mismatch.exception))
 
-        # 3. Successful reset
+        # 3. Successful reset from attempt 2 -> advances monotonically to attempt 3
         updated = reset_circuit_breaker(
             self.workspace_root,
             self.task_id,
@@ -234,14 +235,35 @@ class TestCircuitBreaker(unittest.TestCase):
         )
         self.assertFalse(updated["circuit_breaker_tripped"])
         self.assertEqual(updated["phase"], "PHASE_1_PLANNING")
-        self.assertEqual(updated["attempt_budget_base"], 3)
+        self.assertEqual(updated["attempt_index"], 3)
         self.assertEqual(updated["last_reset"]["authorized_by"], "developer@example.com")
+
+    def test_attempt_budget_cap_enforcement(self):
+        """Verify DEC-028 / FR-06: Attempt budget hard cap of 3 cannot be bypassed via retry."""
+        # Trip breaker at attempt 3
+        eval_tripped = CircuitBreakerEvaluation(tripped=True, trigger="max_attempts_exhausted", reason="Exhausted")
+        trip_circuit_breaker(self.workspace_root, self.task_id, 3, eval_tripped, [])
+
+        # Attempting reset or retry at attempt 3 MUST fail closed with AttemptBudgetExhaustedError
+        with self.assertRaises(AttemptBudgetExhaustedError) as cm_exhausted:
+            reset_circuit_breaker(self.workspace_root, self.task_id)
+        self.assertIn("Attempt budget exhausted", str(cm_exhausted.exception))
+
+    def test_attempt_budget_accounting(self):
+        """Verify DEC-006 / FR-06: Attempt budget accounting strictly enforces max 3 attempts."""
+        eval_tripped = CircuitBreakerEvaluation(tripped=True, trigger="max_attempts_exhausted", reason="Exhausted")
+        trip_circuit_breaker(self.workspace_root, self.task_id, 3, eval_tripped, [])
+
+        state_file = self.workspace_root / "controls" / "ACTIVE_STATE.json"
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        self.assertEqual(state["attempt_index"], 3)
+        self.assertEqual(state["phase"], "AWAITING_HUMAN_DISPOSITION")
 
     def test_cli_reset_attempts_command(self):
         """Verify CLI 'stagecheck reset-attempts' exit codes."""
-        # Trip breaker first
-        eval_tripped = CircuitBreakerEvaluation(tripped=True, trigger="max_attempts_exhausted", reason="Done")
-        trip_circuit_breaker(self.workspace_root, self.task_id, 3, eval_tripped, [])
+        # Trip breaker first at attempt 2
+        eval_tripped = CircuitBreakerEvaluation(tripped=True, trigger="stagnant_defects", reason="Done")
+        trip_circuit_breaker(self.workspace_root, self.task_id, 2, eval_tripped, [])
 
         exit_code = main([
             "reset-attempts",

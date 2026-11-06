@@ -162,20 +162,12 @@ class TestEndToEndLifecycle(unittest.TestCase):
         rc = run_gate_advance("Gate-3", task="task-101", attempt=1, workspace=str(self.ws))
         self.assertEqual(rc, 0, "Gate-3 advance failed")
 
-        # 9. Seal Attempt
-        seal_path = create_task_seal(
-            workspace_root=self.ws,
-            task_id="task-101",
-            attempt=1,
-            verdict_data=verdict,
-            checked_heads={"core-service": head_commit},
-            outcome="PASSED",
-        )
-        self.assertTrue(seal_path.is_file())
-
-        # Advance Gate 4 (GATE_4_SEALING -> SEALED_PASSED)
+        # 9. Seal Attempt & Advance Gate 4 (GATE_4_SEALING -> SEALED_PASSED)
         rc = run_gate_advance("Gate-4", task="task-101", attempt=1, workspace=str(self.ws))
         self.assertEqual(rc, 0, "Gate-4 advance failed")
+
+        seal_path = self.ws / "evidence" / "tasks" / "task-101" / "attempt_1" / "seal.json"
+        self.assertTrue(seal_path.is_file())
 
         # Verify unbroken seal chain
         is_valid, violations = verify_seal_chain(self.ws, "task-101", max_attempt=1)
@@ -372,26 +364,36 @@ class TestEndToEndLifecycle(unittest.TestCase):
         run_init(self.ws, agent1="agent1", agent2="agent2")
         run_start(workspace=self.ws, task="task-505")
 
-        # Trip the circuit breaker for task-505 after 3 attempts
+        # Trip the circuit breaker for task-505 after attempt 2
         eval_tripped = CircuitBreakerEvaluation(
             tripped=True,
-            trigger="max_attempts_exhausted",
-            reason="Exhausted maximum 3 verification attempts",
+            trigger="stagnant_defects",
+            reason="Zero defect reduction between attempts",
         )
-        trip_circuit_breaker(self.ws, "task-505", 3, eval_tripped, [])
+        trip_circuit_breaker(self.ws, "task-505", 2, eval_tripped, [])
 
         state = load_active_state(self.ws)
         self.assertTrue(state.get("circuit_breaker_tripped"))
 
-        # Agent cannot proceed automatically - human operator resets attempts
+        # Agent cannot proceed automatically - human operator resets attempts to attempt 3
         rc = run_reset_attempts("task-505", authorized_by="owner@company.com", workspace=str(self.ws))
         self.assertEqual(rc, 0, "run_reset_attempts failed")
 
-        # Breaker unlatched, state reset to Attempt 4, PHASE_1_PLANNING
+        # Breaker unlatched, state reset to Attempt 3, PHASE_1_PLANNING
         state = load_active_state(self.ws)
         self.assertFalse(state.get("circuit_breaker_tripped"))
-        self.assertEqual(state.get("attempt_budget_base"), 3)
+        self.assertEqual(state.get("attempt_index"), 3)
         self.assertEqual(state["phase"], "PHASE_1_PLANNING")
+
+        # Now trip at attempt 3 -> retry is strictly prohibited (DEC-028 / FR-06)
+        eval_exhausted = CircuitBreakerEvaluation(
+            tripped=True,
+            trigger="max_attempts_exhausted",
+            reason="Exhausted maximum 3 verification attempts",
+        )
+        trip_circuit_breaker(self.ws, "task-505", 3, eval_exhausted, [])
+        rc_fail = run_reset_attempts("task-505", authorized_by="owner@company.com", workspace=str(self.ws))
+        self.assertEqual(rc_fail, 1, "Reset on attempt 3 must be rejected")
 
 
 if __name__ == "__main__":

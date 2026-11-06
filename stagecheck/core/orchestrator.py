@@ -477,6 +477,14 @@ class AuditOrchestrator:
                     evaluation=cb_eval,
                     current_defects=formatted_defects,
                 )
+            else:
+                from stagecheck.core.gate_engine import handle_audit_verdict
+                handle_audit_verdict(
+                    workspace_root=self.workspace_root,
+                    task_id=ctx.task_id,
+                    attempt=ctx.attempt,
+                    verdict_data=verdict_data,
+                )
 
         return overall_passed, verdict_data
 

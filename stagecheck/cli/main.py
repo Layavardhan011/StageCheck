@@ -83,6 +83,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # 9. disposition
     p_disp = subparsers.add_parser("disposition", help="Manage defect waivers and risk acceptances.")
+    p_disp.add_argument("--task", help="Task identifier.")
+    p_disp.add_argument("--action", default="waive", choices=["waive", "retry", "resume", "abort", "ACCEPT_AS_INTENTIONAL", "WAIVE_TEMPORARY", "NOT_APPLICABLE"], help="Disposition action (default: waive).")
+    p_disp.add_argument("--defect", help="Defect code.")
+    p_disp.add_argument("--rationale", help="Justification rationale.")
+    p_disp.add_argument("--authorized-by", default="human-operator", help="Authorized owner identity.")
+    p_disp.add_argument("--yes", "-y", action="store_true", help="Bypass interactive confirmation prompt.")
+    p_disp.add_argument("--workspace", help="Explicit workspace root path.")
     disp_subs = p_disp.add_subparsers(dest="disposition_action")
     p_disp_add = disp_subs.add_parser("add", help="Record a defect waiver.")
     p_disp_add.add_argument("--task", required=True, help="Task identifier.")
@@ -107,9 +114,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("--activate", action="store_true", help="Activate next eligible task.")
     p_plan.add_argument("--workspace", help="Explicit workspace root path.")
 
-    # 12. unlock (GAP-J2)
+    # 12. unlock (GAP-J2 / Spec M11)
     p_unlock = subparsers.add_parser("unlock", help="Elevate workspace permissions for teardown/cleanup.")
     p_unlock.add_argument("--force", action="store_true", help="Bypass interactive confirmation.")
+    p_unlock.add_argument("--abort-active-task", action="store_true", help="Force termination and abortion of active in-progress task.")
     p_unlock.add_argument("--workspace", help="Explicit workspace root path.")
 
     # 13. seal (SEC-02)
@@ -293,7 +301,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                 yes=getattr(args, "yes", False),
                 workspace=getattr(args, "workspace", None),
             )
-        print("Usage: stagecheck disposition add ...", file=sys.stderr)
+        elif getattr(args, "task", None):
+            from stagecheck.cli.disposition_cmd import run_disposition
+            return run_disposition(
+                task=args.task,
+                action=getattr(args, "action", "waive"),
+                defect=getattr(args, "defect", None),
+                rationale=getattr(args, "rationale", None),
+                authorized_by=getattr(args, "authorized_by", "human-operator"),
+                yes=getattr(args, "yes", False),
+                workspace=getattr(args, "workspace", None),
+            )
+        print("Usage: stagecheck disposition [--task <ID> --action <waive|retry|resume|abort> ...] or disposition add ...", file=sys.stderr)
         return 1
 
     if args.subcommand == "sentinel":
@@ -319,6 +338,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return run_unlock(
             workspace=getattr(args, "workspace", None),
             force=getattr(args, "force", False),
+            abort_active=getattr(args, "abort_active_task", False),
         )
 
     if args.subcommand == "seal":

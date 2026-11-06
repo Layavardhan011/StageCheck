@@ -77,3 +77,79 @@ def run_disposition_add(
         print(f"\nERROR: [disposition.failed] {err}", file=sys.stderr)
         return 1
 
+
+def run_disposition(
+    task: str,
+    action: str = "waive",
+    defect: Optional[str] = None,
+    rationale: Optional[str] = None,
+    authorized_by: str = "human-operator",
+    yes: bool = False,
+    workspace: Optional[str] = None,
+) -> int:
+    """Execute 'stagecheck disposition' managing defect waivers, retries, and resumptions (DEC-028 / FR-06).
+
+    Actions:
+      waive: Records human defect waiver in controls/DISPOSITIONS.json.
+      resume: Resumes task from AWAITING_HUMAN_DISPOSITION without consuming an attempt.
+      retry: Resets circuit breaker to Phase 1, enforcing immutable 3-attempt cap.
+      abort: Aborts active task to prevent runaway execution.
+    """
+    try:
+        workspace_root = Path(workspace).resolve() if workspace else find_workspace_root()
+    except Exception as err:
+        print(f"ERROR: [disposition.workspace_error] {err}", file=sys.stderr)
+        return 1
+
+    norm_action = action.lower()
+    if norm_action in ("waive", "accept_as_intentional", "waive_temporary", "not_applicable"):
+        if not defect:
+            print("ERROR: [disposition.missing_defect] Defect code (--defect) is required for waiver action.", file=sys.stderr)
+            return 1
+        return run_disposition_add(
+            task=task,
+            defect=defect,
+            rationale=rationale or "Defect waived by operator",
+            action="ACCEPT_AS_INTENTIONAL" if norm_action == "waive" else action,
+            authorized_by=authorized_by,
+            yes=yes,
+            workspace=workspace,
+        )
+
+    if norm_action == "resume":
+        from stagecheck.cli.resume_cmd import run_resume
+        return run_resume(task=task, workspace=workspace)
+
+    if norm_action == "retry":
+        from stagecheck.core.circuit_breaker import (
+            AttemptBudgetExhaustedError,
+            CircuitBreakerError,
+            reset_circuit_breaker,
+        )
+        try:
+            res = reset_circuit_breaker(workspace_root, task_id=task, authorized_by=authorized_by)
+            print(f"SUCCESS: Reset attempts for task '{task}'. Next attempt index: {res['attempt_index']}.")
+            return 0
+        except AttemptBudgetExhaustedError as err:
+            print(f"ERROR: [disposition.budget_exhausted] {err}", file=sys.stderr)
+            return 1
+        except CircuitBreakerError as err:
+            print(f"ERROR: [disposition.retry_failed] {err}", file=sys.stderr)
+            return 1
+
+    if norm_action == "abort":
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.state import load_active_state, save_active_state
+        controls_dir = workspace_root / "controls"
+        with controlled_write_transaction(controls_dir):
+            state = load_active_state(workspace_root)
+            state["phase"] = "ABORTED"
+            state["status"] = "FAILED_EXHAUSTED"
+            state["turn"] = "IDLE"
+            save_active_state(workspace_root, state)
+        print(f"SUCCESS: Task '{task}' aborted by operator.")
+        return 0
+
+    print(f"ERROR: [disposition.invalid_action] Unsupported action '{action}'. Choose from: waive, resume, retry, abort.", file=sys.stderr)
+    return 1
+

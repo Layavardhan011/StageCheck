@@ -22,6 +22,7 @@ from stagecheck.checks.stage9_carry_forward import run_stage9_carry_forward
 from stagecheck.cli.main import main
 from stagecheck.core.agents_md import write_agents_contract
 from stagecheck.core.orchestrator import AuditOrchestrator, run_audit
+from stagecheck.core.permissions import controlled_write_transaction
 from stagecheck.core.prompt_gate import freeze_prompt_and_scope
 from stagecheck.core.scaffold import scaffold_controls_atomic
 from stagecheck.core.git import discover_repository
@@ -614,7 +615,8 @@ class TestNineStageVerification(unittest.TestCase):
                 }
             ],
         }
-        disp_file.write_text(canonical_json_dumps(disp_data), encoding="utf-8")
+        with controlled_write_transaction(self.workspace_root / "controls"):
+            disp_file.write_text(canonical_json_dumps(disp_data), encoding="utf-8")
         write_agents_contract(self.workspace_root)
 
         # Re-run: defect should now be waived

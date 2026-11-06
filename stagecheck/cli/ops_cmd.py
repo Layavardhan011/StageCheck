@@ -11,12 +11,33 @@ from stagecheck.core.permissions import elevate_permissions_for_teardown
 from stagecheck.core.evidence import create_task_seal, update_code_quality_ledger
 
 
-def run_unlock(workspace: Optional[str] = None, force: bool = False) -> int:
-    """Elevate workspace permissions for clean teardown or CI cleanup (GAP-J2)."""
+def run_unlock(
+    workspace: Optional[str] = None,
+    force: bool = False,
+    abort_active: bool = False,
+) -> int:
+    """Elevate workspace permissions for clean teardown or CI cleanup (GAP-J2 / Spec M11)."""
     try:
         workspace_root = Path(workspace).resolve() if workspace else find_workspace_root()
     except Exception as err:
         print(f"ERROR: [unlock.workspace_error] {err}", file=sys.stderr)
+        return 1
+
+    try:
+        from stagecheck.core.permissions import (
+            ActiveTaskTeardownBlockedError,
+            NonInteractiveTeardownError,
+            assert_safe_teardown_preconditions,
+        )
+        assert_safe_teardown_preconditions(workspace_root, force=force, abort_active=abort_active)
+    except ActiveTaskTeardownBlockedError as err:
+        print(f"ERROR: [unlock.active_task_blocked] {err}", file=sys.stderr)
+        return 1
+    except NonInteractiveTeardownError as err:
+        print(f"ERROR: [unlock.non_interactive_blocked] {err}", file=sys.stderr)
+        return 1
+    except Exception as err:
+        print(f"ERROR: [unlock.precondition_error] {err}", file=sys.stderr)
         return 1
 
     if not force and sys.stdin.isatty():
@@ -31,27 +52,14 @@ def run_unlock(workspace: Optional[str] = None, force: bool = False) -> int:
 
 
 def run_seal(task_id: str, attempt: int = 1, workspace: Optional[str] = None) -> int:
-    """Seal task evidence manifest and generate cryptographic verification seal (SEC-02)."""
-    try:
-        workspace_root = Path(workspace).resolve() if workspace else find_workspace_root()
-    except Exception as err:
-        print(f"ERROR: [seal.workspace_error] {err}", file=sys.stderr)
-        return 1
+    """Authoritative alias for 'stagecheck gate advance Gate-4' (SEC-02 / Spec 01 / DEC-025).
 
-    try:
-        seal_path = create_task_seal(
-            workspace_root=workspace_root,
-            task_id=task_id,
-            attempt=attempt,
-            verdict="CLEAR",
-            blocking_defects_count=0,
-            report_only_findings_count=0,
-        )
-        print(f"SUCCESS: Task '{task_id}' sealed successfully at '{seal_path}'.")
-        return 0
-    except Exception as err:
-        print(f"ERROR: [seal.failure] Failed to seal task: {err}", file=sys.stderr)
-        return 1
+    Executes transactional Merkle DAG sealing under write-ahead journal, freezes attempt
+    evidence hierarchy (dirs 0555, files 0444), and updates manifest downstream.
+    Strictly idempotent: returns 0 with existing receipt if already sealed.
+    """
+    from stagecheck.cli.gate_cmd import run_gate_advance
+    return run_gate_advance(gate="Gate-4", task=task_id, attempt=attempt, workspace=workspace)
 
 
 def run_log_quality(task_id: str, attempt: int = 1, workspace: Optional[str] = None) -> int:

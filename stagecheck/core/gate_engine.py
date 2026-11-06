@@ -733,28 +733,114 @@ def evaluate_gate_4_criteria(
     task_id: str,
     attempt: int,
 ) -> Tuple[List[GateCriterion], List[Dict[str, str]]]:
-    """Evaluate Gate 4 (Cryptographic Verdict & Sealing Gate) criteria.
+    """Evaluate Gate 4 (Cryptographic Verdict & Sealing Gate) criteria per Spec 01 / DEC-025.
 
     Invariants:
-    1. Phase 3 verdict passed.
-    2. Prior gate criteria cleared.
+    1. Prerequisite gate receipts (Gate 1, 2A, 2B, 3) exist and match ACTIVE_STATE.json.
+    2. Phase 3 audit verdict artifact exists and status is PASSED with zero blocking defects.
     """
     criteria: List[GateCriterion] = []
     deliverables: List[Dict[str, str]] = []
 
-    # 1. Check Phase 3 verdict
-    g3_crit, g3_deliv = evaluate_gate_3_criteria(workspace_root, task_id, attempt)
-    criteria.extend(g3_crit)
-    deliverables.extend(g3_deliv)
+    attempt_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}"
+    state = load_active_state(workspace_root)
+    cleared_gates = state.get("cleared_gates", {})
 
-    # 2. Check Gate 1 & 2 deliverables
-    p1_pv = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-1" / "prompt_verified.json"
-    if p1_pv.is_file():
-        deliverables.append({"path": str(p1_pv.relative_to(workspace_root)), "sha256": sha256_file(p1_pv), "status": "VALID"})
+    # 1. Prerequisite gate receipts check
+    prereqs = [
+        ("GATE_1", attempt_dir / "Phase-1" / "gate1_receipt.json", True),
+        ("GATE_2A", attempt_dir / "Phase-2A" / "gate2a_receipt.json", False),
+        ("GATE_2B", attempt_dir / "Phase-2B" / "gate2b_receipt.json", True),
+        ("GATE_3", attempt_dir / "Phase-3" / "gate3_receipt.json", True),
+    ]
 
-    p2a_rev = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-2A" / "pre_commit_review.json"
-    if p2a_rev.is_file():
-        deliverables.append({"path": str(p2a_rev.relative_to(workspace_root)), "sha256": sha256_file(p2a_rev), "status": "VALID"})
+    for g_name, r_path, is_mandatory in prereqs:
+        must_require = is_mandatory or (g_name in cleared_gates)
+        if not r_path.is_file():
+            if must_require:
+                criteria.append(
+                    GateCriterion(
+                        criterion_id=f"G4-PREREQ-{g_name}",
+                        description=f"Prerequisite {g_name} receipt verification",
+                        status="FAILED",
+                        message=f"Missing required receipt at '{r_path}'",
+                    )
+                )
+        else:
+            actual_hash = sha256_file(r_path)
+            recorded_hash = cleared_gates.get(g_name)
+            if recorded_hash and actual_hash != recorded_hash:
+                criteria.append(
+                    GateCriterion(
+                        criterion_id=f"G4-PREREQ-{g_name}",
+                        description=f"Prerequisite {g_name} receipt verification",
+                        status="FAILED",
+                        message=f"Receipt hash mismatch for {g_name}: expected {recorded_hash}, got {actual_hash}",
+                    )
+                )
+            else:
+                criteria.append(
+                    GateCriterion(
+                        criterion_id=f"G4-PREREQ-{g_name}",
+                        description=f"Prerequisite {g_name} receipt verification",
+                        status="MET",
+                        message=f"Verified receipt for {g_name}",
+                    )
+                )
+            deliverables.append({
+                "path": str(r_path.relative_to(workspace_root)),
+                "sha256": actual_hash,
+                "status": "VALID",
+            })
+
+    # 2. Verdict check
+    verdict_file = attempt_dir / "Phase-3" / "verdict.json"
+    if not verdict_file.is_file():
+        criteria.append(
+            GateCriterion(
+                criterion_id="G4-VERDICT-PASSED",
+                description="Phase 3 audit verdict status verification",
+                status="FAILED",
+                message=f"Missing Phase 3 verdict artifact at '{verdict_file}'",
+            )
+        )
+    else:
+        try:
+            verdict_data = json.loads(verdict_file.read_text(encoding="utf-8"))
+            v_status = verdict_data.get("status") or verdict_data.get("result")
+            blocking_count = verdict_data.get("blocking_defects_count", 0)
+            if v_status in ("PASSED", "CLEAR") and blocking_count == 0:
+                criteria.append(
+                    GateCriterion(
+                        criterion_id="G4-VERDICT-PASSED",
+                        description="Phase 3 audit verdict status verification",
+                        status="MET",
+                        message=f"Phase 3 verdict verified with status {v_status}",
+                    )
+                )
+            else:
+                criteria.append(
+                    GateCriterion(
+                        criterion_id="G4-VERDICT-PASSED",
+                        description="Phase 3 audit verdict status verification",
+                        status="FAILED",
+                        message=f"Phase 3 verdict is not PASSED (status: '{v_status}', blocking defects: {blocking_count})",
+                    )
+                )
+            deliverables.append({
+                "path": str(verdict_file.relative_to(workspace_root)),
+                "sha256": sha256_file(verdict_file),
+                "status": "VALID",
+            })
+        except Exception as err:
+            criteria.append(
+                GateCriterion(
+                    criterion_id="G4-VERDICT-PASSED",
+                    description="Phase 3 audit verdict status verification",
+                    status="FAILED",
+                    message=f"Malformed verdict.json: {err}",
+                )
+            )
 
     return criteria, deliverables
 
@@ -920,6 +1006,33 @@ def advance_gate_atomic(
         resolved_task_id = str(task_id or state.get("task_id", "task-default"))
         resolved_attempt = int(attempt or state.get("attempt_index", 1))
 
+        attempt_dir = root / "evidence" / "tasks" / resolved_task_id / f"attempt_{resolved_attempt}"
+        receipt_path = get_gate_receipt_path(root, gate_id, resolved_task_id, resolved_attempt)
+        seal_path = attempt_dir / "seal.json"
+
+        # Idempotency check for GATE_4
+        if gate_id == GateId.GATE_4:
+            if (
+                state.get("status") == "SEALED_PASSED"
+                and receipt_path.is_file()
+                and seal_path.is_file()
+                and "GATE_4" in state.get("cleared_gates", {})
+            ):
+                from stagecheck.core.sealing import verify_attempt_merkle_seal
+                is_valid, _ = verify_attempt_merkle_seal(attempt_dir, root)
+                if is_valid:
+                    live_hash = sha256_file(receipt_path)
+                    return GateAdvanceResult(
+                        gate_id=gate_id.value,
+                        task_id=resolved_task_id,
+                        attempt=resolved_attempt,
+                        receipt_path=receipt_path,
+                        receipt_sha256=live_hash,
+                        from_phase=state.get("phase", "COMPLETED"),
+                        to_phase="SEALED_PASSED",
+                        turn="IDLE",
+                    )
+
         # 1. Non-mutating precondition check
         report = check_gate_preconditions(root, gate_id, resolved_task_id, resolved_attempt)
         if not report.passed:
@@ -946,6 +1059,92 @@ def advance_gate_atomic(
         )
 
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Specialized transactional execution for Gate 4 sealing per DEC-025
+        if gate_id == GateId.GATE_4:
+            from stagecheck.core.journal import write_ahead_transaction
+            from stagecheck.core.sealing import compute_attempt_merkle_seal, index_seal_in_manifest
+
+            verdict_file = attempt_dir / "Phase-3" / "verdict.json"
+            verdict_data: Dict[str, Any] = {}
+            if verdict_file.is_file():
+                try:
+                    verdict_data = json.loads(verdict_file.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+
+            manifest_path = root / "evidence" / "EVIDENCE_MANIFEST.json"
+            state_path = root / "controls" / "ACTIVE_STATE.json"
+
+            with write_ahead_transaction(
+                workspace_root=root,
+                operation="gate4",
+                task_id=resolved_task_id,
+                attempt_index=resolved_attempt,
+            ) as journal:
+                journal.record_pre_image(receipt_path)
+                journal.record_pre_image(seal_path)
+                journal.record_pre_image(state_path)
+                journal.record_pre_image(manifest_path)
+
+                parent_dir = receipt_path.parent
+                parent_dir.mkdir(parents=True, exist_ok=True)
+                if not os.access(parent_dir, os.W_OK):
+                    try:
+                        os.chmod(str(parent_dir), 0o755)
+                    except OSError:
+                        pass
+
+                content_str = json.dumps(receipt_data, indent=2) + "\n"
+                if receipt_path.exists():
+                    try:
+                        receipt_path.chmod(0o644)
+                    except OSError:
+                        pass
+                receipt_path.write_text(content_str, encoding="utf-8")
+                try:
+                    receipt_path.chmod(0o444)
+                except OSError:
+                    pass
+                journal.record_staged_write(receipt_path)
+                live_hash = sha256_file(receipt_path)
+
+                # Compute and write deterministic Merkle DAG seal.json
+                seal_record = compute_attempt_merkle_seal(
+                    attempt_dir=attempt_dir,
+                    workspace_root=root,
+                    task_id=resolved_task_id,
+                    attempt_index=resolved_attempt,
+                    verdict_data=verdict_data,
+                    write_seal_file=True,
+                )
+                journal.record_staged_write(seal_path)
+
+                # Index seal downstream in EVIDENCE_MANIFEST.json
+                index_seal_in_manifest(root, resolved_task_id, resolved_attempt, seal_record)
+                journal.record_staged_write(manifest_path)
+
+                # Update ACTIVE_STATE.json
+                state["phase"] = "COMPLETED"
+                state["status"] = "SEALED_PASSED"
+                state["turn"] = "IDLE"
+                state.setdefault("cleared_gates", {})[gate_id.value] = live_hash
+                save_active_state(root, state)
+                journal.record_staged_write(state_path)
+
+            # Freeze completed attempt directory hierarchy
+            freeze_phase_directory(attempt_dir)
+
+            return GateAdvanceResult(
+                gate_id=gate_id.value,
+                task_id=resolved_task_id,
+                attempt=resolved_attempt,
+                receipt_path=receipt_path,
+                receipt_sha256=live_hash,
+                from_phase=report.current_phase,
+                to_phase="SEALED_PASSED",
+                turn="IDLE",
+            )
 
         # Snapshot state for rollback
         state_backup = dict(state)
@@ -1091,5 +1290,72 @@ def verify_gate_receipts(
         "valid": True,
         "verified_gates": verified_gates,
     }
+
+
+def handle_audit_verdict(
+    workspace_root: Union[str, Path],
+    task_id: str,
+    attempt: int,
+    verdict_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Handle Phase 3 audit verdict outcome per FR-06 / DEC-028.
+
+    If status is FAILED or blocking defects > 0:
+      - If attempt < 3: increment attempt_index, initialize next attempt dir, return to PHASE_1_PLANNING.
+      - If attempt >= 3: trip circuit breaker, transition to AWAITING_HUMAN_DISPOSITION with circuit_breaker_tripped=True.
+    """
+    root = Path(workspace_root).resolve()
+    from stagecheck.core.circuit_breaker import (
+        CircuitBreakerEvaluation,
+        MAX_DEFAULT_ATTEMPTS,
+        trip_circuit_breaker,
+    )
+    from stagecheck.core.permissions import controlled_write_transaction
+
+    v_status = verdict_data.get("status") or verdict_data.get("result")
+    blocking_defects = verdict_data.get("blocking_defects_count", 0)
+    is_failed = v_status in ("FAILED", "BLOCKED") or blocking_defects > 0
+
+    if not is_failed:
+        return {"action": "AUDIT_PASSED", "attempt": attempt}
+
+    if attempt >= MAX_DEFAULT_ATTEMPTS:
+        eval_tripped = CircuitBreakerEvaluation(
+            tripped=True,
+            trigger="max_attempts_exhausted",
+            reason=f"Maximum {MAX_DEFAULT_ATTEMPTS} attempts exhausted by Phase 3 audit failures.",
+        )
+        trip_circuit_breaker(
+            workspace_root=root,
+            task_id=task_id,
+            attempt=attempt,
+            evaluation=eval_tripped,
+            current_defects=verdict_data.get("defects", []),
+        )
+        return {
+            "action": "CIRCUIT_BREAKER_TRIPPED",
+            "attempt": attempt,
+            "phase": "AWAITING_HUMAN_DISPOSITION",
+        }
+    else:
+        next_attempt = attempt + 1
+        controls_dir = root / "controls"
+        with controlled_write_transaction(controls_dir):
+            state = load_active_state(root)
+            state["attempt_index"] = next_attempt
+            state["phase"] = "PHASE_1_PLANNING"
+            state["turn"] = "AGENT1_PLANNING"
+            state["circuit_breaker_tripped"] = False
+            save_active_state(root, state)
+
+        # Initialize next attempt Phase-1 directory
+        next_phase1 = root / "evidence" / "tasks" / task_id / f"attempt_{next_attempt}" / "Phase-1"
+        next_phase1.mkdir(parents=True, exist_ok=True)
+
+        return {
+            "action": "ATTEMPT_INCREMENTED",
+            "attempt": next_attempt,
+            "phase": "PHASE_1_PLANNING",
+        }
 
 

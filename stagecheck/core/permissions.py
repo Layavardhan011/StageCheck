@@ -7,15 +7,151 @@ providing lock-scoped directory permission elevation for atomic mutations.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
+import sys
 from pathlib import Path
-from typing import Generator, List, Union
+from typing import Generator, List, Optional, Union
 
 
 MODE_DIR_RO = 0o555    # read + execute, no write (defense-in-depth)
 MODE_DIR_RW = 0o755    # read + write + execute (temporarily during transaction)
 MODE_FILE_RO = 0o444   # read-only files
 MODE_FILE_RW = 0o644   # read + write files
+
+
+class TeardownError(Exception):
+    """Base exception for workspace unlock and teardown failures."""
+
+
+class ActiveTaskTeardownBlockedError(TeardownError):
+    """Raised when stagecheck unlock is executed against an active task without --abort-active-task."""
+
+
+class NonInteractiveTeardownError(TeardownError):
+    """Raised when stagecheck unlock is executed in non-interactive environment without --force or CI."""
+
+
+def assert_safe_teardown_preconditions(
+    workspace_root: Union[str, Path],
+    force: bool = False,
+    abort_active: bool = False,
+) -> None:
+    """Validate workspace teardown preconditions per Spec M11 / DEC-011.
+
+    Guards:
+    1. Active Task Protection: If task is active or IN_PROGRESS, require explicit --abort-active-task.
+    2. Headless TTY / CI Verification: In non-interactive environments, require --force and CI=true or STAGECHECK_CI_MODE=1.
+    3. Structured Audit Record: Log event to evidence/teardown.log and terminate Sentinel daemon.
+    """
+    root = Path(workspace_root).resolve()
+    from stagecheck.core.state import load_active_state, save_active_state
+
+    state = load_active_state(root)
+    status = state.get("status")
+    task_id = state.get("task_id")
+    phase = state.get("phase", "")
+
+    # Check if task is actively executing
+    is_active = (
+        status == "IN_PROGRESS"
+        or (
+            phase not in ("NOT_STARTED", "IDLE", "COMPLETED", "SEALED_PASSED", "ABORTED")
+            and status not in ("SEALED_PASSED", "ABORTED")
+        )
+    )
+
+    if is_active and task_id:
+        if not abort_active:
+            raise ActiveTaskTeardownBlockedError(
+                f"Teardown blocked: Task '{task_id}' is currently IN_PROGRESS. "
+                "Unlocking the workspace would compromise active audit evidence. "
+                "To force termination, supply explicit flag: --abort-active-task"
+            )
+        # Record task abortion in active state
+        controls_dir = root / "controls"
+        with controlled_write_transaction(controls_dir):
+            state["phase"] = "ABORTED"
+            state["status"] = "ABORTED"
+            state["turn"] = "IDLE"
+            save_active_state(root, state)
+
+    # Guard 2: Headless TTY / CI Verification
+    if not sys.stdin.isatty():
+        is_ci = os.environ.get("CI") == "true" or os.environ.get("STAGECHECK_CI_MODE") == "1"
+        if not (force and is_ci):
+            raise NonInteractiveTeardownError(
+                "Headless workspace teardown rejected: Non-interactive execution must set "
+                "--force and run within an authorized CI environment (CI=true)."
+            )
+
+    # Guard 3: Structured audit record & sentinel termination
+    log_teardown_audit_event(
+        workspace_root=root,
+        task_id=task_id,
+        aborted=abort_active if is_active else False,
+        forced=force,
+    )
+
+
+def log_teardown_audit_event(
+    workspace_root: Union[str, Path],
+    task_id: Optional[str] = None,
+    aborted: bool = False,
+    forced: bool = False,
+) -> Path:
+    """Append structured teardown record to evidence/teardown.log and stop Sentinel daemon."""
+    root = Path(workspace_root).resolve()
+    evidence_dir = root / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    teardown_log = evidence_dir / "teardown.log"
+
+    # Stop Sentinel if running
+    sentinel_pid = None
+    sentinel_pid_file = root / ".stagecheck_sentinel.pid"
+    if sentinel_pid_file.is_file():
+        try:
+            pid_str = sentinel_pid_file.read_text(encoding="utf-8").strip()
+            if pid_str.isdigit():
+                sentinel_pid = int(pid_str)
+                import signal
+                try:
+                    os.kill(sentinel_pid, signal.SIGTERM)
+                except OSError:
+                    pass
+            sentinel_pid_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    import getpass
+    from datetime import datetime, timezone
+
+    try:
+        operator = getpass.getuser()
+    except Exception:
+        operator = "unknown"
+
+    record = {
+        "event": "WORKSPACE_UNLOCKED",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "task_id": task_id,
+        "active_task_aborted": aborted,
+        "operator": operator,
+        "pid": os.getpid(),
+        "sentinel_pid_stopped": sentinel_pid,
+    }
+
+    # Open with O_APPEND under permissions
+    if teardown_log.is_file():
+        try:
+            os.chmod(teardown_log, 0o644)
+        except OSError:
+            pass
+
+    with open(teardown_log, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+    return teardown_log
 
 
 def apply_at_rest_permissions(workspace_root: Union[str, Path]) -> None:

@@ -266,6 +266,16 @@ def index_seal_in_manifest(
             "total_files": seal_record["total_files_sealed"],
         }
 
+        # Keep entries map synchronized if present
+        if "entries" in manifest_data:
+            from datetime import datetime, timezone
+            rel_posix = seal_file.relative_to(ws).as_posix()
+            manifest_data["entries"][rel_posix] = {
+                "sha256": seal_sha256,
+                "size_bytes": len(seal_bytes),
+                "indexed_at": datetime.now(timezone.utc).isoformat(),
+            }
+
         temp_manifest = manifest_file.with_suffix(".tmp")
         temp_manifest.write_text(json.dumps(manifest_data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         try:

@@ -34,6 +34,10 @@ class ResetAttemptsError(CircuitBreakerError):
     """Raised when stagecheck reset-attempts preconditions fail."""
 
 
+class AttemptBudgetExhaustedError(CircuitBreakerError):
+    """Raised when an attempt retry is requested but maximum attempt budget (3) is exhausted (FR-06 / DEC-028)."""
+
+
 @dataclass
 class CircuitBreakerEvaluation:
     """Outcome of circuit breaker invariant evaluation."""
@@ -358,12 +362,20 @@ def reset_circuit_breaker(
                     f"Cannot reset task '{task_id}': Circuit breaker is not tripped (current phase: '{phase}')."
                 )
 
-            # 3. Unlatch breaker state with monotonic attempt budgeting
-            current_attempt = active_state.get("attempt_index", 3)
+            # 3. Enforce immutable hard cap of 3 attempts (FR-06 / DEC-028)
+            current_attempt = active_state.get("attempt_index", 1)
+            if current_attempt >= MAX_DEFAULT_ATTEMPTS:
+                raise AttemptBudgetExhaustedError(
+                    f"Attempt budget exhausted: task '{task_id}' has reached maximum total attempts "
+                    f"({current_attempt}/{MAX_DEFAULT_ATTEMPTS}). Retries are strictly prohibited."
+                )
+
+            # 4. Unlatch breaker state with monotonic attempt budgeting
+            next_attempt = current_attempt + 1
             active_state["circuit_breaker_tripped"] = False
             active_state["halt_reason"] = None
             active_state["halt_trigger"] = None
-            active_state["attempt_budget_base"] = current_attempt
+            active_state["attempt_index"] = next_attempt
             active_state["phase"] = "PHASE_1_PLANNING"
             active_state["last_reset"] = {
                 "authorized_by": authorized_by,

@@ -11,7 +11,12 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from stagecheck.core.circuit_breaker import ResetAttemptsError, reset_circuit_breaker
+from stagecheck.core.circuit_breaker import (
+    AttemptBudgetExhaustedError,
+    CircuitBreakerError,
+    ResetAttemptsError,
+    reset_circuit_breaker,
+)
 from stagecheck.core.paths import find_workspace_root
 
 
@@ -47,7 +52,7 @@ def run_reset_attempts(
         print("  All prior attempt directories and Git commits preserved intact.")
         print("=" * 72)
         return 0
-    except ResetAttemptsError as err:
+    except (ResetAttemptsError, AttemptBudgetExhaustedError, CircuitBreakerError) as err:
         print(f"\nERROR: [reset_attempts.failed] {err}", file=sys.stderr)
         return 1
 

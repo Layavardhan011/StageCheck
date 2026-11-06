@@ -144,10 +144,10 @@ class TestPrettyJSONFormatting(unittest.TestCase):
 
         eval_tripped = CircuitBreakerEvaluation(
             tripped=True,
-            trigger="max_attempts_exhausted",
-            reason="Exhausted maximum 3 verification attempts",
+            trigger="stagnant_defects",
+            reason="Zero defect reduction between attempts",
         )
-        trip_circuit_breaker(self.workspace, "task-cb", 3, eval_tripped, [])
+        trip_circuit_breaker(self.workspace, "task-cb", 2, eval_tripped, [])
 
         elevate_permissions_for_teardown(self.workspace)
         state_file = self.workspace / "controls" / "ACTIVE_STATE.json"
