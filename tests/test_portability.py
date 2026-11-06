@@ -47,19 +47,107 @@ class TestPortability(unittest.TestCase):
             self.assertEqual(lines, {2, 3, 4})
 
     def test_dual_mode_asset_resolution(self):
-        """Verify asset resolver successfully locates schemas and configuration defaults."""
-        # 1. Resolve schema asset
-        schema_path = resolve_asset_path("schemas/assets/declared_scope.schema.json")
-        self.assertTrue(schema_path.is_file(), f"Schema asset not found: {schema_path}")
-        self.assertTrue(schema_path.name.endswith(".schema.json"))
+        """Verify asset resolver successfully locates schemas, configs, instructions, and scanner assets."""
+        # 1. Resolve all 14 schema assets
+        schema_names = [
+            "active_state.schema.json",
+            "claims.schema.json",
+            "control_descriptors.schema.json",
+            "declared_scope.schema.json",
+            "gate_receipt.schema.json",
+            "pre_commit_review.schema.json",
+            "pre_commit_status.schema.json",
+            "product_repositories.schema.json",
+            "prompt_verified.schema.json",
+            "quality_record.schema.json",
+            "rubric_evaluation.schema.json",
+            "task_plan.schema.json",
+            "turn_status.schema.json",
+            "verdict.schema.json",
+        ]
+        for s_name in schema_names:
+            with self.subTest(schema=s_name):
+                p = resolve_asset_path(f"schemas/assets/{s_name}")
+                self.assertTrue(p.is_file(), f"Schema asset '{s_name}' not resolved.")
 
-        # 2. Resolve default configuration asset
-        config_path = resolve_asset_path("config/defaults/commands.json")
-        self.assertTrue(config_path.is_file(), f"Config default asset not found: {config_path}")
+        # 2. Resolve all default configuration assets
+        config_names = [
+            "agents.json",
+            "commands.json",
+            "controlled_vocabulary.json",
+            "depth.json",
+            "modes.json",
+            "paths.json",
+            "quality_targets.json",
+            "remotes.json",
+            "required_outcomes.json",
+            "response_hook.json",
+        ]
+        for c_name in config_names:
+            with self.subTest(config=c_name):
+                p = resolve_asset_path(f"config/defaults/{c_name}")
+                self.assertTrue(p.is_file(), f"Config default asset '{c_name}' not resolved.")
 
-        # 3. Non-existent asset raises FileNotFoundError
+        # 3. Resolve gitleaks security configuration
+        gitleaks_path = resolve_asset_path("config/.gitleaks.toml")
+        self.assertTrue(gitleaks_path.is_file())
+
+        # 4. Resolve agent instructions
+        instruction_names = [
+            "00_common.md",
+            "blast_radius.md",
+            "claim_support.md",
+            "eval_curator.md",
+            "failure_class.md",
+            "independent_rerun.md",
+            "orchestrator.md",
+            "test_adequacy.md",
+            "upstream_reuse.md",
+        ]
+        for inst_name in instruction_names:
+            with self.subTest(instruction=inst_name):
+                p = resolve_asset_path(f"agent_instructions/{inst_name}")
+                self.assertTrue(p.is_file(), f"Instruction asset '{inst_name}' not resolved.")
+
+        # 5. Non-existent asset raises FileNotFoundError
         with self.assertRaises(FileNotFoundError):
             resolve_asset_path("nonexistent/missing_file.xyz")
+
+    def test_packaged_wheel_integrity(self):
+        """Verify built wheel package contains all required assets, entry points, and schemas."""
+        import zipfile
+        repo_root = Path(__file__).resolve().parents[1]
+        wheel_files = sorted((repo_root / "dist").glob("stagecheck-2.*.whl"), key=lambda p: p.stat().st_mtime)
+        if not wheel_files:
+            self.skipTest("No v2 wheel found in dist/ directory to inspect.")
+
+        wheel_path = wheel_files[-1]
+        with zipfile.ZipFile(wheel_path, "r") as zf:
+            namelist = set(zf.namelist())
+
+            # Check CLI entry point definition
+            self.assertTrue(
+                any("entry_points.txt" in n for n in namelist),
+                "Wheel missing entry_points.txt",
+            )
+
+            # Check metadata
+            self.assertTrue(
+                any("METADATA" in n for n in namelist),
+                "Wheel missing METADATA",
+            )
+
+            # Check core package modules
+            self.assertIn("stagecheck/cli/main.py", namelist)
+            self.assertIn("stagecheck/core/gate_engine.py", namelist)
+            self.assertIn("stagecheck/core/sealing.py", namelist)
+            self.assertIn("stagecheck/core/sentinel.py", namelist)
+
+            # Check packaged schemas and configurations
+            self.assertIn("stagecheck/schemas/assets/active_state.schema.json", namelist)
+            self.assertIn("stagecheck/config/.gitleaks.toml", namelist)
+            self.assertIn("stagecheck/config/defaults/agents.json", namelist)
+            self.assertIn("stagecheck/agent_instructions/00_common.md", namelist)
 
     def test_environment_portability(self):
         """Verify environment portability validation reports Linux capabilities."""
