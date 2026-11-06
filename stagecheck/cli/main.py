@@ -147,6 +147,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_gate_adv.add_argument("--attempt", type=int, help="Attempt index.")
     p_gate_adv.add_argument("--workspace", help="Explicit workspace root path.")
 
+    # 18. turn (FR-07 / Spec 04 / ARCH-04)
+    p_turn = subparsers.add_parser("turn", help="Query active agent turn, phase, and polling contract.")
+    p_turn.add_argument("--task", "--task-id", dest="task", help="Task identifier.")
+    p_turn.add_argument("--attempt", type=int, help="Attempt index.")
+    p_turn.add_argument("--json", action="store_true", dest="json_output", help="Emit machine-readable JSON status payload.")
+    p_turn.add_argument("--workspace", help="Explicit workspace root path.")
+
     return parser
 
 
@@ -326,6 +333,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             p_gate.print_help()
             return 1
+
+    if args.subcommand == "turn":
+        from stagecheck.cli.turn_cmd import run_turn
+        return run_turn(
+            task=getattr(args, "task", None),
+            attempt=getattr(args, "attempt", None),
+            json_output=getattr(args, "json_output", False),
+            workspace=getattr(args, "workspace", None),
+        )
 
     # In Phase 2, subcommands acknowledge dispatch; full execution wired in Phase 3-4
     print(f"StageCheck v{stagecheck.__version__}: Dispatched subcommand '{args.subcommand}'")

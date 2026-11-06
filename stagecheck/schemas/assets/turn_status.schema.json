@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StageCheck Turn Status Schema",
+  "type": "object",
+  "required": [
+    "task_id",
+    "attempt",
+    "cycle",
+    "phase",
+    "active_turn",
+    "waiting_for",
+    "retry_after_seconds",
+    "instructions_for_active_agent"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "task_id": {
+      "type": "string"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "cycle": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "phase": {
+      "type": "string"
+    },
+    "active_turn": {
+      "type": "string",
+      "enum": ["AGENT_1", "AGENT_2", "STAGECHECK", "HUMAN_OPERATOR", "NONE"]
+    },
+    "waiting_for": {
+      "type": "string"
+    },
+    "retry_after_seconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "preceding_status": {
+      "type": ["object", "null"]
+    },
+    "instructions_for_active_agent": {
+      "type": "string"
+    }
+  }
+}

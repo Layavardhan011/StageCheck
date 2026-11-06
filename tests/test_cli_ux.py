@@ -112,6 +112,7 @@ class TestCLIUX(unittest.TestCase):
             "verify-manifest",
             "update-manifest",
             "gate",
+            "turn",
         }
         self.assertEqual(commands, expected)
 

@@ -113,3 +113,20 @@ def validate_control_descriptor(descriptor_name: str, data: Dict[str, Any]) -> N
 
     validate_schema(data, schema)
 
+
+def get_turn_status_schema() -> Dict[str, Any]:
+    """Load and return the Turn Status Schema."""
+    schema_path = get_schema_path("turn_status.schema.json")
+    return load_json_file(schema_path)
+
+
+def validate_turn_status(data: Dict[str, Any]) -> None:
+    """Validate a Turn Status descriptor against turn_status.schema.json.
+
+    Raises:
+        SchemaValidationError: If data violates schema requirements.
+    """
+    schema = get_turn_status_schema()
+    validate_schema(data, schema)
+
+

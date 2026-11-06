@@ -1,0 +1,270 @@
+"""Agent Cooperative Handshake and Turn Protocol (FR-07 / Spec 04 / ARCH-04).
+
+Provides:
+- Turn-taking state machine resolving active turns (AGENT_1, AGENT_2, STAGECHECK, HUMAN_OPERATOR, NONE).
+- JSON status contract matching turn_status.schema.json.
+- Rate limiting enforcing the 5-second polling window (maximum 3 calls per 5s window).
+- Watchdog timer reset on valid turn queries during active agent phases.
+"""
+
+from __future__ import annotations
+
+import datetime
+import json
+import os
+import sys
+import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+from stagecheck.core.gate_engine import normalize_phase
+from stagecheck.core.paths import find_workspace_root
+from stagecheck.core.state import load_active_state, save_active_state
+from stagecheck.core.utils import canonical_json_dumps, load_json_file
+from stagecheck.schemas.validator import validate_turn_status
+
+
+@dataclass
+class TurnStatus:
+    """Turn status report conforming to turn_status.schema.json."""
+
+    task_id: str
+    attempt: int
+    cycle: int
+    phase: str
+    active_turn: str
+    waiting_for: str
+    retry_after_seconds: int
+    instructions_for_active_agent: str
+    preceding_status: Optional[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize turn status to dictionary."""
+        data = asdict(self)
+        if self.preceding_status is None:
+            data["preceding_status"] = None
+        return data
+
+
+def check_and_record_turn_rate_limit(
+    workspace_root: Path,
+    max_calls: int = 3,
+    window_seconds: float = 5.0,
+) -> Tuple[bool, float]:
+    """Enforce rate limit of at most max_calls within window_seconds (Spec 04 §3.1).
+
+    Returns:
+        (allowed, retry_after)
+    """
+    if os.environ.get("STAGECHECK_DISABLE_RATE_LIMIT") == "1":
+        return True, 0.0
+
+    tracker_file = workspace_root / ".stagecheck_turn_tracker.json"
+    now = time.time()
+    timestamps: List[float] = []
+
+    if tracker_file.is_file():
+        try:
+            raw = json.loads(tracker_file.read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                timestamps = [float(ts) for ts in raw]
+        except Exception:
+            timestamps = []
+
+    # Filter timestamps within window
+    recent = [ts for ts in timestamps if (now - ts) < window_seconds]
+
+    if len(recent) >= max_calls:
+        oldest = min(recent)
+        retry_after = max(1.0, window_seconds - (now - oldest))
+        return False, retry_after
+
+    recent.append(now)
+    try:
+        tracker_file.write_text(json.dumps(recent), encoding="utf-8")
+    except Exception:
+        pass
+
+    return True, 0.0
+
+
+def compute_turn_status(
+    workspace_root: Union[str, Path],
+    task_id: Optional[str] = None,
+    attempt: Optional[int] = None,
+    reset_watchdog: bool = True,
+) -> TurnStatus:
+    """Evaluate workspace state and artifacts to compute the authoritative active turn."""
+    root = Path(workspace_root).resolve()
+    state = load_active_state(root)
+
+    resolved_task_id = task_id or state.get("task_id", "unassigned")
+    resolved_attempt = attempt or state.get("attempt_index", 1)
+    phase_raw = state.get("phase", "NOT_STARTED")
+    phase = normalize_phase(phase_raw)
+
+    attempt_dir = root / "evidence" / "tasks" / resolved_task_id / f"attempt_{resolved_attempt}"
+    p1_dir = attempt_dir / "Phase-1"
+    p2a_dir = attempt_dir / "Phase-2A"
+    p2b_dir = attempt_dir / "Phase-2B"
+    p3_dir = attempt_dir / "Phase-3"
+
+    cycle = 1
+    preceding_status: Optional[Dict[str, Any]] = None
+
+    # Handle special halt/error states
+    if state.get("circuit_breaker_tripped"):
+        active_turn = "HUMAN_OPERATOR"
+        waiting_for = "Human operator unlatch and reset-attempts"
+        instructions = "Circuit breaker tripped. Human operator must inspect defects and invoke 'stagecheck reset-attempts'."
+    elif phase == "AWAITING_HUMAN_DISPOSITION":
+        active_turn = "HUMAN_OPERATOR"
+        waiting_for = "DISPOSITIONS.json waiver or resume"
+        instructions = "Automation paused awaiting human review. Operator must record waiver via 'stagecheck disposition add' or 'stagecheck resume'."
+    elif phase in ("NOT_STARTED", "UNINITIALIZED", "IDLE"):
+        active_turn = "STAGECHECK"
+        waiting_for = "stagecheck start --task <id>"
+        instructions = "Workspace idle. Invoke 'stagecheck start --task <task-id>' to activate a task attempt."
+    elif phase in ("PHASE_1_PLANNING", "PHASE_1_REPAIR"):
+        pv_file = p1_dir / "prompt_verified.json"
+        prompt_file = p1_dir / "prompt.md"
+
+        if pv_file.is_file():
+            try:
+                pv_data = load_json_file(pv_file)
+                if pv_data.get("status") == "VERIFIED":
+                    active_turn = "STAGECHECK"
+                    waiting_for = "Gate-1 advance"
+                    instructions = "Prompt verified and frozen. StageCheck supervisor or operator must advance Gate-1."
+                    preceding_status = {"file": "Phase-1/prompt_verified.json", "status": "VERIFIED"}
+                else:
+                    active_turn = "AGENT_1"
+                    waiting_for = "Phase-1/prompt.md revision"
+                    instructions = f"Prompt verification failed ({pv_data.get('status')}). Agent 1 must revise Phase-1/prompt.md."
+            except Exception:
+                active_turn = "AGENT_1"
+                waiting_for = "Phase-1/prompt.md"
+                instructions = "Agent 1 must draft 12-section implementation prompt in Phase-1/prompt.md."
+        elif prompt_file.is_file():
+            active_turn = "STAGECHECK"
+            waiting_for = "prompt_verified.json"
+            instructions = "Phase-1/prompt.md detected. StageCheck supervisor will verify prompt and freeze scope after 30s stability."
+            preceding_status = {"file": "Phase-1/prompt.md", "status": "DRAFTED"}
+        else:
+            active_turn = "AGENT_1"
+            waiting_for = "Phase-1/prompt.md"
+            instructions = "Agent 1 must validate the finding and draft the 12-section implementation prompt in Phase-1/prompt.md."
+
+    elif phase == "PHASE_2A_CODING":
+        status_file = p2a_dir / "pre_commit_status.json"
+        review_file = p2a_dir / "pre_commit_review.json"
+
+        if not status_file.is_file():
+            active_turn = "AGENT_2"
+            waiting_for = "Phase-2A/pre_commit_status.json"
+            instructions = "Agent 2 must implement solution and submit Phase-2A/pre_commit_status.json (status: AWAITING_REVIEW)."
+        else:
+            try:
+                st_data = load_json_file(status_file)
+                cycle = int(st_data.get("cycle", 1))
+                st_val = st_data.get("status", "UNKNOWN")
+                preceding_status = {"file": "Phase-2A/pre_commit_status.json", "status": st_val}
+            except Exception:
+                cycle = 1
+
+            if not review_file.is_file():
+                active_turn = "AGENT_1"
+                waiting_for = "Phase-2A/pre_commit_review.json"
+                instructions = "Agent 1 must review uncommitted diff against rubric/taxonomies and write Phase-2A/pre_commit_review.json."
+            else:
+                try:
+                    rev_data = load_json_file(review_file)
+                    rev_val = rev_data.get("status", "UNKNOWN")
+                    if preceding_status:
+                        preceding_status["review_status"] = rev_val
+                except Exception:
+                    rev_val = "UNKNOWN"
+
+                if rev_val == "REVISION_REQUIRED":
+                    active_turn = "AGENT_2"
+                    waiting_for = "Phase-2A/pre_commit_status.json"
+                    instructions = "Review status is REVISION_REQUIRED. Agent 2 must read Phase-2A/response.json, address defects, increment cycle, and resubmit pre_commit_status.json."
+                elif rev_val == "APPROVED":
+                    active_turn = "STAGECHECK"
+                    waiting_for = "Gate-2A / Gate-2B commit and advance"
+                    instructions = "Pre-commit review APPROVED. StageCheck supervisor must commit changes to task branch and advance Gate 2B."
+                else:
+                    active_turn = "AGENT_1"
+                    waiting_for = "Phase-2A/pre_commit_review.json"
+                    instructions = "Agent 1 must complete pre-commit review."
+
+    elif phase == "PHASE_2B_COMMITTING":
+        report_file = p2b_dir / "report.md"
+        if not report_file.is_file():
+            active_turn = "AGENT_2"
+            waiting_for = "Phase-2B/report.md"
+            instructions = "Agent 2 must assemble final delivery report in Phase-2B/report.md."
+        else:
+            active_turn = "STAGECHECK"
+            waiting_for = "Gate-2B advance"
+            instructions = "Delivery report submitted. StageCheck must advance Gate 2B to enter Phase 3 independent audit."
+            preceding_status = {"file": "Phase-2B/report.md", "status": "SUBMITTED"}
+
+    elif phase == "PHASE_3_AUDIT":
+        verdict_file = p3_dir / "verdict.json"
+        if not verdict_file.is_file():
+            active_turn = "STAGECHECK"
+            waiting_for = "Phase-3/verdict.json"
+            instructions = "StageCheck orchestrator must execute 9-stage verification audit."
+        else:
+            active_turn = "STAGECHECK"
+            waiting_for = "Gate-3 advance"
+            instructions = "Audit verdict recorded. StageCheck must advance Gate 3."
+            try:
+                v_data = load_json_file(verdict_file)
+                preceding_status = {"file": "Phase-3/verdict.json", "result": v_data.get("result", "UNKNOWN")}
+            except Exception:
+                pass
+
+    elif phase == "GATE_4_SEALING":
+        active_turn = "STAGECHECK"
+        waiting_for = "seal.json & Gate-4 advance"
+        instructions = "Audit cleared. StageCheck must seal attempt evidence and advance Gate 4."
+
+    elif phase in ("SEALED_PASSED", "COMPLETED"):
+        active_turn = "NONE"
+        waiting_for = "COMPLETED"
+        instructions = "Task completed successfully. All gates cleared and evidence sealed."
+
+    else:
+        active_turn = "NONE"
+        waiting_for = phase
+        instructions = f"Current phase is '{phase}'."
+
+    # Watchdog activity reset during active agent phases (FR-05 / Issue 4)
+    if reset_watchdog and phase in ("PHASE_1_PLANNING", "PHASE_1_REPAIR", "PHASE_2A_CODING", "PHASE_2B_COMMITTING"):
+        try:
+            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            state.setdefault("watchdog", {})["last_active_timestamp"] = now_iso
+            state.setdefault("watchdog", {})["last_active_monotonic"] = time.monotonic()
+            save_active_state(root, state)
+        except Exception:
+            pass
+
+    turn_status = TurnStatus(
+        task_id=resolved_task_id,
+        attempt=resolved_attempt,
+        cycle=cycle,
+        phase=phase,
+        active_turn=active_turn,
+        waiting_for=waiting_for,
+        retry_after_seconds=5,
+        instructions_for_active_agent=instructions,
+        preceding_status=preceding_status,
+    )
+
+    # Validate against schema
+    validate_turn_status(turn_status.to_dict())
+
+    return turn_status

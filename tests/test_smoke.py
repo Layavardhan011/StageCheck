@@ -40,6 +40,7 @@ class TestSmoke(unittest.TestCase):
             "verify-manifest",
             "update-manifest",
             "gate",
+            "turn",
         }
         # inspect subparsers
         subparsers_action = next(
