@@ -87,6 +87,7 @@ VERBS=(
     "init"
     "start"
     "verify-prompt"
+    "gate"
     "review-precommit"
     "approve-review"
     "audit"
@@ -94,10 +95,15 @@ VERBS=(
     "reset-attempts"
     "disposition"
     "sentinel"
+    "supervisor"
+    "turn"
+    "check-rubric"
     "plan"
     "unlock"
     "seal"
     "log-quality"
+    "verify-manifest"
+    "update-manifest"
 )
 
 for verb in "${VERBS[@]}"; do

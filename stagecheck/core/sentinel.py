@@ -718,11 +718,14 @@ class SentinelDaemon:
                     break
                 for fd, event in events:
                     if fd == self._inotify_fd and (event & select.EPOLLIN):
-                        try:
-                            data = os.read(self._inotify_fd, 4096)
-                            self._process_inotify_buffer(data)
-                        except BlockingIOError:
-                            pass
+                        while True:
+                            try:
+                                data = os.read(self._inotify_fd, 16384)
+                                if not data:
+                                    break
+                                self._process_inotify_buffer(data)
+                            except BlockingIOError:
+                                break
 
                 # Check watchdog periodically for active agent phases
                 try:
@@ -774,21 +777,16 @@ class SentinelDaemon:
         from stagecheck.core.supervisor import is_relevant_sentinel_path
         if is_relevant_sentinel_path(rel_path):
             self.last_activity_monotonic = time.monotonic()
-            try:
-                state_file = self.root / "controls" / "ACTIVE_STATE.json"
-                if state_file.is_file():
-                    from stagecheck.core.permissions import controlled_write_transaction
-                    from stagecheck.core.state import load_active_state, save_active_state
-                    with controlled_write_transaction(self.root / "controls"):
-                        state = load_active_state(self.root)
-                        state.setdefault("watchdog", {})["last_active_timestamp"] = ts
-                        save_active_state(self.root, state)
-            except Exception:
-                pass
 
 
 if __name__ == "__main__":
     import argparse
+
+    # Ensure package root is importable when invoked directly
+    pkg_parent = str(Path(__file__).resolve().parents[2])
+    if pkg_parent not in sys.path:
+        sys.path.insert(0, pkg_parent)
+
     parser = argparse.ArgumentParser(description="StageCheck Sentinel Background Daemon Runner")
     parser.add_argument("--workspace", required=True, help="Workspace root path")
     parser.add_argument("--ready-fd", type=int, default=-1, help="Readiness notification pipe fd")

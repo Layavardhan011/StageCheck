@@ -373,10 +373,10 @@ class TestSentinel(unittest.TestCase):
         # Verify monotonic timer refreshed
         self.assertGreater(daemon.last_activity_monotonic, start_mono)
 
-        # Verify ACTIVE_STATE.json was updated with new timestamp
-        state_after = load_active_state(self.workspace)
-        new_ts_str = state_after["watchdog"]["last_active_timestamp"]
-        self.assertNotEqual(new_ts_str, old_time.isoformat())
+        # Verify sentinel.log recorded the relevant event
+        from stagecheck.core.supervisor import get_last_relevant_filesystem_timestamp
+        last_fs_ts = get_last_relevant_filesystem_timestamp(self.workspace)
+        self.assertIsNotNone(last_fs_ts)
 
     def test_watchdog_ignores_unrelated_file_events(self) -> None:
         """Verify Issue 4: Unrelated file events (.git/logs, /tmp) do NOT reset the watchdog timer."""
