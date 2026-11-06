@@ -21,6 +21,7 @@ def run_verify_prompt(
     task: str,
     attempt: int = 1,
     workspace: Optional[str] = None,
+    freeze_reason: str = "INOTIFY_SILENCE_30S",
 ) -> int:
     """Execute the prompt verification workflow.
 
@@ -40,6 +41,7 @@ def run_verify_prompt(
             workspace_root=workspace_root,
             task_id=task,
             attempt=attempt,
+            freeze_reason=freeze_reason,
         )
         # Assert invariance immediately as self-check
         record = assert_prompt_invariance(workspace_root=workspace_root, task_id=task, attempt=attempt)

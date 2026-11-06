@@ -114,6 +114,7 @@ class TestCLIUX(unittest.TestCase):
             "gate",
             "turn",
             "check-rubric",
+            "supervisor",
         }
         self.assertEqual(commands, expected)
 

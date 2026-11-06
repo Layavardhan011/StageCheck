@@ -165,6 +165,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_cr.add_argument("--quiet", action="store_true", help="Suppress console report.")
     p_cr.add_argument("--workspace", help="Explicit workspace root path.")
 
+    # 20. supervisor (FR-04 / FR-05 / Spec 03 / ARCH-01)
+    p_super = subparsers.add_parser("supervisor", help="Interactive live supervisor, debounce, and watchdog orchestrator.")
+    p_super.add_argument("supervisor_action", nargs="?", choices=["check-task", "check-stability", "check-watchdog"], help="Optional supervisor sub-action.")
+    p_super.add_argument("--watch", action="store_true", help="Run continuous supervisor loop.")
+    p_super.add_argument("--once", action="store_true", help="Execute single supervisor step.")
+    p_super.add_argument("--task", "--task-id", dest="task", help="Target task identifier.")
+    p_super.add_argument("--attempt", type=int, help="Target attempt index.")
+    p_super.add_argument("--file", dest="file_path", help="Target file for stability check.")
+    p_super.add_argument("--seconds", type=float, default=30.0, help="Quiet seconds for stability check.")
+    p_super.add_argument("--ceiling", type=float, default=300.0, help="Hard ceiling seconds for stability check.")
+    p_super.add_argument("--timeout", type=float, default=600.0, help="Watchdog timeout seconds.")
+    p_super.add_argument("--json", action="store_true", dest="json_output", help="Emit JSON output.")
+    p_super.add_argument("--workspace", help="Explicit workspace root path.")
+
     return parser
 
 
@@ -365,6 +379,22 @@ def main(argv: Optional[List[str]] = None) -> int:
             fail_fast=getattr(args, "fail_fast", False),
             quiet=getattr(args, "quiet", False),
             workspace=getattr(args, "workspace", None),
+        )
+
+    if args.subcommand == "supervisor":
+        from stagecheck.cli.supervisor_cmd import run_supervisor_cmd
+        return run_supervisor_cmd(
+            action=getattr(args, "supervisor_action", None),
+            task=getattr(args, "task", None),
+            attempt=getattr(args, "attempt", None),
+            workspace=getattr(args, "workspace", None),
+            watch=getattr(args, "watch", False),
+            once=getattr(args, "once", False),
+            file_path=getattr(args, "file_path", None),
+            seconds=getattr(args, "seconds", 30.0),
+            ceiling=getattr(args, "ceiling", 300.0),
+            timeout=getattr(args, "timeout", 600.0),
+            output_json=getattr(args, "json_output", False),
         )
 
     # In Phase 2, subcommands acknowledge dispatch; full execution wired in Phase 3-4

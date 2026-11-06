@@ -160,6 +160,7 @@ def freeze_prompt_and_scope(
     task_id: str,
     attempt: int = 1,
     target_repositories: Optional[List[str]] = None,
+    freeze_reason: str = "INOTIFY_SILENCE_30S",
 ) -> Path:
     """Validate prompt.md and declared_scope.json, and generate prompt_verified.json record.
 
@@ -215,6 +216,7 @@ def freeze_prompt_and_scope(
         "scope_sha256": scope_sha256,
         "verified_at": now_iso,
         "status": "VERIFIED",
+        "freeze_reason": freeze_reason,
     }
 
     # Validate against schema

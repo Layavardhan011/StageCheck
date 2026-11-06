@@ -39,6 +39,10 @@
     "status": {
       "type": "string",
       "enum": ["VERIFIED"]
+    },
+    "freeze_reason": {
+      "type": "string",
+      "enum": ["INOTIFY_SILENCE_30S", "HARD_CEILING_300S", "MANUAL"]
     }
   }
 }

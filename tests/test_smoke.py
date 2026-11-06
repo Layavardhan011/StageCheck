@@ -42,6 +42,7 @@ class TestSmoke(unittest.TestCase):
             "gate",
             "turn",
             "check-rubric",
+            "supervisor",
         }
         # inspect subparsers
         subparsers_action = next(
