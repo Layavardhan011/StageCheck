@@ -19,6 +19,8 @@ from stagecheck.core.locking import LockCollisionError, acquire_bootstrap_lock
 from stagecheck.core.permissions import apply_at_rest_permissions, elevate_permissions_for_teardown
 from stagecheck.core.scaffold import (
     ScaffoldingError,
+    reconcile_controls,
+    reconcile_specs_directory,
     scaffold_agent_instructions,
     scaffold_controls_atomic,
     scaffold_task_plan,
@@ -99,25 +101,22 @@ def run_init(
     try:
         # Step 1: Acquire exclusive bootstrap lock before touching controls/
         with acquire_bootstrap_lock(workspace_root):
-            # Step 2: Check for pre-existing initialization
+            # Step 2: Check for pre-existing initialization and reconcile
             existing_dispositions = None
-            if controls_dir.is_dir():
-                if not force:
-                    print(
-                        f"ERROR: [init.already_initialized] Workspace already initialized at '{controls_dir}'. "
-                        "Use '--force' with human owner authorization to reinitialize.",
-                        file=sys.stderr,
-                    )
-                    return 1
+            is_reconcile = controls_dir.is_dir()
 
-                print("Re-initializing existing workspace (--force). Preserving prior dispositions...")
+            if is_reconcile:
                 elevate_permissions_for_teardown(workspace_root)
-                disp_file = controls_dir / "DISPOSITIONS.json"
-                if disp_file.is_file():
-                    try:
-                        existing_dispositions = json.loads(disp_file.read_text(encoding="utf-8"))
-                    except Exception:
-                        pass
+                if force:
+                    print("Re-initializing existing workspace (--force). Preserving prior dispositions...")
+                    disp_file = controls_dir / "DISPOSITIONS.json"
+                    if disp_file.is_file():
+                        try:
+                            existing_dispositions = json.loads(disp_file.read_text(encoding="utf-8"))
+                        except Exception:
+                            pass
+                else:
+                    print("Reconciling existing workspace (self-healing mode)...")
 
             # Step 2b: Interactive or flag-based agent selection (Spec 04)
             resolved_a1 = agent1
@@ -193,27 +192,37 @@ def run_init(
             else:
                 print("Notice: No repositories declared or found under repos/. Initializing base workspace controls.")
 
-            # Step 4: Atomically scaffold all 8 controls
-            print("Atomically scaffolding the 8 mandatory control files...")
-            scaffold_controls_atomic(
-                workspace_root=workspace_root,
-                baselines=baselines,
-                manifest_sha256=manifest_sha256,
-                agent1_name=resolved_a1,
-                agent2_name=resolved_a2,
-            )
+            # Step 4: Scaffold or reconcile controls
+            if not is_reconcile or force:
+                print("Atomically scaffolding the 8 mandatory control files...")
+                scaffold_controls_atomic(
+                    workspace_root=workspace_root,
+                    baselines=baselines,
+                    manifest_sha256=manifest_sha256,
+                    agent1_name=resolved_a1,
+                    agent2_name=resolved_a2,
+                )
+            else:
+                print("Reconciling mandatory control files in controls/...")
+                reconcile_controls(
+                    workspace_root=workspace_root,
+                    baselines=baselines,
+                    manifest_sha256=manifest_sha256,
+                    agent1_name=resolved_a1,
+                    agent2_name=resolved_a2,
+                )
 
             # Step 4b: Scaffold agent instructions & role definitions (Specs 03, 08)
-            print("Scaffolding agent instructions under instructions/...")
+            print("Reconciling agent instructions under instructions/...")
             scaffold_agent_instructions(
                 workspace_root=workspace_root,
                 agent1_name=resolved_a1,
                 agent2_name=resolved_a2,
             )
 
-            # Step 4c: Scaffold specs/ and initial TASK_PLAN.json roadmap (Specs 04, 10 / GAP-05)
-            print("Scaffolding initial specs/TASK_PLAN.json roadmap...")
-            scaffold_task_plan(
+            # Step 4c: Scaffold specs/ and reconcile specification files (Spec 05 / FR-08)
+            print("Reconciling specifications under specs/ (TASK_PLAN.json, ARCHITECTURE.md, START_MANIFEST.md)...")
+            reconcile_specs_directory(
                 workspace_root=workspace_root,
                 target_repos=list(baselines.keys()) if baselines else ["default"],
             )
@@ -234,15 +243,15 @@ def run_init(
             (evidence_dir / "sentinel.log").touch(mode=0o644, exist_ok=True)
             (evidence_dir / "sentinel_daemon.log").touch(mode=0o644, exist_ok=True)
 
-            # Step 7: Create runtime lock file
-            runtime_lock = controls_dir / ".stagecheck.lock"
-            runtime_lock.touch(mode=0o600, exist_ok=True)
+            # Step 7: Create runtime lock file at workspace root (SR-06 / SEC-05) and controls/
+            (workspace_root / ".stagecheck.lock").touch(mode=0o600, exist_ok=True)
+            (controls_dir / ".stagecheck.lock").touch(mode=0o600, exist_ok=True)
 
             # Step 8: Apply at-rest defense-in-depth POSIX security modes
             print("Enforcing defense-in-depth security modes (controls/ 0555, files 0444)...")
             apply_at_rest_permissions(workspace_root)
 
-            print(f"SUCCESS: Workspace initialized successfully at '{workspace_root}'. State: READY.")
+            print(f"SUCCESS: Workspace reconciled successfully at '{workspace_root}'. State: READY.")
             return 0
 
     except LockCollisionError as err:

@@ -66,14 +66,69 @@ class TestInitCommand(unittest.TestCase):
         # Verify bootstrap lock unlinked
         self.assertFalse((self.workspace / ".stagecheck-init.lock").exists())
 
-    def test_init_rejects_already_initialized_without_force(self) -> None:
-        """Verify reinit halt when workspace is already initialized."""
-        # Initial run
+    def test_init_idempotent_reconciliation_without_force(self) -> None:
+        """Verify repeated init succeeds and performs idempotent reconciliation with zero content mutation (FR-08)."""
+        from stagecheck.core.utils import sha256_file
+
+        # 1. Initial run
+        ret1 = run_init(
+            workspace=str(self.workspace),
+            repos="payment-service",
+            force=False,
+            agent1="agent1",
+            agent2="agent2",
+        )
+        self.assertEqual(ret1, 0)
+
+        # Record hashes of all generated files
+        specs_dir = self.workspace / "specs"
+        self.assertTrue((specs_dir / "TASK_PLAN.json").is_file())
+        self.assertTrue((specs_dir / "ARCHITECTURE.md").is_file())
+        self.assertTrue((specs_dir / "START_MANIFEST.md").is_file())
+
+        controls_dir = self.workspace / "controls"
+        ctrl_hashes_before = {f.name: sha256_file(f) for f in controls_dir.iterdir() if f.is_file()}
+        specs_hashes_before = {f.name: sha256_file(f) for f in specs_dir.iterdir() if f.is_file()}
+
+        # 2. Second run without force must succeed (idempotent self-healing)
+        ret2 = run_init(
+            workspace=str(self.workspace),
+            repos="payment-service",
+            force=False,
+            agent1="agent1",
+            agent2="agent2",
+        )
+        self.assertEqual(ret2, 0)
+
+        # Assert zero content mutation on repeated run
+        ctrl_hashes_after = {f.name: sha256_file(f) for f in controls_dir.iterdir() if f.is_file()}
+        specs_hashes_after = {f.name: sha256_file(f) for f in specs_dir.iterdir() if f.is_file()}
+
+        self.assertEqual(ctrl_hashes_before, ctrl_hashes_after)
+        self.assertEqual(specs_hashes_before, specs_hashes_after)
+
+    def test_init_partial_reconciliation_preserves_customizations(self) -> None:
+        """Verify partial workspaces reconcile missing files while preserving user edits (Spec 05)."""
+        # Run init initially
         run_init(workspace=str(self.workspace), repos="payment-service", force=False, agent1="agent1", agent2="agent2")
 
-        # Second run without force
+        # User customizes specs/TASK_PLAN.json and deletes ARCHITECTURE.md and START_MANIFEST.md
+        specs_dir = self.workspace / "specs"
+        custom_content = '{"custom": "user_plan_v2"}'
+        (specs_dir / "TASK_PLAN.json").write_text(custom_content, encoding="utf-8")
+        (specs_dir / "ARCHITECTURE.md").unlink()
+        (specs_dir / "START_MANIFEST.md").unlink()
+
+        # Re-run init without force
         ret = run_init(workspace=str(self.workspace), repos="payment-service", force=False, agent1="agent1", agent2="agent2")
-        self.assertEqual(ret, 1)
+        self.assertEqual(ret, 0)
+
+        # Missing files were recreated
+        self.assertTrue((specs_dir / "ARCHITECTURE.md").is_file())
+        self.assertTrue((specs_dir / "START_MANIFEST.md").is_file())
+
+        # User customization was preserved verbatim
+        self.assertEqual((specs_dir / "TASK_PLAN.json").read_text(encoding="utf-8"), custom_content)
 
     def test_init_with_force_preserves_dispositions(self) -> None:
         """Verify reinit with --force succeeds and preserves prior dispositions."""

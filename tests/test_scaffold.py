@@ -9,6 +9,8 @@ from pathlib import Path
 from stagecheck.core.git import RepoBaseline
 from stagecheck.core.scaffold import (
     ScaffoldingRollbackError,
+    reconcile_controls,
+    reconcile_specs_directory,
     scaffold_controls_atomic,
 )
 from stagecheck.core.utils import load_json_file
@@ -107,6 +109,48 @@ class TestAtomicScaffolding(unittest.TestCase):
                 0,
                 f"Rollback failed: partial files remaining in controls/: {remaining_files}",
             )
+
+    def test_reconcile_specs_directory(self) -> None:
+        """Verify reconcile_specs_directory creates missing files and preserves existing ones (Spec 05)."""
+        specs_dir = self.workspace / "specs"
+        specs_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Pre-create TASK_PLAN.json with custom content
+        custom_plan = '{"custom_plan": true}'
+        (specs_dir / "TASK_PLAN.json").write_text(custom_plan, encoding="utf-8")
+
+        # 2. Reconcile specs
+        paths = reconcile_specs_directory(self.workspace, target_repos=["payment-service"])
+        self.assertIn("TASK_PLAN.json", paths)
+        self.assertIn("ARCHITECTURE.md", paths)
+        self.assertIn("START_MANIFEST.md", paths)
+
+        # Custom plan preserved
+        self.assertEqual((specs_dir / "TASK_PLAN.json").read_text(encoding="utf-8"), custom_plan)
+        # Architecture template created
+        self.assertTrue((specs_dir / "ARCHITECTURE.md").is_file())
+        # START_MANIFEST.md created and hashes TASK_PLAN.json and ARCHITECTURE.md
+        manifest_text = (specs_dir / "START_MANIFEST.md").read_text(encoding="utf-8")
+        self.assertIn("TASK_PLAN.json", manifest_text)
+        self.assertIn("ARCHITECTURE.md", manifest_text)
+
+    def test_reconcile_controls_preserves_customizations(self) -> None:
+        """Verify reconcile_controls creates missing controls without overwriting existing files."""
+        controls_dir = self.workspace / "controls"
+        controls_dir.mkdir(parents=True, exist_ok=True)
+
+        # Pre-create custom OWNER_GRANTS.md
+        custom_grants = "# Custom Grants by Human Owner"
+        (controls_dir / "OWNER_GRANTS.md").write_text(custom_grants, encoding="utf-8")
+
+        paths = reconcile_controls(self.workspace, baselines=self.baselines)
+        self.assertEqual(len(paths), 8)
+
+        # Custom grants preserved verbatim
+        self.assertEqual((controls_dir / "OWNER_GRANTS.md").read_text(encoding="utf-8"), custom_grants)
+        # Missing controls created
+        self.assertTrue((controls_dir / "ACTIVE_STATE.json").is_file())
+        self.assertTrue((controls_dir / "DISPOSITIONS.json").is_file())
 
 
 if __name__ == "__main__":
