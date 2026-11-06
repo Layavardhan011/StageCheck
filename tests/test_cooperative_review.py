@@ -173,6 +173,12 @@ class TestCooperativeReview(unittest.TestCase):
 
     def test_cli_review_precommit_and_approve_subcommands(self) -> None:
         """Verify CLI 'review-precommit' and 'approve-review' subcommands."""
+        from stagecheck.core.gate_engine import advance_gate_atomic
+        from stagecheck.core.git import discover_repository
+        from stagecheck.core.scaffold import scaffold_controls_atomic
+        from stagecheck.core.start_manifest import generate_start_manifest
+        from stagecheck.core.state import load_active_state, save_active_state
+
         # Step 1: Submit pre-commit status
         submit_pre_commit_status(
             workspace_root=self.workspace,
@@ -182,6 +188,47 @@ class TestCooperativeReview(unittest.TestCase):
             touched_repositories=["backend"],
             base_commits={"backend": self.base_commit},
         )
+
+        # Calling review-precommit before Gate 1 is cleared must fail fail-closed
+        ret_rev_premature = main([
+            "review-precommit",
+            "--task", self.task_id,
+            "--attempt", str(self.attempt),
+            "--workspace", str(self.workspace),
+        ])
+        self.assertEqual(ret_rev_premature, 1)
+
+        # Scaffolding controls and satisfying Gate 1
+        baselines = {
+            "backend": discover_repository(
+                self.backend_dir,
+                name="backend",
+                workspace_root=self.workspace,
+            )
+        }
+        scaffold_controls_atomic(self.workspace, baselines)
+        generate_start_manifest(self.workspace)
+
+        p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").write_text("# Prompt\n", encoding="utf-8")
+        (p1_dir / "declared_scope.json").write_text(
+            json.dumps({"schema_version": "2.0", "task_id": self.task_id, "allowed_paths": ["repos/backend/order.py"]}),
+            encoding="utf-8",
+        )
+        (p1_dir / "prompt_verified.json").write_text(
+            json.dumps({"task_id": self.task_id, "status": "VERIFIED"}),
+            encoding="utf-8",
+        )
+
+        state = load_active_state(self.workspace)
+        state["task_id"] = self.task_id
+        state["attempt_index"] = self.attempt
+        state["phase"] = "PHASE_1_PLANNING"
+        save_active_state(self.workspace, state)
+
+        # Advance Gate 1 to transition to PHASE_2A_CODING
+        advance_gate_atomic(self.workspace, "Gate-1", task_id=self.task_id, attempt=self.attempt)
 
         # Step 2: Run review-precommit CLI
         ret_rev = main([

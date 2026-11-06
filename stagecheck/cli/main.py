@@ -132,6 +132,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_um = subparsers.add_parser("update-manifest", help="Explicitly update specification digests in START_MANIFEST.md.")
     p_um.add_argument("--workspace", help="Explicit workspace root path.")
 
+    # 17. gate (FR-01 / Spec 01 / DEC-001)
+    p_gate = subparsers.add_parser("gate", help="Evaluate and advance formal lifecycle phase gates.")
+    gate_subs = p_gate.add_subparsers(dest="gate_action")
+    p_gate_check = gate_subs.add_parser("check", help="Inspect gate criteria without mutating state.")
+    p_gate_check.add_argument("gate", help="Gate identifier (e.g. Gate-1, Gate-2A, Gate-2B, Gate-3, Gate-4).")
+    p_gate_check.add_argument("--task", "--task-id", dest="task", help="Task identifier.")
+    p_gate_check.add_argument("--attempt", type=int, help="Attempt index.")
+    p_gate_check.add_argument("--workspace", help="Explicit workspace root path.")
+
+    p_gate_adv = gate_subs.add_parser("advance", help="Advance workspace lifecycle phase across gate.")
+    p_gate_adv.add_argument("gate", help="Gate identifier (e.g. Gate-1, Gate-2A, Gate-2B, Gate-3, Gate-4).")
+    p_gate_adv.add_argument("--task", "--task-id", dest="task", help="Task identifier.")
+    p_gate_adv.add_argument("--attempt", type=int, help="Attempt index.")
+    p_gate_adv.add_argument("--workspace", help="Explicit workspace root path.")
+
     return parser
 
 
@@ -291,6 +306,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         return run_update_manifest(
             workspace=getattr(args, "workspace", None),
         )
+
+    if args.subcommand == "gate":
+        from stagecheck.cli.gate_cmd import run_gate_advance, run_gate_check
+        if args.gate_action == "check":
+            return run_gate_check(
+                gate=args.gate,
+                task=getattr(args, "task", None),
+                attempt=getattr(args, "attempt", None),
+                workspace=getattr(args, "workspace", None),
+            )
+        elif args.gate_action == "advance":
+            return run_gate_advance(
+                gate=args.gate,
+                task=getattr(args, "task", None),
+                attempt=getattr(args, "attempt", None),
+                workspace=getattr(args, "workspace", None),
+            )
+        else:
+            p_gate.print_help()
+            return 1
 
     # In Phase 2, subcommands acknowledge dispatch; full execution wired in Phase 3-4
     print(f"StageCheck v{stagecheck.__version__}: Dispatched subcommand '{args.subcommand}'")

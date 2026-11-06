@@ -127,6 +127,29 @@ class TestProductionSmoke(unittest.TestCase):
             __import__("json").dumps(status_payload, indent=2) + "\n", encoding="utf-8"
         )
 
+        # Assert calling review-precommit before Gate 1 is cleared fails fail-closed
+        premature_exit = main(["review-precommit", "--task", "task-101", "--workspace", ws])
+        self.assertEqual(premature_exit, 1, "review-precommit should fail before Gate 1 is advanced")
+
+        # Prepare Phase 1 artifacts and verify prompt to satisfy Gate 1
+        p1_dir = self.workspace_dir / "evidence/tasks/task-101/attempt_1/Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").write_text("# Prompt for task-101\nImplement service components\n", encoding="utf-8")
+        scope_payload = {
+            "schema_version": "2.0",
+            "task_id": "task-101",
+            "allowed_paths": ["repos/core-service/service.py"],
+        }
+        (p1_dir / "declared_scope.json").write_text(
+            __import__("json").dumps(scope_payload, indent=2) + "\n", encoding="utf-8"
+        )
+        verify_prompt_exit = main(["verify-prompt", "--task", "task-101", "--workspace", ws])
+        self.assertEqual(verify_prompt_exit, 0, "verify-prompt failed")
+
+        # Advance Gate 1
+        gate1_adv = main(["gate", "advance", "Gate-1", "--task", "task-101", "--workspace", ws])
+        self.assertEqual(gate1_adv, 0, "Gate-1 advance failed")
+
         review_exit = main(["review-precommit", "--task", "task-101", "--workspace", ws])
         self.assertEqual(review_exit, 0, "review-precommit failed")
 

@@ -17,6 +17,50 @@ from stagecheck.core.cooperative_review import (
     assert_commit_authorization,
     record_pre_commit_review,
 )
+from stagecheck.core.gate_engine import GateId, get_gate_receipt_path, normalize_phase
+from stagecheck.core.state import load_active_state
+from stagecheck.core.utils import sha256_file
+
+
+def _check_phase2a_prerequisites(workspace_root: Path, task: str, attempt: int) -> Optional[int]:
+    """Verify that workspace is in PHASE_2A_CODING and Gate 1 receipt is valid (Spec 01 §6.1)."""
+    try:
+        state = load_active_state(workspace_root)
+        norm_phase = normalize_phase(state.get("phase", ""))
+        if norm_phase != "PHASE_2A_CODING":
+            print(
+                f"ERROR: [prerequisite.phase_unmet] Cannot execute review in phase '{state.get('phase')}'. "
+                "Workspace must be in PHASE_2A_CODING (advance Gate 1 first).",
+                file=sys.stderr,
+            )
+            return 1
+
+        cleared_gates = state.get("cleared_gates", {})
+        if "GATE_1" not in cleared_gates:
+            print(
+                "ERROR: [prerequisite.gate1_unmet] Cannot execute review: Gate 1 planning gate has not been cleared.",
+                file=sys.stderr,
+            )
+            return 1
+
+        g1_receipt_path = get_gate_receipt_path(workspace_root, GateId.GATE_1, task, attempt)
+        if not g1_receipt_path.is_file():
+            print(
+                f"ERROR: [prerequisite.gate1_missing] Gate 1 receipt missing at '{g1_receipt_path}'.",
+                file=sys.stderr,
+            )
+            return 1
+
+        if sha256_file(g1_receipt_path).lower() != cleared_gates["GATE_1"].lower():
+            print(
+                "ERROR: [prerequisite.gate1_tampered] Gate 1 receipt on disk has been altered.",
+                file=sys.stderr,
+            )
+            return 1
+    except Exception as err:
+        print(f"ERROR: [prerequisite.state_error] Failed checking state prerequisites: {err}", file=sys.stderr)
+        return 1
+    return None
 
 
 def run_review_precommit(
@@ -26,6 +70,12 @@ def run_review_precommit(
 ) -> int:
     """Evaluate Phase 2A pre-commit status for a task."""
     workspace_root = Path(workspace).resolve() if workspace else Path.cwd().resolve()
+
+    # Enforce Gate 1 prerequisite
+    rc = _check_phase2a_prerequisites(workspace_root, task, attempt)
+    if rc is not None:
+        return rc
+
     attempt_dir = resolve_task_attempt_dir(workspace_root, task, attempt)
     phase2a_dir = attempt_dir / "Phase-2A"
     status_file = phase2a_dir / "pre_commit_status.json"
@@ -59,6 +109,12 @@ def run_approve_review(
 ) -> int:
     """Record human/audit approval for Phase 2A review gate."""
     workspace_root = Path(workspace).resolve() if workspace else Path.cwd().resolve()
+
+    # Enforce Gate 1 prerequisite
+    rc = _check_phase2a_prerequisites(workspace_root, task, attempt)
+    if rc is not None:
+        return rc
+
     attempt_dir = resolve_task_attempt_dir(workspace_root, task, attempt)
     phase2a_dir = attempt_dir / "Phase-2A"
     status_file = phase2a_dir / "pre_commit_status.json"

@@ -630,6 +630,32 @@ class TestNineStageVerification(unittest.TestCase):
         self._setup_valid_precommit_review()
         self._setup_valid_delivery_report()
 
+        # Premature audit before Gate 2B clearance must fail fail-closed
+        exit_code_premature = main(["audit", "--task", self.task_id, "--workspace", str(self.workspace_root)])
+        self.assertEqual(exit_code_premature, 1)
+
+        # Clear Gate 2B and transition state to PHASE_3_AUDIT
+        from stagecheck.core.gate_engine import GateId, generate_gate_receipt
+        from stagecheck.core.state import load_active_state, save_active_state
+        state = load_active_state(self.workspace_root)
+        state["task_id"] = self.task_id
+        state["attempt_index"] = self.attempt
+        state["phase"] = "PHASE_3_AUDIT"
+        receipt_path, receipt_data, receipt_sha = generate_gate_receipt(
+            workspace_root=self.workspace_root,
+            gate_id=GateId.GATE_2B,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            from_phase="PHASE_2A_CODING",
+            to_phase="PHASE_3_AUDIT",
+            deliverables=[],
+            checks_evaluated=["gate2b.prior_review_approved", "gate2b.delivery_report_exists"],
+        )
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.write_text(canonical_json_dumps(receipt_data), encoding="utf-8")
+        state["cleared_gates"] = {"GATE_2B": sha256_file(receipt_path)}
+        save_active_state(self.workspace_root, state)
+
         exit_code = main(["audit", "--task", self.task_id, "--workspace", str(self.workspace_root)])
         self.assertEqual(exit_code, 0)
 

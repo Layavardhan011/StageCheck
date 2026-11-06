@@ -17,6 +17,7 @@ from pathlib import Path
 from stagecheck.cli.init_cmd import run_init
 from stagecheck.cli.start_cmd import run_start
 from stagecheck.cli.prompt_cmd import run_verify_prompt
+from stagecheck.cli.gate_cmd import run_gate_advance
 from stagecheck.cli.review_cmd import run_approve_review, run_review_precommit
 from stagecheck.cli.audit_cmd import run_audit_cmd
 from stagecheck.cli.reset_cmd import run_reset_attempts
@@ -100,6 +101,10 @@ class TestEndToEndLifecycle(unittest.TestCase):
         self.assertEqual(rc, 0, "verify-prompt failed")
         self.assertTrue((task_dir / "prompt_verified.json").is_file())
 
+        # Advance Gate 1 (PHASE_1_PLANNING -> PHASE_2A_CODING)
+        rc = run_gate_advance("Gate-1", task="task-101", attempt=1, workspace=str(self.ws))
+        self.assertEqual(rc, 0, "Gate-1 advance failed")
+
         # Ensure qualification dir exists
         (self.ws / "evals").mkdir(parents=True, exist_ok=True)
 
@@ -140,6 +145,10 @@ class TestEndToEndLifecycle(unittest.TestCase):
         phase2b_dir.mkdir(parents=True, exist_ok=True)
         (phase2b_dir / "report.md").write_text("# Delivery report\nImplemented service.py and tests.\n")
 
+        # Advance Gate 2B (PHASE_2A_CODING -> PHASE_3_AUDIT)
+        rc = run_gate_advance("Gate-2B", task="task-101", attempt=1, workspace=str(self.ws))
+        self.assertEqual(rc, 0, "Gate-2B advance failed")
+
         # 8. Audit (Phase 3 9-stage verification)
         rc = run_audit_cmd("task-101", attempt=1, workspace=str(self.ws))
         self.assertEqual(rc, 0, "audit failed")
@@ -148,6 +157,10 @@ class TestEndToEndLifecycle(unittest.TestCase):
         self.assertTrue(verdict_file.exists())
         verdict = json.loads(verdict_file.read_text())
         self.assertEqual(verdict["result"], "CLEAR")
+
+        # Advance Gate 3 (PHASE_3_AUDIT -> GATE_4_SEALING)
+        rc = run_gate_advance("Gate-3", task="task-101", attempt=1, workspace=str(self.ws))
+        self.assertEqual(rc, 0, "Gate-3 advance failed")
 
         # 9. Seal Attempt
         seal_path = create_task_seal(
@@ -159,6 +172,10 @@ class TestEndToEndLifecycle(unittest.TestCase):
             outcome="PASSED",
         )
         self.assertTrue(seal_path.is_file())
+
+        # Advance Gate 4 (GATE_4_SEALING -> SEALED_PASSED)
+        rc = run_gate_advance("Gate-4", task="task-101", attempt=1, workspace=str(self.ws))
+        self.assertEqual(rc, 0, "Gate-4 advance failed")
 
         # Verify unbroken seal chain
         is_valid, violations = verify_seal_chain(self.ws, "task-101", max_attempt=1)
@@ -219,8 +236,13 @@ class TestEndToEndLifecycle(unittest.TestCase):
         (task_dir / "prompt.md").write_text("# Prompt for task-303\n")
         run_verify_prompt("task-303", attempt=1, workspace=str(self.ws))
 
+        # Advance Gate 1
+        rc = run_gate_advance("Gate-1", task="task-303", attempt=1, workspace=str(self.ws))
+        self.assertEqual(rc, 0)
+
         # Adversary attempts scope escape: commits an unauthorized file
         repo_dir = self.ws / "repos/core-service"
+        run_git(["switch", "-c", "task/task-303"], cwd=repo_dir)
         (repo_dir / "service.py").write_text("# ok\n")
         (repo_dir / "unauthorized_backdoor.py").write_text("# escape\n")
         run_git(["add", "."], cwd=repo_dir)
@@ -242,6 +264,15 @@ class TestEndToEndLifecycle(unittest.TestCase):
         (phase2a_dir / "pre_commit_status.json").write_text(json.dumps(status_data, indent=2) + "\n")
         run_approve_review("task-303", attempt=1, workspace=str(self.ws))
 
+        # Delivery report for Phase 2B
+        phase2b_dir = self.ws / "evidence/tasks/task-303/attempt_1/Phase-2B"
+        phase2b_dir.mkdir(parents=True, exist_ok=True)
+        (phase2b_dir / "report.md").write_text("# Delivery report\nImplemented changes.\n")
+
+        # Advance Gate 2B
+        rc = run_gate_advance("Gate-2B", task="task-303", attempt=1, workspace=str(self.ws))
+        self.assertEqual(rc, 0)
+
         # Audit MUST reject with BLOCKED verdict
         rc = run_audit_cmd("task-303", attempt=1, workspace=str(self.ws))
         self.assertEqual(rc, 1, "Audit should have failed due to scope escape!")
@@ -253,6 +284,10 @@ class TestEndToEndLifecycle(unittest.TestCase):
         defects = verdict.get("defects", [])
         defect_codes = [d.get("defect_id", "") for d in defects]
         self.assertIn("scope_paths.out_of_scope_modification", defect_codes)
+
+        # Attempting Gate 3 advance MUST be rejected because verdict is BLOCKED
+        rc = run_gate_advance("Gate-3", task="task-303", attempt=1, workspace=str(self.ws))
+        self.assertEqual(rc, 1, "Gate 3 advance must fail when audit verdict is BLOCKED")
 
     def test_e2e_scenario4_multi_repo_atomic_partial_failure(self):
         """Scenario 4: Multi-repo aggregate audit rejects completely if any repo fails."""
@@ -272,14 +307,20 @@ class TestEndToEndLifecycle(unittest.TestCase):
         (task_dir / "prompt.md").write_text("# Multi-repo prompt\n")
         run_verify_prompt("task-404", attempt=1, workspace=str(self.ws))
 
+        # Advance Gate 1
+        rc = run_gate_advance("Gate-1", task="task-404", attempt=1, workspace=str(self.ws))
+        self.assertEqual(rc, 0)
+
         # Backend is clean
         backend_dir = self.ws / "repos/backend"
+        run_git(["switch", "-c", "task/task-404"], cwd=backend_dir)
         (backend_dir / "api.py").write_text("def api(): return 200\n")
         run_git(["add", "."], cwd=backend_dir)
         run_git(["commit", "-m", "feat: clean backend"], cwd=backend_dir)
 
         # Frontend commits a forbidden hardcoded secret token
         frontend_dir = self.ws / "repos/frontend"
+        run_git(["switch", "-c", "task/task-404"], cwd=frontend_dir)
         (frontend_dir / "App.js").write_text(
             "const secret = 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890';\n"
         )
@@ -304,6 +345,15 @@ class TestEndToEndLifecycle(unittest.TestCase):
         (phase2a_dir / "pre_commit_status.json").write_text(json.dumps(status_data, indent=2) + "\n")
         run_approve_review("task-404", attempt=1, workspace=str(self.ws))
 
+        # Delivery report for Phase 2B
+        phase2b_dir = self.ws / "evidence/tasks/task-404/attempt_1/Phase-2B"
+        phase2b_dir.mkdir(parents=True, exist_ok=True)
+        (phase2b_dir / "report.md").write_text("# Delivery report\nMulti-repo changes.\n")
+
+        # Advance Gate 2B
+        rc = run_gate_advance("Gate-2B", task="task-404", attempt=1, workspace=str(self.ws))
+        self.assertEqual(rc, 0)
+
         # Audit MUST return BLOCKED for aggregate
         rc = run_audit_cmd("task-404", attempt=1, workspace=str(self.ws))
         self.assertEqual(rc, 1, "Multi-repo audit should fail due to frontend defect!")
@@ -311,6 +361,10 @@ class TestEndToEndLifecycle(unittest.TestCase):
         verdict_file = self.ws / "evidence/tasks/task-404/attempt_1/Phase-3/verdict.json"
         verdict = json.loads(verdict_file.read_text())
         self.assertEqual(verdict["result"], "BLOCKED")
+
+        # Attempting Gate 3 advance MUST fail
+        rc = run_gate_advance("Gate-3", task="task-404", attempt=1, workspace=str(self.ws))
+        self.assertEqual(rc, 1, "Gate 3 advance must fail when audit verdict is BLOCKED")
 
     def test_e2e_scenario5_circuit_breaker_and_recovery(self):
         """Scenario 5: 3 attempt failures trip breaker; human reset safely unlatches to attempt 4."""
