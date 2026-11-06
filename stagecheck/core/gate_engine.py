@@ -715,6 +715,16 @@ def evaluate_gate_3_criteria(
                 message=str(err),
             ))
 
+    # Also capture other Phase 3 audit artifacts as deliverables if present
+    for art_name in ["test_execution.json", "scanner_report.json", "rubric_evaluation.json"]:
+        art_file = p3_dir / art_name
+        if art_file.is_file():
+            deliverables.append({
+                "path": str(art_file.relative_to(workspace_root)),
+                "sha256": sha256_file(art_file),
+                "status": "VALID",
+            })
+
     return criteria, deliverables
 
 

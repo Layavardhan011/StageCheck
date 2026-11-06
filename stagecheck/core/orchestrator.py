@@ -7,6 +7,7 @@ verdict with strict zero partial pass semantics (GAP-04, GAP-AE1).
 
 from __future__ import annotations
 
+import datetime
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -27,7 +28,6 @@ from stagecheck.checks import (
 )
 from stagecheck.core.evidence import (
     append_issue_history,
-    create_task_seal,
     update_evidence_manifest,
 )
 from stagecheck.core.paths import find_workspace_root
@@ -238,6 +238,54 @@ class AuditOrchestrator:
             all_defects.extend(res.defects)
             all_errors.extend(res.errors)
 
+        # Check multi-repository availability (zero partial pass)
+        for repo_name in ctx.all_registered_repos:
+            repo_p = self.workspace_root / "repos" / repo_name if repo_name != "root" else self.workspace_root
+            if not repo_p.is_dir():
+                all_defects.append(
+                    Defect(
+                        defect_id="multi_repo.repository_unavailable",
+                        message=f"Registered repository '{repo_name}' is unavailable or missing at '{repo_p}'.",
+                        stage="preflight",
+                        severity="CRITICAL",
+                        blocking=True,
+                        repo=repo_name,
+                    )
+                )
+
+        # 10. Run 270-Rule Rubric Evaluation (FR-03 / DEC-003 / DEC-026)
+        rubric_payload: Dict[str, Any] = {}
+        try:
+            from stagecheck.core.rubric_engine import run_rubric_evaluation
+            rubric_payload, _ = run_rubric_evaluation(
+                workspace_root=self.workspace_root,
+                task_id=ctx.task_id,
+                attempt=ctx.attempt,
+            )
+            if rubric_payload.get("overall_verdict") == "FAIL":
+                for eval_item in rubric_payload.get("evaluations", []):
+                    if eval_item.get("status") == "FAIL":
+                        all_defects.append(
+                            Defect(
+                                defect_id=eval_item.get("rule_id", "RUBRIC_DEFECT"),
+                                message=eval_item.get("rationale") or f"Rubric rule {eval_item.get('rule_id')} failed.",
+                                stage="rubric",
+                                severity="CRITICAL",
+                                blocking=True,
+                                repo=eval_item.get("repository"),
+                            )
+                        )
+        except Exception as r_err:
+            all_defects.append(
+                Defect(
+                    defect_id="rubric.evaluation_error",
+                    message=f"Rubric evaluation failed: {r_err}",
+                    stage="rubric",
+                    severity="CRITICAL",
+                    blocking=True,
+                )
+            )
+
         # Evaluate human dispositions / waivers
         for defect in all_defects:
             if defect.blocking and _match_disposition(defect, ctx.dispositions):
@@ -250,6 +298,7 @@ class AuditOrchestrator:
 
         overall_passed = (blocking_count == 0)
         overall_result = "CLEAR" if overall_passed else "BLOCKED"
+        overall_status = "PASSED" if overall_passed else "FAILED"
 
         # Format checks for verdict.schema.json
         checks_payload = []
@@ -324,6 +373,7 @@ class AuditOrchestrator:
             "not_run": [],
             "errors": all_errors,
             "result": overall_result,
+            "status": overall_status,
             "questions": [],
             "counts": {
                 "blocking": blocking_count,
@@ -332,7 +382,7 @@ class AuditOrchestrator:
             },
         }
 
-        # Write verdict.json
+        # Write Phase-3 directory artifacts
         phase3_dir = (
             self.workspace_root
             / "evidence"
@@ -342,9 +392,45 @@ class AuditOrchestrator:
             / "Phase-3"
         )
         phase3_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. verdict.json
         verdict_path = phase3_dir / "verdict.json"
         with open(verdict_path, "w", encoding="utf-8") as f:
             f.write(pretty_json_dumps(verdict_data))
+
+        # 2. test_execution.json
+        rerun_res = next((r.to_dict() for r in stage_results if r.stage_id == "rerun"), {})
+        test_exec_data = {
+            "schema_version": "2.0.0",
+            "task_id": ctx.task_id,
+            "attempt_index": ctx.attempt,
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "status": "PASSED" if not any(d.stage == "rerun" and d.blocking for d in all_defects) else "FAILED",
+            "repositories": ctx.all_registered_repos,
+            "stage_summary": rerun_res,
+        }
+        test_exec_path = phase3_dir / "test_execution.json"
+        test_exec_path.write_text(pretty_json_dumps(test_exec_data), encoding="utf-8")
+
+        # 3. scanner_report.json
+        sec_res = next((r.to_dict() for r in stage_results if r.stage_id == "secrets"), {})
+        scanner_data = {
+            "schema_version": "2.0.0",
+            "task_id": ctx.task_id,
+            "attempt_index": ctx.attempt,
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "scanner": "gitleaks",
+            "pinned_config": "config/.gitleaks.toml",
+            "status": "PASSED" if not any(d.stage == "secrets" and d.blocking for d in all_defects) else "FAILED",
+            "repositories": ctx.all_registered_repos,
+            "stage_summary": sec_res,
+        }
+        scanner_path = phase3_dir / "scanner_report.json"
+        scanner_path.write_text(pretty_json_dumps(scanner_data), encoding="utf-8")
+
+        # 4. rubric_evaluation.json
+        rubric_path = phase3_dir / "rubric_evaluation.json"
+        rubric_path.write_text(pretty_json_dumps(rubric_payload), encoding="utf-8")
 
         # Also write task root verdict.json for high-level tools
         task_root_dir = self.workspace_root / "evidence" / "tasks" / ctx.task_id
@@ -352,20 +438,20 @@ class AuditOrchestrator:
         with open(task_root_dir / "verdict.json", "w", encoding="utf-8") as f:
             f.write(pretty_json_dumps(verdict_data))
 
-        # Update evidence manifest with verdicts
-        update_evidence_manifest(self.workspace_root, [verdict_path, task_root_dir / "verdict.json"])
+        # Update evidence manifest with all Phase-3 audit deliverables
+        update_evidence_manifest(
+            self.workspace_root,
+            [
+                verdict_path,
+                test_exec_path,
+                scanner_path,
+                rubric_path,
+                task_root_dir / "verdict.json",
+            ],
+        )
 
-        # Create task seal or append issue history
-        if overall_passed:
-            create_task_seal(
-                workspace_root=self.workspace_root,
-                task_id=ctx.task_id,
-                attempt=ctx.attempt,
-                verdict_data=verdict_data,
-                checked_heads=ctx.target_commits,
-                outcome="PASSED",
-            )
-        else:
+        # Handle failure history and circuit breaker (sealing is deferred strictly to Gate 4)
+        if not overall_passed:
             append_issue_history(
                 workspace_root=self.workspace_root,
                 task_id=ctx.task_id,
