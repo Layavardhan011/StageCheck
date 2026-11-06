@@ -148,26 +148,45 @@ StageCheck is developed across 5 modular phases (25 total tasks — **100% Compl
 
 ## 6. Command-Line Interface (CLI) Reference
 
-StageCheck provides 10 unified CLI subcommands conforming strictly to POSIX / GNU command conventions:
+StageCheck provides unified CLI subcommands conforming strictly to POSIX / GNU command conventions:
 
-| Subcommand | Description | Exit Codes |
-|---|---|---|
-| `stagecheck init` | Scaffolds the 8 mandatory control files and binds git repositories | `0` (Success), `1` (Error) |
-| `stagecheck start` | Initializes a task in `PHASE_1_PLANNING` under transactional lock | `0` (Success), `1` (Error) |
-| `stagecheck verify-prompt` | Validates `prompt.md` + `declared_scope.json` and freezes SHA-256 digests | `0` (Success), `1` (Error) |
-| `stagecheck review-precommit` | Evaluates Phase 2A pre-commit working tree diff against quality targets | `0` (Success), `1` (Error) |
-| `stagecheck approve-review` | Records dual-agent review approval in `pre_commit_review.json` | `0` (Success), `1` (Error) |
-| `stagecheck audit` | Executes the independent 9-stage verification suite across all repos | `0` (CLEAR), `1` (BLOCKED) |
-| `stagecheck resume` | Resumes automated workflow from `AWAITING_HUMAN_DISPOSITION` | `0` (Success), `1` (Error) |
-| `stagecheck reset-attempts` | Human-authorized circuit breaker reset allocating monotonic Attempt 4+ | `0` (Success), `1` (Error) |
-| `stagecheck disposition add` | Records an explicit defect waiver in `controls/DISPOSITIONS.json` | `0` (Success), `1` (Error) |
-| `stagecheck sentinel` | Controls continuous event-driven background watchdog daemon | `0` (Success), `1` (Error) |
+| Subcommand | Purpose & Scope | Exit Codes |
+|---|---|:---:|
+| `stagecheck init` | Scaffolds the 8 mandatory control files and binds git repositories | `0`, `1` |
+| `stagecheck start` | Initializes a task in `PHASE_1_PLANNING` under transactional lock | `0`, `1` |
+| `stagecheck verify-prompt` | Validates `prompt.md` + `declared_scope.json` and freezes SHA-256 digests | `0`, `1` |
+| `stagecheck gate check <GATE>` | Non-mutating inspection of Gate 1, 2A, 2B, 3, or 4 criteria | `0`, `1` |
+| `stagecheck gate advance <GATE>`| Formally advances phase gate and issues cryptographic receipt | `0`, `1` |
+| `stagecheck review-precommit` | Evaluates Phase 2A pre-commit working tree diff against quality targets | `0`, `1` |
+| `stagecheck approve-review` | Records dual-agent review approval in `pre_commit_review.json` | `0`, `1` |
+| `stagecheck audit` | Executes the independent test, scanner, and rubric audit pipeline | `0` (CLEAR), `1` (BLOCKED) |
+| `stagecheck seal` | Computes Merkle DAG seal and indexes attempt in evidence manifest | `0`, `1` |
+| `stagecheck resume` | Resumes automated workflow from `AWAITING_HUMAN_DISPOSITION` | `0`, `1` |
+| `stagecheck reset-attempts` | Human-authorized circuit breaker reset allocating monotonic Attempt 4+ | `0`, `1` |
+| `stagecheck disposition add` | Records an explicit defect waiver in `controls/DISPOSITIONS.json` | `0`, `1` |
+| `stagecheck check-rubric` | Evaluates 270-rule compliance catalog against workspace topology | `0`, `1` |
+| `stagecheck sentinel start\|stop\|status` | Controls continuous event-driven background watchdog daemon | `0`, `1` |
+| `stagecheck supervisor` | Autonomous live supervisor, debounce orchestrator, and watchdog | `0`, `1` |
+| `stagecheck turn query` | Queries active agent turn, phase, and polling contract | `0`, `1` |
+| `stagecheck verify-manifest` | Validates specification integrity against `START_MANIFEST.md` | `0`, `1` |
+| `stagecheck update-manifest` | Explicitly updates specification digests in `START_MANIFEST.md` | `0`, `1` |
+| `stagecheck unlock` | Elevates workspace permissions for teardown or clean recovery | `0`, `1` |
+
+### Exit Code Reference
+
+| Exit Code | Semantic Meaning | Description |
+|:---:|---|---|
+| `0` | **SUCCESS / CLEAR** | Command completed successfully; all gate criteria or audit checks passed. |
+| `1` | **GENERAL FAILURE / BLOCKED** | Criteria unmet, verification defects found, dirty tree, or unhandled failure. |
+| `2` | **ESCALATION REQUIRED** | Circuit breaker tripped; manual human operator disposition required. |
+| `124` | **EXECUTION TIMEOUT** | Command or test execution exceeded its allotted runtime deadline. |
+| `126` | **SECURITY POLICY VIOLATION** | Prohibited command runner, shell injection flag, or unapproved script target. |
 
 ### Operational Usage Examples
 
 ```bash
 # Initialize a new governed workspace across target repositories
-stagecheck init --repos payment-service,ledger-api,fraud-detector
+stagecheck init --repos payment-service,ledger-api,fraud-detector --agent1 agent1 --agent2 agent2
 
 # Activate a task under exclusive lock
 stagecheck start --task task-101
@@ -175,23 +194,28 @@ stagecheck start --task task-101
 # Phase 1: Verify prompt blueprint and freeze prompt hash
 stagecheck verify-prompt --task task-101
 
+# Phase 1 -> Phase 2A: Formally advance Gate 1
+stagecheck gate advance Gate-1 --task task-101
+
 # Phase 2A: Run cooperative pre-commit review against quality targets
 stagecheck review-precommit --task task-101
 
 # Phase 2A: Human operator review approval gate
 stagecheck approve-review --task task-101
 
-# Phase 3: Run independent 9-stage verification engine
+# Phase 2A -> Phase 2B: Advance Gate 2A
+stagecheck gate advance Gate-2A --task task-101
+
+# Phase 2B -> Phase 3: Advance Gate 2B after clean local commit
+stagecheck gate advance Gate-2B --task task-101
+
+# Phase 3: Run independent verification pipeline and evaluate Gate 3
 stagecheck audit --task task-101
+stagecheck gate advance Gate-3 --task task-101
 
-# Resume automation from AWAITING_HUMAN_DISPOSITION
-stagecheck resume --task task-101
-
-# Record a human defect waiver in controls/DISPOSITIONS.json
-stagecheck disposition add --task task-101 --defect SEC-01 --rationale "Approved waiver"
-
-# Monotonically allocate Attempt 4 after circuit breaker activation
-stagecheck reset-attempts --task task-101 --authorized-by owner@fincore.local
+# Gate 4: Seal task evidence and finalize cryptographic Merkle DAG
+stagecheck seal --task task-101
+stagecheck gate advance Gate-4 --task task-101
 
 # Background Sentinel continuous watchdog control
 stagecheck sentinel start
@@ -201,17 +225,50 @@ stagecheck sentinel stop
 
 ---
 
-## 7. Security Model & Defense-in-Depth
+## 7. Operational Threat Model & Same-UID Boundaries
 
-StageCheck enforces kernel-level and cryptographic security guarantees:
-- **At-Rest Read-Only Protection:** `controls/` directory is enforced at mode `0555` with contained descriptor files at `0444`. Modifying controls requires an explicit `controlled_write_transaction` elevation.
-- **Strict Merkle Bounding:** Every control file's SHA-256 digest is cryptographically bound inside the root `AGENTS.md` contract. Any out-of-band edit immediately trips Stage 1 (`preflight`).
-- **Secret & Token Leak Protection:** Stage 6 scans working tree and commit history using pinned Gitleaks rules, detecting high-entropy API keys, JWTs, and private keys.
-- **Anti-Prompt Injection Linter:** Stage 4 scans agent delivery reports against 10 regex evasion patterns (`ignore previous instructions`, `roleplay as owner`, etc.).
-- **Dual-Agent Non-Collusion:** Review approval in Phase 2A strictly binds the uncommitted diff. Committing altered code trips `authority.unreviewed_commit_divergence` during Stage 5.
+StageCheck enforces defense-in-depth, fail-closed security controls across multi-agent workspaces:
+
+### Threat Model & Assumptions
+1. **Host Boundary & Same-UID Model:**
+   * StageCheck directory modes (`chmod 0555` on `controls/`) and file modes (`chmod 0444`) provide **defense-in-depth against accidental mutation**, errant agent tools, and unprivileged cross-user access.
+   * Filesystem permissions do **not** constitute a kernel security sandbox against malicious code executing under the exact same POSIX UID, as any process running under the same UID could execute `chmod` or `ptrace`.
+   * Untrusted third-party code from external repositories must be executed inside dedicated virtualization or container boundaries (e.g., Docker, gVisor, Firecracker).
+2. **Command Injection & Environment Isolation (SEC-A1 & SEC-B3):**
+   * Commands are executed strictly via tokenized argument arrays (`subprocess.run(argv, shell=False)`).
+   * Prohibited shell metacharacters, redirection flags (`-exec`, `-o`, `--node-options`), and arbitrary scripts are rejected before subprocess launch (Exit Code 126).
+   * Ambient environment credentials (`GITHUB_TOKEN`, `AWS_SECRET_ACCESS_KEY`, etc.) are stripped; only allowlisted variables (`PATH`, `LANG`, etc.) are passed to child processes.
+3. **Repository Working-Tree Integrity (SEC-C1):**
+   * Git status (`git status --porcelain=v1`) is captured before and after test execution; commands that leave untracked files or mutate working trees fail closed.
+   * Commits directly to protected default branches (`main`, `master`) are strictly prohibited; agent changes must be committed to compliant task sprint branches.
+4. **Audit Worktree Isolation (P4-T1):**
+   * Verification tests and scanners execute in detached, read-only temporary git worktrees (`stagecheck-audit-worktrees/`) preserving the exact multi-repo directory topology. The active agent working trees are never mutated during audit.
 
 ---
 
-## 8. License & Compliance
+## 8. Requirements & Decisions Traceability Matrix
+
+| Requirement / Decision ID | Domain & Scope | Implementing Module | Primary Test Suite |
+|---|---|---|---|
+| **FR-01 / SR-01** | Tokenized Command Allowlist & Test Runner Policies | `stagecheck.core.commands` | `tests/test_commands.py` |
+| **FR-02 / SR-02** | Dual-Agent Governance, Role Instructions & Contract | `stagecheck.core.agents`, `agents_md` | `tests/test_agents.py`, `test_agents_md.py` |
+| **FR-03** | 270-Rule Rubric Engine & Non-Applicable Waivers | `stagecheck.core.rubric_engine` | `tests/test_rubric_engine.py` |
+| **FR-04 / SR-03** | Multi-Repo Git Topology, Baselines & Untouched Auditing | `stagecheck.core.topology`, `branch_governance` | `tests/test_multi_repo_scenarios.py` |
+| **FR-05** | Linux Inotify Sentinel Daemon & Watchdog Debounce | `stagecheck.core.sentinel`, `supervisor` | `tests/test_sentinel.py`, `test_supervisor.py` |
+| **FR-06** | 3-Attempt Budget Ceiling & Monotonic Circuit Breaker | `stagecheck.core.circuit_breaker` | `tests/test_circuit_breaker.py` |
+| **FR-07** | Cryptographic Phase Gate Engine (Gates 1, 2A, 2B, 3, 4) | `stagecheck.core.gate_engine` | `tests/test_gate_engine.py`, `test_gate_receipts.py` |
+| **FR-08** | Dual-Agent Cooperative Pre-Commit Review Handshake | `stagecheck.core.cooperative_review` | `tests/test_cooperative_review.py` |
+| **FR-09** | Acyclic Merkle DAG Sealing & Evidence Manifest | `stagecheck.core.sealing`, `evidence` | `tests/test_sealing.py`, `test_gate4_sealing.py` |
+| **FR-10** | Write-Ahead Transaction Journal & Crash Recovery | `stagecheck.core.journal` | `tests/test_journal.py` |
+| **SR-04** | Symlink Validation & Path Escape Prevention | `stagecheck.core.sealing`, `paths` | `tests/test_adversarial_security.py` |
+| **SR-05** | At-Rest Read-Only Permissions & Controlled Mutations | `stagecheck.core.permissions` | `tests/test_controls.py` |
+| **SR-06** | Exclusive Workspace Runtime Locking (`.stagecheck.lock`) | `stagecheck.core.locking` | `tests/test_locking.py` |
+| **SR-07** | Automated Hardcoded Path Portability Scanner | `stagecheck.core.portability` | `tests/test_portability.py` |
+| **SR-08** | Dynamic Git Remote Whitelisting & Push Authorization | `stagecheck.core.branch_governance` | `tests/test_authority.py` |
+| **DEC-001..030** | Master Architecture Technical Decisions & Invariants | `stagecheck.core.*` | `tests/test_e2e_lifecycle.py` |
+
+---
+
+## 9. License & Compliance
 
 Internal Enterprise Software Delivery Governance Harness. Built in accordance with StageCheck Architecture Specifications (Series 01–14).
