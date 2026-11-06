@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StageCheck Rubric Evaluation Schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "task_id",
+    "attempt",
+    "cycle",
+    "evaluated_at",
+    "overall_verdict",
+    "counts",
+    "domains"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["2.0.0", "2.0"]
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "cycle": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "evaluated_at": {
+      "type": "string"
+    },
+    "overall_verdict": {
+      "type": "string",
+      "enum": ["PASS", "FAIL"]
+    },
+    "counts": {
+      "type": "object",
+      "required": ["total_rules", "passed", "failed", "not_applicable"],
+      "properties": {
+        "total_rules": { "type": "integer" },
+        "passed": { "type": "integer" },
+        "failed": { "type": "integer" },
+        "not_applicable": { "type": "integer" }
+      }
+    },
+    "domains": {
+      "type": "object"
+    },
+    "evaluations": {
+      "type": "array"
+    }
+  }
+}

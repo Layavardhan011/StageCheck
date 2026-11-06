@@ -130,3 +130,20 @@ def validate_turn_status(data: Dict[str, Any]) -> None:
     validate_schema(data, schema)
 
 
+def get_rubric_evaluation_schema() -> Dict[str, Any]:
+    """Load and return the Rubric Evaluation Schema."""
+    schema_path = get_schema_path("rubric_evaluation.schema.json")
+    return load_json_file(schema_path)
+
+
+def validate_rubric_evaluation(data: Dict[str, Any]) -> None:
+    """Validate a Rubric Evaluation descriptor against rubric_evaluation.schema.json.
+
+    Raises:
+        SchemaValidationError: If data violates schema requirements.
+    """
+    schema = get_rubric_evaluation_schema()
+    validate_schema(data, schema)
+
+
+

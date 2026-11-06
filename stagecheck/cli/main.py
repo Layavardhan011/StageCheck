@@ -154,6 +154,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_turn.add_argument("--json", action="store_true", dest="json_output", help="Emit machine-readable JSON status payload.")
     p_turn.add_argument("--workspace", help="Explicit workspace root path.")
 
+    # 19. check-rubric (FR-03 / Spec 02 / DEC-026)
+    p_cr = subparsers.add_parser("check-rubric", help="Execute automated 270-rule compliance scan.")
+    p_cr.add_argument("--task", "--task-id", dest="task", help="Task identifier.")
+    p_cr.add_argument("--attempt", type=int, help="Attempt index.")
+    p_cr.add_argument("--cycle", type=int, help="Review cycle index.")
+    p_cr.add_argument("--domain", help="Restrict evaluation to single domain.")
+    p_cr.add_argument("--update-json", action="store_true", help="Write rubric_evaluation.json and update pre_commit_review.json.")
+    p_cr.add_argument("--fail-fast", action="store_true", help="Stop on first blocking defect.")
+    p_cr.add_argument("--quiet", action="store_true", help="Suppress console report.")
+    p_cr.add_argument("--workspace", help="Explicit workspace root path.")
+
     return parser
 
 
@@ -340,6 +351,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             task=getattr(args, "task", None),
             attempt=getattr(args, "attempt", None),
             json_output=getattr(args, "json_output", False),
+            workspace=getattr(args, "workspace", None),
+        )
+
+    if args.subcommand == "check-rubric":
+        from stagecheck.cli.rubric_cmd import run_check_rubric
+        return run_check_rubric(
+            task=getattr(args, "task", None),
+            attempt=getattr(args, "attempt", None),
+            cycle=getattr(args, "cycle", None),
+            domain=getattr(args, "domain", None),
+            update_json=getattr(args, "update_json", False),
+            fail_fast=getattr(args, "fail_fast", False),
+            quiet=getattr(args, "quiet", False),
             workspace=getattr(args, "workspace", None),
         )
 
