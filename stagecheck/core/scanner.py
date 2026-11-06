@@ -99,6 +99,20 @@ class SecretScanner:
             or "test_stub" in norm
         )
 
+    @classmethod
+    def resolve_config_flags(cls, repo_dir: Path) -> List[str]:
+        """Locate authoritative Gitleaks config to prevent rule overrides (SEC-03)."""
+        candidate = repo_dir.parent.parent / "config" / ".gitleaks.toml"
+        if candidate.is_file():
+            return [f"--config={candidate}"]
+        root_candidate = Path("config/.gitleaks.toml").resolve()
+        if root_candidate.is_file():
+            return [f"--config={root_candidate}"]
+        pkg_candidate = Path(__file__).resolve().parent.parent / "config" / ".gitleaks.toml"
+        if pkg_candidate.is_file():
+            return [f"--config={pkg_candidate}"]
+        return []
+
     def resolve_binary(self) -> Optional[str]:
         """Resolve path to the scanner executable."""
         if self.binary_override:
@@ -281,11 +295,13 @@ class SecretScanner:
             return ScanExecutionResult(is_clear=False, defects=mapped_defects, status=status)
 
         binary = self.resolve_binary()
+        config_flags = self.resolve_config_flags(repo_dir)
         cmd = [
             binary,
             "detect",
             f"--source={repo_dir}",
             f"--log-opts={base_commit}..{target_commit}",
+            *config_flags,
             "--verbose",
             "--no-banner",
         ]
@@ -429,11 +445,13 @@ class SecretScanner:
             return ScanExecutionResult(is_clear=False, defects=mapped_defects, status=status)
 
         binary = self.resolve_binary()
+        config_flags = self.resolve_config_flags(repo_dir)
         cmd = [
             binary,
             "protect",
             "--staged",
             f"--source={repo_dir}",
+            *config_flags,
             "--verbose",
             "--no-banner",
         ]

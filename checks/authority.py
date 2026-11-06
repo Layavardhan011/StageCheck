@@ -4,19 +4,36 @@ from urllib.parse import urlparse
 from datetime import datetime, timezone
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bin'))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import *
 from citations import validate_citation
 
 
 def approved_remote(url, approved):
+    """Validate git remote push URLs against configuration whitelist (FP-ORG / SR-08)."""
     if url == 'DISABLED':
         return True
-    if url not in approved:
+    if not approved or url not in approved:
         return False
-    if url.startswith('git@github.com:'):
-        return url.split(':',1)[1].startswith('xorewa/')
-    parsed = urlparse(url)
-    return parsed.hostname == 'github.com' and parsed.path.startswith('/xorewa/') and parsed.scheme in ('https','ssh')
+
+    # Normalize SSH (git@host:path) and URI formats (https://host/path, ssh://host/path)
+    if url.startswith("git@"):
+        host_and_path = url.split("@", 1)[1]
+        host, path = host_and_path.split(":", 1)
+        scheme = "ssh"
+    else:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        path = parsed.path.lstrip("/")
+        scheme = parsed.scheme
+
+    # Disallow blacklisted legacy endpoints while permitting all approved repos
+    if host in ("multiversx.com", "elrond.com") or host.endswith(
+        (".multiversx.com", ".elrond.com")
+    ):
+        return False
+
+    return scheme in ("https", "ssh", "git")
 
 
 def forbidden_endpoint(argv):

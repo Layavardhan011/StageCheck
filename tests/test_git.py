@@ -13,7 +13,9 @@ from stagecheck.core.git import (
     NotAGitRepositoryError,
     RepoBaseline,
     RepositoryNotFoundError,
+    SAFE_GIT_SECURITY_FLAGS,
     UnbornRepositoryError,
+    _run_git_cmd,
     discover_multi_repositories,
     discover_repository,
 )
@@ -153,6 +155,42 @@ class TestGitDiscovery(unittest.TestCase):
             .stdout.strip()
         )
         self.assertEqual(initial_head, after_head)
+
+    def test_git_security_flags_applied(self) -> None:
+        """Verify SAFE_GIT_SECURITY_FLAGS and safe diff flags prevent config injection (DEC-015 / SR-02)."""
+        repo_path = self.workspace / "repos" / "security-repo"
+        self._init_git_repo(repo_path, initial_commit=True)
+
+        # 1. Verify SAFE_GIT_SECURITY_FLAGS definition
+        self.assertIn("-c", SAFE_GIT_SECURITY_FLAGS)
+        self.assertIn("core.fsmonitor=false", SAFE_GIT_SECURITY_FLAGS)
+        self.assertIn("core.pager=cat", SAFE_GIT_SECURITY_FLAGS)
+        self.assertIn("core.hooksPath=/dev/null", SAFE_GIT_SECURITY_FLAGS)
+        self.assertIn("core.editor=cat", SAFE_GIT_SECURITY_FLAGS)
+
+        # 2. Verify _run_git_cmd uses the flags
+        from unittest.mock import patch
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="test\n", stderr="")
+            _run_git_cmd(repo_path, ["status", "--porcelain"])
+            self.assertTrue(mock_run.called)
+            called_cmd = mock_run.call_args[0][0]
+            self.assertEqual(called_cmd[0], "git")
+            for flag in SAFE_GIT_SECURITY_FLAGS:
+                self.assertIn(flag, called_cmd)
+
+        # 3. Verify get_repo_diff uses safe git flags and --no-ext-diff --no-textconv
+        from stagecheck.core.branch_governance import get_repo_diff
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="diff output", stderr="")
+            get_repo_diff(repo_path, "HEAD~1")
+            self.assertTrue(mock_run.called)
+            called_cmd = mock_run.call_args[0][0]
+            for flag in SAFE_GIT_SECURITY_FLAGS:
+                self.assertIn(flag, called_cmd)
+            self.assertIn("--binary", called_cmd)
+            self.assertIn("--no-ext-diff", called_cmd)
+            self.assertIn("--no-textconv", called_cmd)
 
 
 if __name__ == "__main__":

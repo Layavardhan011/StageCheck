@@ -60,20 +60,31 @@ class RepoBaseline:
         }
 
 
+SAFE_GIT_SECURITY_FLAGS: List[str] = [
+    "-c", "core.fsmonitor=false",
+    "-c", "core.pager=cat",
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "core.editor=cat",
+]
+
+
 def _run_git_cmd(repo_path: Path, args: List[str]) -> subprocess.CompletedProcess[str]:
     """Execute a read-only git command in the target repository directory."""
     # Enforce safe read-only environment without leaking tokens
-    clean_env = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "LANG": "C",
-        "LC_ALL": "C",
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_CONFIG_COUNT": "0",
-    }
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    clean_env.update(
+        {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "LANG": "C",
+            "LC_ALL": "C",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_COUNT": "0",
+        }
+    )
+    cmd = ["git", *SAFE_GIT_SECURITY_FLAGS, "-C", str(repo_path), *args]
     return subprocess.run(
-        ["git", *args],
-        cwd=str(repo_path),
+        cmd,
         capture_output=True,
         text=True,
         check=False,

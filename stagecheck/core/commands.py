@@ -7,6 +7,7 @@ command timeouts, structured execution logs, and before/after Git working tree i
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import re
 import subprocess
@@ -15,6 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+from stagecheck.core.git import SAFE_GIT_SECURITY_FLAGS
 from stagecheck.core.utils import sha256_digest
 
 
@@ -28,6 +30,14 @@ class CommandSecurityError(Exception):
 
 class ForbiddenCommandFlagError(CommandSecurityError):
     """Raised when an injection or execution-redirection flag is detected (exit code 126)."""
+
+
+class InvalidPackageJsonError(ForbiddenCommandFlagError):
+    """Raised when package.json is missing or malformed during npm test execution (exit code 126)."""
+
+
+class MissingNpmTestScriptError(ForbiddenCommandFlagError):
+    """Raised when package.json lacks a required 'test' script target (exit code 126)."""
 
 
 class CommandTimeoutError(CommandSecurityError):
@@ -106,68 +116,229 @@ def build_sanitized_environment(
     return clean
 
 
-# Runner-specific security allowlists and prohibited flags (SEC-B3 & Spec 06)
-PROHIBITED_FLAGS = {
+PYTHON_VERSIONED_REGEX = re.compile(r"^python3(?:\.\d+)?$")
+PYTEST_VERSIONED_REGEX = re.compile(r"^pytest(?:-\d+(?:\.\d+)?)?$")
+
+AUTHORIZED_RUNNERS: Dict[str, str] = {
+    "pytest": "pytest",
+    "pytest-3": "pytest",
+    "go": "go",
+    "python": "python",
+    "python3": "python",
+    "npm": "npm",
+    "yarn": "npm",
+    "pnpm": "npm",
+    "npx": "npx",
+    "cargo": "cargo",
+}
+
+AUTHORIZED_SUBCOMMANDS: Dict[str, Set[str]] = {
+    "go": {"test"},
+    "cargo": {"test"},
+    "npm": {"test", "run"},
+    "npx": {"test", "pytest"},
+}
+
+AUTHORIZED_NPM_RUN_TARGETS: Set[str] = {
+    "test",
+    "test:unit",
+    "test:integration",
+    "test:coverage",
+    "test:e2e",
+}
+
+FORBIDDEN_PYTHON_MODULES: Set[str] = {
+    "pip",
+    "ensurepip",
+    "http",
+    "http.server",
+    "venv",
+    "site",
+    "pydoc",
+    "idlelib",
+}
+
+# Runner-specific security allowlists and prohibited flags (SEC-B3 & Spec 06 & Spec 07)
+PROHIBITED_FLAGS: Dict[str, Set[str]] = {
     "go": {"-exec", "-toolexec"},
     "pytest": {"-o", "--override-ini", "-c", "-p"},
     "python": {"-c", "-e"},
-    "python3": {"-c", "-e"},
     "npm": {"--node-options", "--inspect", "--inspect-brk", "--globalSetup"},
     "npx": {"--node-options", "--inspect", "--inspect-brk", "--globalSetup"},
     "cargo": {"--config", "--runner"},
 }
 
 
-def validate_command_security(argv: List[str]) -> None:
+def resolve_runner_category(binary_name: str) -> Optional[str]:
+    """Resolve binary name to authorized runner category, supporting versioned variants."""
+    b_lower = binary_name.lower()
+    if b_lower in AUTHORIZED_RUNNERS:
+        return AUTHORIZED_RUNNERS[b_lower]
+    if PYTHON_VERSIONED_REGEX.match(b_lower):
+        return "python"
+    if PYTEST_VERSIONED_REGEX.match(b_lower):
+        return "pytest"
+    return None
+
+
+def validate_npm_package_json(cwd: Path, target_script: str) -> None:
+    """Validate package.json existence, JSON format, required 'test' script, and target script."""
+    pkg_file = cwd / "package.json"
+    if not pkg_file.is_file():
+        raise InvalidPackageJsonError(
+            f"Security policy violation [PACKAGE_JSON_MISSING]: package.json not found in '{cwd}'.",
+            exit_code=126,
+        )
+    try:
+        data = json.loads(pkg_file.read_text(encoding="utf-8"))
+    except Exception as err:
+        raise InvalidPackageJsonError(
+            f"Security policy violation [PACKAGE_JSON_MALFORMED]: package.json in '{cwd}' is invalid JSON: {err}",
+            exit_code=126,
+        ) from err
+
+    scripts = data.get("scripts", {})
+    if not isinstance(scripts, dict):
+        raise InvalidPackageJsonError(
+            "Security policy violation [PACKAGE_JSON_SCHEMA]: 'scripts' section must be a JSON object.",
+            exit_code=126,
+        )
+    if "test" not in scripts:
+        raise MissingNpmTestScriptError(
+            "Security policy violation [MISSING_TEST_SCRIPT]: package.json must define a 'test' script.",
+            exit_code=126,
+        )
+    if target_script not in scripts:
+        raise MissingNpmTestScriptError(
+            f"Security policy violation [SCRIPT_NOT_FOUND]: Requested script '{target_script}' not found in package.json.",
+            exit_code=126,
+        )
+
+
+def validate_command_security(argv: List[str], cwd: Optional[Path] = None) -> None:
     """Validate argument vector against runner-specific allowlists and flag policies.
 
-    Enforces SEC-B3:
-      - Validates executable identity and subcommand
+    Enforces SEC-B3 & SR-01:
+      - Validates executable identity and subcommand against fail-closed allowlist (exit code 126)
+      - Strictly validates python module execution (-m)
+      - Requires --no-install on npx
+      - Requires --ignore-scripts and approved target scripts on npm
+      - Validates package.json when cwd is provided
       - Strictly rejects execution redirection flags (-exec, -c, --node-options, -p)
       - Fails closed before any subprocess creation
 
     Args:
         argv: Command argument array.
+        cwd: Optional working directory for package.json inspection.
 
     Raises:
-        ForbiddenCommandFlagError: If prohibited or malicious flags are present (exit 126).
+        ForbiddenCommandFlagError: If prohibited or unapproved flags/runners are present (exit 126).
         ValueError: If argv is empty or malformed.
     """
     if not argv or not isinstance(argv, list):
         raise ValueError("Command argv must be a non-empty list of strings.")
 
     binary = Path(argv[0]).name.lower()
+    runner = resolve_runner_category(binary)
 
-    # Determine runner category
-    runner = None
-    if binary in ("pytest", "pytest-3"):
-        runner = "pytest"
-    elif binary in ("go",):
-        runner = "go"
-    elif binary in ("python", "python3"):
-        runner = "python"
-    elif binary in ("npm", "yarn", "pnpm"):
-        runner = "npm"
-    elif binary in ("npx",):
-        runner = "npx"
-    elif binary in ("cargo",):
-        runner = "cargo"
+    if not runner:
+        raise ForbiddenCommandFlagError(
+            f"Security policy violation [UNAUTHORIZED_RUNNER]: Binary '{binary}' is not an approved test runner.",
+            exit_code=126,
+        )
 
-    if runner and runner in PROHIBITED_FLAGS:
-        forbidden = PROHIBITED_FLAGS[runner]
-        for arg in argv[1:]:
-            flag_name = arg.split("=")[0].strip()
-            if flag_name in forbidden:
+    args = argv[1:]
+    if runner == "python":
+        for i, arg in enumerate(args):
+            if arg == "-m" and i + 1 < len(args):
+                raw_mod = args[i + 1].lower()
+                root_mod = raw_mod.split(".")[0]
+                if raw_mod in FORBIDDEN_PYTHON_MODULES or root_mod in FORBIDDEN_PYTHON_MODULES:
+                    raise ForbiddenCommandFlagError(
+                        f"Security policy violation [FORBIDDEN_MODULE]: Execution of module '{args[i + 1]}' is prohibited.",
+                        exit_code=126,
+                    )
+    elif runner == "npx":
+        if "--no-install" not in args:
+            raise ForbiddenCommandFlagError(
+                "Security policy violation [NPX_REMOTE_INSTALL]: npx must be invoked with '--no-install'.",
+                exit_code=126,
+            )
+        subcmd = next((a for a in args if not a.startswith("-")), None)
+        if subcmd and subcmd.lower() not in AUTHORIZED_SUBCOMMANDS["npx"]:
+            raise ForbiddenCommandFlagError(
+                f"Security policy violation [UNAUTHORIZED_SUBCOMMAND]: Subcommand '{subcmd}' is prohibited for npx.",
+                exit_code=126,
+            )
+    elif runner == "npm":
+        if "--ignore-scripts" not in args:
+            raise ForbiddenCommandFlagError(
+                "Security policy violation [NPM_LIFECYCLE_SCRIPTS]: npm test/run must include '--ignore-scripts'.",
+                exit_code=126,
+            )
+        subcmd = next((a for a in args if not a.startswith("-")), None)
+        if not subcmd or subcmd.lower() not in AUTHORIZED_SUBCOMMANDS["npm"]:
+            raise ForbiddenCommandFlagError(
+                f"Security policy violation [UNAUTHORIZED_SUBCOMMAND]: Subcommand '{subcmd}' is prohibited for npm.",
+                exit_code=126,
+            )
+
+        # Enforce script target allowlist and validate against package.json
+        target_script = "test"
+        if subcmd == "run":
+            run_index = args.index("run")
+            positional_after_run = [a for a in args[run_index + 1 :] if not a.startswith("-")]
+            if not positional_after_run:
                 raise ForbiddenCommandFlagError(
-                    f"Security policy violation [COMMAND_FLAG_FORBIDDEN]: "
-                    f"Runner '{runner}' prohibits flag '{arg}'. Execution denied.",
+                    "Security policy violation [MISSING_SCRIPT_TARGET]: 'npm run' requires a target script.",
                     exit_code=126,
                 )
+            target_script = positional_after_run[0]
+            if len(positional_after_run) > 1:
+                raise ForbiddenCommandFlagError(
+                    f"Security policy violation [EXTRA_POSITIONAL_ARGS]: Additional script names {positional_after_run[1:]} prohibited.",
+                    exit_code=126,
+                )
+            if target_script.lower() not in AUTHORIZED_NPM_RUN_TARGETS:
+                raise ForbiddenCommandFlagError(
+                    f"Security policy violation [UNAUTHORIZED_NPM_SCRIPT]: 'npm run {target_script}' is not an approved test target.",
+                    exit_code=126,
+                )
+
+        if cwd:
+            validate_npm_package_json(cwd, target_script)
+
+    elif runner in AUTHORIZED_SUBCOMMANDS:
+        allowed = AUTHORIZED_SUBCOMMANDS[runner]
+        subcmd = next((a for a in args if not a.startswith("-")), None)
+        if subcmd and subcmd.lower() not in allowed:
+            raise ForbiddenCommandFlagError(
+                f"Security policy violation [UNAUTHORIZED_SUBCOMMAND]: Subcommand '{subcmd}' is prohibited for '{runner}'.",
+                exit_code=126,
+            )
+
+    # Prohibited flags check
+    prohibited = PROHIBITED_FLAGS.get(runner, set())
+    for arg in args:
+        flag = arg.split("=")[0].strip()
+        if flag in prohibited:
+            raise ForbiddenCommandFlagError(
+                f"Security policy violation [FORBIDDEN_FLAG]: Flag '{flag}' is prohibited for runner '{runner}'.",
+                exit_code=126,
+            )
 
 
 def capture_git_status_porcelain(repo_path: Union[str, Path]) -> str:
     """Capture clean git status including untracked files."""
-    cmd = ["git", "-C", str(repo_path), "status", "--porcelain=v1", "--untracked-files=all"]
+    cmd = [
+        "git",
+        *SAFE_GIT_SECURITY_FLAGS,
+        "-C",
+        str(repo_path),
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    ]
     try:
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
         return res.stdout.strip()
@@ -225,9 +396,9 @@ def execute_secure_command(
     Returns:
         Structured CommandExecutionRecord.
     """
-    validate_command_security(argv)
-    clean_env_dict = build_sanitized_environment(extra_env)
     cwd = Path(working_directory).resolve()
+    validate_command_security(argv, cwd=cwd)
+    clean_env_dict = build_sanitized_environment(extra_env)
 
     before_status = ""
     if check_tree_integrity and (cwd / ".git").exists():

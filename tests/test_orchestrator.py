@@ -407,8 +407,8 @@ class TestNineStageVerification(unittest.TestCase):
                     "citations": [
                         {
                             "type": "command",
-                            "record": "echo",
-                            "argv": ["echo", "test-pass"],
+                            "record": "python3",
+                            "argv": ["python3", "-m", "unittest", "--help"],
                             "cwd": ".",
                             "exit_status": 0,
                         }
@@ -439,8 +439,8 @@ class TestNineStageVerification(unittest.TestCase):
                     "citations": [
                         {
                             "type": "command",
-                            "record": "false",
-                            "argv": ["false"],
+                            "record": "python3",
+                            "argv": ["python3", "-m", "unittest", "nonexistent_test_module_that_fails"],
                             "cwd": ".",
                             "exit_status": 0,
                         }

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
-from stagecheck.core.git import GitError, discover_repository
+from stagecheck.core.git import GitError, SAFE_GIT_SECURITY_FLAGS, discover_repository
 from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest
 
 
@@ -93,7 +93,7 @@ def validate_branch_compliance(
 
 def get_git_tree_sha(repo_path: Union[str, Path]) -> str:
     """Extract Git tree root SHA (HEAD^{tree}) for a repository."""
-    cmd = ["git", "-C", str(repo_path), "rev-parse", "HEAD^{tree}"]
+    cmd = ["git", *SAFE_GIT_SECURITY_FLAGS, "-C", str(repo_path), "rev-parse", "HEAD^{tree}"]
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if res.returncode != 0:
         raise GitError(f"Failed to extract tree SHA for '{repo_path}': {res.stderr.strip()}")
@@ -102,7 +102,17 @@ def get_git_tree_sha(repo_path: Union[str, Path]) -> str:
 
 def get_repo_diff(repo_path: Union[str, Path], base_commit: str) -> str:
     """Generate git diff relative to base_commit."""
-    cmd = ["git", "-C", str(repo_path), "diff", base_commit]
+    cmd = [
+        "git",
+        *SAFE_GIT_SECURITY_FLAGS,
+        "-C",
+        str(repo_path),
+        "diff",
+        "--binary",
+        "--no-ext-diff",
+        "--no-textconv",
+        base_commit,
+    ]
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if res.returncode != 0:
         raise GitError(f"Failed to generate diff for '{repo_path}': {res.stderr.strip()}")

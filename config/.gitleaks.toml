@@ -1,0 +1,14 @@
+title = "StageCheck Authoritative Gitleaks Configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Global allowlist for tests and non-sensitive fixtures"
+paths = [
+    '''(^|/)tests/''',
+    '''(^|/)test_''',
+    '''(^|/)\.venv/''',
+    '''(^|/)evals/''',
+]
+

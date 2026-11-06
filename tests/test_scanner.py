@@ -163,6 +163,29 @@ class TestSecretScannerFailClosed(unittest.TestCase):
             resolved = scanner.resolve_binary()
             self.assertEqual(resolved, "/usr/local/bin/gitleaks")
 
+    def test_gitleaks_pinned_config(self):
+        """Verify authoritative Gitleaks --config binding prevents rule drift (DEC-017 / SR-04)."""
+        SecretScanner.reset_test_launcher()
+        scanner = SecretScanner()
+
+        with patch.object(scanner, "resolve_binary", return_value="/usr/bin/gitleaks"):
+            with patch("os.path.isfile", return_value=True), patch("os.access", return_value=True):
+                mock_version = MagicMock(returncode=0, stdout="v8.18.4\n")
+                mock_scan = MagicMock(returncode=0, stdout="Scan completed with 0 leaks found.\n")
+
+                with patch("subprocess.run", side_effect=[mock_version, mock_scan]) as mock_sub:
+                    res = scanner.scan_commit_range(
+                        self.dummy_repo, "HEAD~1", "HEAD", repo_name="backend"
+                    )
+                    self.assertTrue(res.is_clear)
+                    self.assertEqual(mock_sub.call_count, 2)
+                    call_cmd = mock_sub.call_args[0][0]
+                    self.assertEqual(call_cmd[0], "/usr/bin/gitleaks")
+                    self.assertEqual(call_cmd[1], "detect")
+                    # Check --config argument is present
+                    has_config = any(arg.startswith("--config=") for arg in call_cmd)
+                    self.assertTrue(has_config, f"Expected --config in {call_cmd}")
+
 
 if __name__ == "__main__":
     unittest.main()

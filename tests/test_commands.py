@@ -9,12 +9,17 @@ import unittest
 from pathlib import Path
 
 from stagecheck.core.commands import (
+    CommandSecurityError,
     CommandTimeoutError,
     ForbiddenCommandFlagError,
+    InvalidPackageJsonError,
+    MissingNpmTestScriptError,
     TreeMutationError,
     build_sanitized_environment,
     execute_secure_command,
+    resolve_runner_category,
     validate_command_security,
+    validate_npm_package_json,
 )
 
 
@@ -62,7 +67,7 @@ class TestSecureCommandRunner(unittest.TestCase):
             ["python3", "-m", "unittest", "discover"],
             ["pytest", "-v", "-k", "test_math", "tests/"],
             ["go", "test", "-v", "-run", "TestOrder", "./..."],
-            ["npm", "test", "--", "-t", "AuthTest"],
+            ["npm", "test", "--ignore-scripts", "--", "-t", "AuthTest"],
             ["cargo", "test", "--package", "core", "--lib"],
         ]
         for cmd in allowed_commands:
@@ -102,13 +107,12 @@ class TestSecureCommandRunner(unittest.TestCase):
 
     def test_command_execution_timeout_raises_124(self) -> None:
         """Verify command execution timing out raises CommandTimeoutError with code 124."""
-        # Run a command that sleeps for 3 seconds with a 1-second timeout
-        cmd = ["python3", "-c", "import time; time.sleep(3)"]
-        # Note: python3 -c is blocked by validate_command_security, so test with sleep via shell-free command
-        sleep_cmd = ["sleep", "2"]
+        timeout_script = self.workspace / "hang.py"
+        timeout_script.write_text("import time; time.sleep(5)\n", encoding="utf-8")
+        cmd = ["python3", str(timeout_script)]
         with self.assertRaises(CommandTimeoutError) as ctx:
             execute_secure_command(
-                argv=sleep_cmd,
+                argv=cmd,
                 working_directory=self.repo_dir,
                 timeout_seconds=1,
                 check_tree_integrity=False,
@@ -157,6 +161,132 @@ class TestSecureCommandRunner(unittest.TestCase):
                 timeout_seconds=10,
                 check_tree_integrity=True,
             )
+
+    def test_npm_package_and_flag_security(self) -> None:
+        """Verify NPM execution policy, hook suppression, script allowlist, and package.json validation (DEC-014 / SR-01)."""
+        node_dir = self.workspace / "node-app"
+        node_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. npm test without --ignore-scripts is rejected immediately (exit 126)
+        with self.assertRaises(ForbiddenCommandFlagError) as ctx:
+            validate_command_security(["npm", "test"])
+        self.assertEqual(ctx.exception.exit_code, 126)
+        self.assertIn("NPM_LIFECYCLE_SCRIPTS", str(ctx.exception))
+
+        # 2. npm run without --ignore-scripts is rejected (exit 126)
+        with self.assertRaises(ForbiddenCommandFlagError) as ctx:
+            validate_command_security(["npm", "run", "test:unit"])
+        self.assertEqual(ctx.exception.exit_code, 126)
+
+        # 3. npm run with unauthorized target (e.g. build, start) is rejected (exit 126)
+        with self.assertRaises(ForbiddenCommandFlagError) as ctx:
+            validate_command_security(["npm", "run", "build", "--ignore-scripts"])
+        self.assertEqual(ctx.exception.exit_code, 126)
+        self.assertIn("UNAUTHORIZED_NPM_SCRIPT", str(ctx.exception))
+
+        # 4. npm run missing script target is rejected (exit 126)
+        with self.assertRaises(ForbiddenCommandFlagError) as ctx:
+            validate_command_security(["npm", "run", "--ignore-scripts"])
+        self.assertEqual(ctx.exception.exit_code, 126)
+
+        # 5. npm run with extra positional arguments is rejected (exit 126)
+        with self.assertRaises(ForbiddenCommandFlagError) as ctx:
+            validate_command_security(["npm", "run", "test:unit", "extra_script", "--ignore-scripts"])
+        self.assertEqual(ctx.exception.exit_code, 126)
+        self.assertIn("EXTRA_POSITIONAL_ARGS", str(ctx.exception))
+
+        # 6. package.json missing in cwd raises InvalidPackageJsonError (exit 126)
+        with self.assertRaises(InvalidPackageJsonError) as ctx:
+            validate_command_security(["npm", "test", "--ignore-scripts"], cwd=node_dir)
+        self.assertEqual(ctx.exception.exit_code, 126)
+        self.assertIn("PACKAGE_JSON_MISSING", str(ctx.exception))
+
+        # 7. package.json malformed raises InvalidPackageJsonError (exit 126)
+        pkg_file = node_dir / "package.json"
+        pkg_file.write_text("{malformed json", encoding="utf-8")
+        with self.assertRaises(InvalidPackageJsonError) as ctx:
+            validate_command_security(["npm", "test", "--ignore-scripts"], cwd=node_dir)
+        self.assertEqual(ctx.exception.exit_code, 126)
+        self.assertIn("PACKAGE_JSON_MALFORMED", str(ctx.exception))
+
+        # 8. package.json missing required "test" script raises MissingNpmTestScriptError (exit 126)
+        pkg_file.write_text('{"scripts": {"build": "webpack"}}', encoding="utf-8")
+        with self.assertRaises(MissingNpmTestScriptError) as ctx:
+            validate_command_security(["npm", "test", "--ignore-scripts"], cwd=node_dir)
+        self.assertEqual(ctx.exception.exit_code, 126)
+        self.assertIn("MISSING_TEST_SCRIPT", str(ctx.exception))
+
+        # 9. package.json has test but lacks requested target raises MissingNpmTestScriptError (exit 126)
+        pkg_file.write_text('{"scripts": {"test": "mocha"}}', encoding="utf-8")
+        with self.assertRaises(MissingNpmTestScriptError) as ctx:
+            validate_command_security(["npm", "run", "test:coverage", "--ignore-scripts"], cwd=node_dir)
+        self.assertEqual(ctx.exception.exit_code, 126)
+        self.assertIn("SCRIPT_NOT_FOUND", str(ctx.exception))
+
+        # 10. Valid package.json with test and target passes validation
+        pkg_file.write_text('{"scripts": {"test": "mocha", "test:unit": "mocha tests/unit"}}', encoding="utf-8")
+        validate_command_security(["npm", "test", "--ignore-scripts"], cwd=node_dir)
+        validate_command_security(["npm", "run", "test:unit", "--ignore-scripts"], cwd=node_dir)
+
+    def test_unauthorized_runners_blocked(self) -> None:
+        """Verify unvetted binaries (bash, sh, curl, socat) raise code 126."""
+        blocked_runners = [
+            ["bash", "-c", "echo test"],
+            ["sh", "script.sh"],
+            ["curl", "https://example.com"],
+            ["socat", "-", "-"],
+            ["ruby", "test.rb"],
+        ]
+        for cmd in blocked_runners:
+            with self.subTest(cmd=cmd):
+                with self.assertRaises(ForbiddenCommandFlagError) as ctx:
+                    validate_command_security(cmd)
+                self.assertEqual(ctx.exception.exit_code, 126)
+                self.assertIn("UNAUTHORIZED_RUNNER", str(ctx.exception))
+
+    def test_npx_security_policies(self) -> None:
+        """Verify npx requires --no-install and restricts subcommands."""
+        # npx without --no-install is rejected
+        with self.assertRaises(ForbiddenCommandFlagError) as ctx:
+            validate_command_security(["npx", "test"])
+        self.assertEqual(ctx.exception.exit_code, 126)
+        self.assertIn("NPX_REMOTE_INSTALL", str(ctx.exception))
+
+        # npx with unapproved subcommand is rejected
+        with self.assertRaises(ForbiddenCommandFlagError) as ctx:
+            validate_command_security(["npx", "--no-install", "express-generator"])
+        self.assertEqual(ctx.exception.exit_code, 126)
+        self.assertIn("UNAUTHORIZED_SUBCOMMAND", str(ctx.exception))
+
+        # npx with approved subcommand passes
+        validate_command_security(["npx", "--no-install", "test"])
+
+    def test_python_module_restrictions(self) -> None:
+        """Verify python module allowlist blocks pip, venv, http.server, etc."""
+        forbidden_modules = ["pip", "ensurepip", "http.server", "venv", "site", "pydoc"]
+        for mod in forbidden_modules:
+            with self.subTest(module=mod):
+                with self.assertRaises(ForbiddenCommandFlagError) as ctx:
+                    validate_command_security(["python3", "-m", mod])
+                self.assertEqual(ctx.exception.exit_code, 126)
+                self.assertIn("FORBIDDEN_MODULE", str(ctx.exception))
+
+        # Allowed python module unittest passes
+        validate_command_security(["python3", "-m", "unittest", "discover"])
+
+    def test_runner_category_resolution(self) -> None:
+        """Verify versioned runner resolution for python and pytest."""
+        self.assertEqual(resolve_runner_category("python"), "python")
+        self.assertEqual(resolve_runner_category("python3"), "python")
+        self.assertEqual(resolve_runner_category("python3.11"), "python")
+        self.assertEqual(resolve_runner_category("python3.12"), "python")
+        self.assertEqual(resolve_runner_category("pytest"), "pytest")
+        self.assertEqual(resolve_runner_category("pytest-3"), "pytest")
+        self.assertEqual(resolve_runner_category("go"), "go")
+        self.assertEqual(resolve_runner_category("npm"), "npm")
+        self.assertEqual(resolve_runner_category("cargo"), "cargo")
+        self.assertIsNone(resolve_runner_category("bash"))
+        self.assertIsNone(resolve_runner_category("python2"))
 
 
 if __name__ == "__main__":
