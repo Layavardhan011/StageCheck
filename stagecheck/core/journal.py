@@ -181,17 +181,29 @@ class TransactionJournal:
         temp_journal.replace(self.journal_file)
 
     def commit(self) -> None:
-        """Commit transaction: remove the active journal file and mark committed."""
+        """Commit transaction: remove the active journal file and mark committed (idempotent)."""
         if self.is_rolled_back:
             raise JournalError("Cannot commit a transaction that has already been rolled back.")
+        if self.is_committed:
+            return
         self.is_committed = True
         if self.journal_file.exists():
             self.journal_file.unlink()
 
     def rollback(self) -> RecoveryRecord:
-        """Rollback all staged mutations using recorded pre-images."""
+        """Rollback all staged mutations using recorded pre-images (idempotent)."""
         if self.is_committed:
             raise JournalError("Cannot rollback a transaction that has already been committed.")
+        if self.is_rolled_back:
+            return RecoveryRecord(
+                txn_id=self.txn_id,
+                operation=self.operation,
+                files_restored=[],
+                files_removed=[],
+                status="ALREADY_ROLLED_BACK",
+                message=f"Transaction '{self.txn_id}' was already rolled back.",
+            )
+        self.is_rolled_back = True
 
         restored, removed = _restore_pre_images(
             self.workspace_root,
@@ -203,6 +215,15 @@ class TransactionJournal:
         # Unlink journal active file
         if self.journal_file.exists():
             self.journal_file.unlink()
+
+        return RecoveryRecord(
+            txn_id=self.txn_id,
+            operation=self.operation,
+            files_restored=restored,
+            files_removed=removed,
+            status="ROLLED_BACK",
+            message=f"Rolled back transaction '{self.txn_id}'. Restored {len(restored)} files, removed {len(removed)} files.",
+        )
 
         self.is_rolled_back = True
         return RecoveryRecord(
@@ -344,6 +365,12 @@ def recover_interrupted_transactions(
     records: List[RecoveryRecord] = []
     try:
         with acquire_runtime_lock(ws):
+            # Clean up lingering incomplete write artifacts (.tmp and .prepare.json)
+            for tmp_file in journal_dir.glob("*.tmp"):
+                tmp_file.unlink(missing_ok=True)
+            for prep_file in journal_dir.glob("*.prepare.json"):
+                prep_file.unlink(missing_ok=True)
+
             active_items = sorted(journal_dir.glob("*.active.json"))
             if not active_items:
                 return []
@@ -361,10 +388,26 @@ def recover_interrupted_transactions(
                     # Corrupted journal record
                     if verbose:
                         print(f"[RECOVERY] WARNING: Unreadable active journal record '{item.name}': {err}", file=sys.stderr)
+                    records.append(RecoveryRecord(
+                        txn_id=item.stem,
+                        operation="UNKNOWN",
+                        files_restored=[],
+                        files_removed=[],
+                        status="CORRUPTED",
+                        message=f"Cleaned unreadable/corrupted active journal record '{item.name}': {err}",
+                    ))
                     item.unlink(missing_ok=True)
                     continue
 
                 if not isinstance(data, dict):
+                    records.append(RecoveryRecord(
+                        txn_id=item.stem,
+                        operation="UNKNOWN",
+                        files_restored=[],
+                        files_removed=[],
+                        status="CORRUPTED",
+                        message=f"Non-object active journal record '{item.name}' quarantined.",
+                    ))
                     item.unlink(missing_ok=True)
                     continue
 
