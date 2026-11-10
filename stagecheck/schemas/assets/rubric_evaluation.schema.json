@@ -42,7 +42,9 @@
         "total_rules": { "type": "integer" },
         "passed": { "type": "integer" },
         "failed": { "type": "integer" },
-        "not_applicable": { "type": "integer" }
+        "not_applicable": { "type": "integer" },
+        "not_evaluated": { "type": "integer" },
+        "blocked": { "type": "integer" }
       }
     },
     "domains": {

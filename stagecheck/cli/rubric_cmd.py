@@ -69,13 +69,14 @@ def run_check_rubric(
         for d_name, d_val in payload["domains"].items():
             status_tag = f"[{d_val['status']}]"
             d_rules = d_val["rules"]
-            d_failed = [r for r in d_rules if r.get("status") == "FAIL"]
-            if d_failed:
-                print(f"Domain: {d_name} (30 Rules) {status_tag}")
-                for fr in d_failed:
-                    print(f"  └── [FAIL] {fr['rule_id']}: {fr.get('message', 'Rule defect detected.')}")
+            d_non_pass = [r for r in d_rules if r.get("status") not in ("PASS", "NOT_APPLICABLE")]
+            if d_non_pass:
+                print(f"Domain: {d_name} ({len(d_rules)} Rules) {status_tag}")
+                for fr in d_non_pass:
+                    st = fr.get("status", "FAIL")
+                    print(f"  └── [{st}] {fr['rule_id']}: {fr.get('message', 'Rule requirement not satisfied.')}")
             else:
-                print(f"Domain: {d_name} (30 Rules) {status_tag} - All rules passed or N/A.")
+                print(f"Domain: {d_name} ({len(d_rules)} Rules) {status_tag} - All rules passed or N/A.")
 
         print("----------------------------------------------------------------")
         print("RESULTS:")
@@ -83,6 +84,11 @@ def run_check_rubric(
         print(f"  Passed:          {passed} Rules")
         print(f"  Not Applicable:  {na} Rules")
         print(f"  Failed:          {failed} Rules")
+        if counts.get("not_evaluated", 0) > 0:
+            print(f"  Not Evaluated:   {counts['not_evaluated']} Rules")
+        if counts.get("blocked", 0) > 0:
+            print(f"  Blocked:         {counts['blocked']} Rules")
+        print(f"  Overall Verdict: {payload['overall_verdict']}")
 
         if update_json:
             print("\nAUTOMATIC UPDATES:")
@@ -93,4 +99,4 @@ def run_check_rubric(
 
         print("================================================================")
 
-    return 0 if failed == 0 else 1
+    return 0 if payload["overall_verdict"] == "PASS" else 1

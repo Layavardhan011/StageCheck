@@ -25,6 +25,9 @@ from stagecheck.core.git import discover_repository
 from stagecheck.core.rubric_engine import (
     EXEMPTION_PREDICATES,
     InvalidRubricExemptionError,
+    RubricEvaluationError,
+    RuleEvaluationResult,
+    aggregate_rubric_results,
     load_270_rule_catalog,
     run_rubric_evaluation,
     update_rubric_artifacts,
@@ -298,6 +301,120 @@ class TestRubricEngine(unittest.TestCase):
         for rule in catalog:
             self.assertIn(rule.domain, EVALUATOR_MAP, f"Rule '{rule.rule_id}' must belong to an evaluated domain.")
             self.assertTrue(EVALUATOR_MAP[rule.domain], f"Domain '{rule.domain}' must have a non-empty evaluator.")
+
+    def test_verdict_aggregation_all_pass_produces_pass(self) -> None:
+        """Verify all required rules passing produces overall PASS (GAP-01)."""
+        evals = [
+            RuleEvaluationResult("R1", "BLAST_RADIUS", "AUTOMATED", "PASS", "blast_eval"),
+            RuleEvaluationResult("R2", "BLAST_RADIUS", "AUTOMATED", "PASS", "blast_eval"),
+            RuleEvaluationResult("R3", "FAILURE_CLASS", "AUTOMATED", "NOT_APPLICABLE", "structural_predicate_evaluator"),
+        ]
+        verdict, counts, domains = aggregate_rubric_results(evals)
+        self.assertEqual(verdict, "PASS")
+        self.assertEqual(counts["passed"], 2)
+        self.assertEqual(counts["not_applicable"], 1)
+        self.assertEqual(counts["failed"], 0)
+        self.assertEqual(domains["BLAST_RADIUS"]["status"], "PASS")
+        self.assertEqual(domains["FAILURE_CLASS"]["status"], "PASS")
+
+    def test_verdict_aggregation_single_fail_produces_fail(self) -> None:
+        """Verify a single FAIL result causes overall verdict and domain to FAIL (GAP-01)."""
+        evals = [
+            RuleEvaluationResult("R1", "BLAST_RADIUS", "AUTOMATED", "PASS", "blast_eval"),
+            RuleEvaluationResult("R2", "BLAST_RADIUS", "AUTOMATED", "FAIL", "blast_eval", message="Scope violation"),
+        ]
+        verdict, counts, domains = aggregate_rubric_results(evals)
+        self.assertEqual(verdict, "FAIL")
+        self.assertEqual(counts["failed"], 1)
+        self.assertEqual(domains["BLAST_RADIUS"]["status"], "FAIL")
+
+    def test_verdict_aggregation_unevaluated_cannot_produce_pass(self) -> None:
+        """Verify a required rule returning NOT_EVALUATED cannot produce an overall PASS (GAP-01)."""
+        evals = [
+            RuleEvaluationResult("R1", "BLAST_RADIUS", "AUTOMATED", "PASS", "blast_eval"),
+            RuleEvaluationResult("R2", "BLAST_RADIUS", "AGENT_ASSISTED", "NOT_EVALUATED", "agent_assisted_evaluator"),
+        ]
+        verdict, counts, domains = aggregate_rubric_results(evals)
+        self.assertEqual(verdict, "FAIL", "Unevaluated required rule must not silently produce PASS.")
+        self.assertEqual(counts["not_evaluated"], 1)
+        self.assertEqual(domains["BLAST_RADIUS"]["status"], "NOT_EVALUATED")
+
+    def test_verdict_aggregation_blocked_cannot_produce_pass(self) -> None:
+        """Verify a required rule returning BLOCKED cannot produce an overall PASS (GAP-01)."""
+        evals = [
+            RuleEvaluationResult("R1", "BLAST_RADIUS", "AUTOMATED", "PASS", "blast_eval"),
+            RuleEvaluationResult("R2", "BLAST_RADIUS", "HUMAN_WAIVER", "BLOCKED", "human_waiver_evaluator"),
+        ]
+        verdict, counts, domains = aggregate_rubric_results(evals)
+        self.assertEqual(verdict, "FAIL", "Blocked required rule must not silently produce PASS.")
+        self.assertEqual(counts["blocked"], 1)
+        self.assertEqual(domains["BLAST_RADIUS"]["status"], "BLOCKED")
+
+    def test_domain_summary_cannot_report_pass_when_rules_unevaluated(self) -> None:
+        """Verify domain summaries cannot report PASS when rules are unevaluated or blocked (GAP-03)."""
+        evals = [
+            RuleEvaluationResult("R1", "CLAIM_SUPPORT", "AUTOMATED", "PASS", "claim_eval"),
+            RuleEvaluationResult("R2", "CLAIM_SUPPORT", "EVIDENCE", "NOT_EVALUATED", "phase_evidence_validator"),
+            RuleEvaluationResult("R3", "ORCHESTRATOR", "HUMAN_WAIVER", "BLOCKED", "human_waiver_evaluator"),
+        ]
+        verdict, counts, domains = aggregate_rubric_results(evals)
+        self.assertEqual(domains["CLAIM_SUPPORT"]["status"], "NOT_EVALUATED")
+        self.assertEqual(domains["ORCHESTRATOR"]["status"], "BLOCKED")
+        self.assertEqual(verdict, "FAIL")
+
+    def test_domain_and_overall_counts_are_consistent(self) -> None:
+        """Verify mathematical consistency between overall counts and domain counts (GAP-01/03)."""
+        evals = [
+            RuleEvaluationResult("R1", "BLAST_RADIUS", "AUTOMATED", "PASS", "eval1"),
+            RuleEvaluationResult("R2", "BLAST_RADIUS", "AUTOMATED", "FAIL", "eval1"),
+            RuleEvaluationResult("R3", "TEST_ADEQUACY", "AUTOMATED", "NOT_APPLICABLE", "eval2"),
+            RuleEvaluationResult("R4", "TEST_ADEQUACY", "AGENT_ASSISTED", "NOT_EVALUATED", "eval2"),
+            RuleEvaluationResult("R5", "FAILURE_CLASS", "HUMAN_WAIVER", "BLOCKED", "eval3"),
+        ]
+        verdict, counts, domains = aggregate_rubric_results(evals)
+
+        # Check total rules sum
+        sum_domain_total = sum(d["counts"]["total_rules"] for d in domains.values())
+        sum_domain_passed = sum(d["counts"]["passed"] for d in domains.values())
+        sum_domain_failed = sum(d["counts"]["failed"] for d in domains.values())
+        sum_domain_na = sum(d["counts"]["not_applicable"] for d in domains.values())
+        sum_domain_not_eval = sum(d["counts"]["not_evaluated"] for d in domains.values())
+        sum_domain_blocked = sum(d["counts"]["blocked"] for d in domains.values())
+
+        self.assertEqual(counts["total_rules"], sum_domain_total)
+        self.assertEqual(counts["passed"], sum_domain_passed)
+        self.assertEqual(counts["failed"], sum_domain_failed)
+        self.assertEqual(counts["not_applicable"], sum_domain_na)
+        self.assertEqual(counts["not_evaluated"], sum_domain_not_eval)
+        self.assertEqual(counts["blocked"], sum_domain_blocked)
+
+    def test_mixed_domain_statuses_aggregation(self) -> None:
+        """Verify domain aggregation with mixed rule statuses follows strict priority: FAIL > BLOCKED > NOT_EVALUATED > PASS (GAP-03)."""
+        # Domain with PASS and FAIL -> FAIL
+        mix_fail = [
+            RuleEvaluationResult("R1", "D1", "AUTOMATED", "PASS", "eval"),
+            RuleEvaluationResult("R2", "D1", "AUTOMATED", "BLOCKED", "eval"),
+            RuleEvaluationResult("R3", "D1", "AUTOMATED", "FAIL", "eval"),
+        ]
+        _, _, d_fail = aggregate_rubric_results(mix_fail)
+        self.assertEqual(d_fail["D1"]["status"], "FAIL")
+
+        # Domain with PASS, NOT_EVALUATED, and BLOCKED (no FAIL) -> BLOCKED
+        mix_blocked = [
+            RuleEvaluationResult("R1", "D2", "AUTOMATED", "PASS", "eval"),
+            RuleEvaluationResult("R2", "D2", "AUTOMATED", "NOT_EVALUATED", "eval"),
+            RuleEvaluationResult("R3", "D2", "AUTOMATED", "BLOCKED", "eval"),
+        ]
+        _, _, d_blk = aggregate_rubric_results(mix_blocked)
+        self.assertEqual(d_blk["D2"]["status"], "BLOCKED")
+
+        # Domain with PASS and NOT_EVALUATED (no FAIL or BLOCKED) -> NOT_EVALUATED
+        mix_noteval = [
+            RuleEvaluationResult("R1", "D3", "AUTOMATED", "PASS", "eval"),
+            RuleEvaluationResult("R2", "D3", "AUTOMATED", "NOT_EVALUATED", "eval"),
+        ]
+        _, _, d_ne = aggregate_rubric_results(mix_noteval)
+        self.assertEqual(d_ne["D3"]["status"], "NOT_EVALUATED")
 
 
 if __name__ == "__main__":

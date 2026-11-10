@@ -351,7 +351,61 @@ def evaluate_rubric_rule(
 
         ctx = context or {}
 
-        # 3. Handle evidence-dependent rules (missing evidence cannot silently pass)
+        # 3. Explicit context-based overrides for fine-grained rule simulation & testing (GAP-01/02)
+        if rule.rule_id in ctx.get("blocked_rules", []):
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id,
+                domain=rule.domain,
+                category=rule.category,
+                status="BLOCKED",
+                evaluator=evaluator_name,
+                message=f"Rule '{rule.rule_id}' blocked by governance policy or unverified prerequisite.",
+            )
+        if rule.rule_id in ctx.get("unevaluated_rules", []):
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id,
+                domain=rule.domain,
+                category=rule.category,
+                status="NOT_EVALUATED",
+                evaluator=evaluator_name,
+                message=f"Rule '{rule.rule_id}' not evaluated: verification deferred.",
+            )
+
+        # 4. Handle category-specific evaluation invariants (Spec 02 / GAP-02)
+        if rule.category == "HUMAN_WAIVER":
+            waivers = ctx.get("human_waivers", {})
+            if rule.rule_id in waivers or "*" in waivers:
+                waiver_info = waivers.get(rule.rule_id, {}) if isinstance(waivers, dict) else {}
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="PASS",
+                    evaluator="human_waiver_evaluator",
+                    witness=waiver_info.get("evidence_path", "controls/DISPOSITIONS.json"),
+                    message=f"Human waiver authorized: {waiver_info.get('rationale', 'Approved by operator')}.",
+                )
+            if ctx.get("require_explicit_waivers", False):
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="BLOCKED",
+                    evaluator="human_waiver_evaluator",
+                    message=f"Human waiver required for rule '{rule.rule_id}' but not authorized in DISPOSITIONS.json.",
+                )
+
+        if rule.category == "AGENT_ASSISTED":
+            if rule.rule_id in ctx.get("missing_agent_reviews", []):
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="NOT_EVALUATED",
+                    evaluator="agent_assisted_evaluator",
+                    message=f"Agent-assisted review evidence missing for rule '{rule.rule_id}'.",
+                )
+
         if rule.category == "EVIDENCE":
             missing_evidence_list = ctx.get("missing_evidence", [])
             if rule.rule_id in missing_evidence_list or "*" in missing_evidence_list:
@@ -365,7 +419,7 @@ def evaluate_rubric_rule(
                     artifact=rule.primary_witness or "evidence_artifact",
                 )
 
-        # 4. Domain-specific rule evaluation
+        # 5. Domain-specific rule evaluation
         untouched_dirty = ctx.get("untouched_dirty", [])
         secrets_found = ctx.get("secrets_found", [])
         out_of_scope_files = ctx.get("out_of_scope_files", [])
@@ -587,6 +641,87 @@ def evaluate_rubric_rule(
         )
 
 
+def aggregate_rubric_results(
+    evaluations: List[Union[RuleEvaluationResult, Dict[str, Any]]],
+) -> Tuple[str, Dict[str, int], Dict[str, Any]]:
+    """Deterministically aggregate rule evaluations into domain summaries and overall verdict (Spec 02 / GAP-01 / GAP-03).
+
+    Rules:
+    - Domain status is 'FAIL' if any rule failed; 'BLOCKED' if any rule is blocked;
+      'NOT_EVALUATED' if any rule is unevaluated; 'PASS' only if all rules passed or are exempt.
+    - Overall verdict is 'FAIL' if any required rule failed, is blocked, or is unevaluated.
+    - Overall verdict is 'PASS' only if every rule is PASS or NOT_APPLICABLE.
+    - Domain counts and overall counts are guaranteed to be mutually consistent.
+    """
+    eval_dicts = [e.to_dict() if isinstance(e, RuleEvaluationResult) else e for e in evaluations]
+
+    total_rules = len(eval_dicts)
+    passed = sum(1 for e in eval_dicts if e.get("status") == "PASS")
+    failed = sum(1 for e in eval_dicts if e.get("status") == "FAIL")
+    na = sum(1 for e in eval_dicts if e.get("status") == "NOT_APPLICABLE")
+    not_evaluated = sum(1 for e in eval_dicts if e.get("status") == "NOT_EVALUATED")
+    blocked = sum(1 for e in eval_dicts if e.get("status") == "BLOCKED")
+
+    # Consistent verdict policy (GAP-01):
+    # A single FAIL, BLOCKED, or NOT_EVALUATED rule prevents an overall PASS
+    if failed > 0 or blocked > 0 or not_evaluated > 0:
+        overall_verdict = "FAIL"
+    elif total_rules > 0 and (passed + na == total_rules):
+        overall_verdict = "PASS"
+    else:
+        overall_verdict = "FAIL"
+
+    counts = {
+        "total_rules": total_rules,
+        "passed": passed,
+        "failed": failed,
+        "not_applicable": na,
+        "not_evaluated": not_evaluated,
+        "blocked": blocked,
+    }
+
+    # Aggregate by domain (GAP-03)
+    domain_groups: Dict[str, List[Dict[str, Any]]] = {}
+    for e in eval_dicts:
+        domain = e.get("domain", "COMMON")
+        domain_groups.setdefault(domain, []).append(e)
+
+    domains_map: Dict[str, Any] = {}
+    for d_name, d_rules in domain_groups.items():
+        d_total = len(d_rules)
+        d_passed = sum(1 for r in d_rules if r.get("status") == "PASS")
+        d_failed = sum(1 for r in d_rules if r.get("status") == "FAIL")
+        d_na = sum(1 for r in d_rules if r.get("status") == "NOT_APPLICABLE")
+        d_not_eval = sum(1 for r in d_rules if r.get("status") == "NOT_EVALUATED")
+        d_blocked = sum(1 for r in d_rules if r.get("status") == "BLOCKED")
+
+        if d_failed > 0:
+            d_status = "FAIL"
+        elif d_blocked > 0:
+            d_status = "BLOCKED"
+        elif d_not_eval > 0:
+            d_status = "NOT_EVALUATED"
+        elif d_total > 0 and (d_passed + d_na == d_total):
+            d_status = "PASS"
+        else:
+            d_status = "FAIL"
+
+        domains_map[d_name] = {
+            "status": d_status,
+            "counts": {
+                "total_rules": d_total,
+                "passed": d_passed,
+                "failed": d_failed,
+                "not_applicable": d_na,
+                "not_evaluated": d_not_eval,
+                "blocked": d_blocked,
+            },
+            "rules": d_rules,
+        }
+
+    return overall_verdict, counts, domains_map
+
+
 def run_rubric_evaluation(
     workspace_root: Union[str, Path],
     task_id: Optional[str] = None,
@@ -594,6 +729,7 @@ def run_rubric_evaluation(
     cycle: Optional[int] = None,
     target_domain: Optional[str] = None,
     fail_fast: bool = False,
+    context: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], float]:
     """Execute complete 270-rule evaluation and return (evaluation_dict, elapsed_ms)."""
     start_time = time.perf_counter()
@@ -680,15 +816,16 @@ def run_rubric_evaluation(
         except Exception:
             pass
 
-    context = {
+    live_context = {
         "uncommitted_diffs": uncommitted_diffs,
         "untouched_dirty": untouched_dirty,
         "out_of_scope_files": out_of_scope_files,
         "secrets_found": secrets_found,
     }
+    if context:
+        live_context.update(context)
 
     evaluations: List[RuleEvaluationResult] = []
-    domains_map: Dict[str, Dict[str, Any]] = {}
 
     for rule in catalog:
         if target_domain and rule.domain.upper() != target_domain.upper():
@@ -701,33 +838,24 @@ def run_rubric_evaluation(
                 saved_pred = rule.exemption_predicate
                 rule.exemption_predicate = None
                 try:
-                    res = evaluate_rubric_rule(rule, root, target_repo, context)
+                    res = evaluate_rubric_rule(rule, root, target_repo, live_context)
                 finally:
                     rule.exemption_predicate = saved_pred
                 evaluations.append(res)
+                if fail_fast and res.status == "FAIL":
+                    break
                 continue
 
-        res = evaluate_rubric_rule(rule, root, target_repo, context)
+        res = evaluate_rubric_rule(rule, root, target_repo, live_context)
         evaluations.append(res)
-
-        # Track domain results
-        d_entry = domains_map.setdefault(rule.domain, {"status": "PASS", "rules": []})
-        d_entry["rules"].append(res.to_dict())
-        if res.status == "FAIL":
-            d_entry["status"] = "FAIL"
-            if fail_fast:
-                break
+        if fail_fast and res.status == "FAIL":
+            break
 
     # Validate output payload against illegal exemptions (FR-03 / DEC-026)
     eval_dicts = [e.to_dict() for e in evaluations]
     validate_rubric_evaluation_payload(eval_dicts)
 
-    passed_count = sum(1 for e in evaluations if e.status == "PASS")
-    failed_count = sum(1 for e in evaluations if e.status == "FAIL")
-    na_count = sum(1 for e in evaluations if e.status == "NOT_APPLICABLE")
-    total_count = len(evaluations)
-
-    overall_verdict = "FAIL" if failed_count > 0 else "PASS"
+    overall_verdict, counts, domains_map = aggregate_rubric_results(evaluations)
 
     elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
@@ -739,12 +867,7 @@ def run_rubric_evaluation(
         "cycle": resolved_cycle,
         "evaluated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "overall_verdict": overall_verdict,
-        "counts": {
-            "total_rules": total_count,
-            "passed": passed_count,
-            "failed": failed_count,
-            "not_applicable": na_count,
-        },
+        "counts": counts,
         "domains": domains_map,
         "evaluations": eval_dicts,
     }
