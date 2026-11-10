@@ -400,6 +400,51 @@ class TestAdversarialSecurity(unittest.TestCase):
         self.assertTrue(len(verdict_crit) > 0)
         self.assertEqual(verdict_crit[0].status, "FAILED")
 
+    def test_task_id_traversal_rejected_across_entrypoints(self) -> None:
+        """Verify task_id traversal and '..' are rejected across CLI, schema, and evidence APIs (SC-SEC-05)."""
+        from stagecheck.cli.start_cmd import run_start
+        from stagecheck.core.circuit_breaker import CircuitBreakerEvaluation, write_escalation_report
+        from stagecheck.core.evidence import append_issue_history
+        from stagecheck.core.paths import SymlinkPathEscapeError, resolve_task_dir
+        from stagecheck.core.utils import SchemaValidationError
+        from stagecheck.schemas.validator import validate_active_state
+
+        outside_dir = Path(self.temp_dir.name) / "outside_escape"
+        ev = CircuitBreakerEvaluation(tripped=True, trigger="test", reason="test")
+
+        for bad_id in ("..", "../../outside_escape", "task/sub", "task.dot", "task-1\n"):
+            with self.subTest(bad_id=bad_id):
+                with self.assertRaises(ValueError):
+                    write_escalation_report(self.ws, bad_id, 1, ev, [])
+                with self.assertRaises(ValueError):
+                    append_issue_history(self.ws, bad_id, 1, "FAILED", [])
+                with self.assertRaises(ValueError):
+                    advance_gate_atomic(self.ws, "GATE_1", task_id=bad_id, attempt=1)
+
+                # run_start must reject invalid task_id before modifying ACTIVE_STATE.json
+                rc = run_start(workspace=self.ws, task=bad_id)
+                self.assertEqual(rc, 1)
+                self.assertNotEqual(load_active_state(self.ws).get("task_id"), bad_id)
+
+        self.assertFalse(outside_dir.exists())
+
+        # Schema itself must reject '..' and '.'
+        bad_state = load_active_state(self.ws)
+        bad_state["task_id"] = ".."
+        with self.assertRaises(SchemaValidationError):
+            validate_active_state(bad_state)
+
+        # Intermediate symlink at evidence/tasks escaping workspace must be rejected
+        tasks_dir = self.ws / "evidence" / "tasks"
+        outside_target = Path(self.temp_dir.name) / "symlink_target"
+        outside_target.mkdir(parents=True, exist_ok=True)
+        with controlled_write_transaction(self.ws / "evidence"):
+            if tasks_dir.exists():
+                shutil.rmtree(tasks_dir)
+            tasks_dir.symlink_to(outside_target)
+        with self.assertRaises(SymlinkPathEscapeError):
+            resolve_task_dir(self.ws, "task-safe")
+
 
 if __name__ == "__main__":
     unittest.main()

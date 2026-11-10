@@ -20,6 +20,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.gate_engine import normalize_phase
 from stagecheck.core.paths import find_workspace_root
 from stagecheck.core.state import load_active_state, save_active_state
@@ -121,7 +122,7 @@ def compute_turn_status(
     phase_raw = state.get("phase", "NOT_STARTED")
     phase = normalize_phase(phase_raw)
 
-    attempt_dir = root / "evidence" / "tasks" / resolved_task_id / f"attempt_{resolved_attempt}"
+    attempt_dir = resolve_task_attempt_dir(root, resolved_task_id, resolved_attempt)
     p1_dir = attempt_dir / "Phase-1"
     p2a_dir = attempt_dir / "Phase-2A"
     p2b_dir = attempt_dir / "Phase-2B"

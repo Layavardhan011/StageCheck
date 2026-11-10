@@ -12,7 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Union
 
-from stagecheck.core.paths import is_path_contained
+from stagecheck.core.paths import StageCheckPathError, is_path_contained, resolve_task_dir, safe_resolve
 from stagecheck.core.utils import AgentSlugError, validate_agent_slug
 
 
@@ -181,22 +181,17 @@ def resolve_task_attempt_dir(
         ValueError: If task_id or attempt are invalid.
         SecurityPathEscapeError: If the resolved path escapes the evidence tasks boundary.
     """
-    if not isinstance(task_id, str) or not _TASK_ID_REGEX.match(task_id):
-        raise ValueError(
-            f"Invalid task_id '{task_id}'. Must be alphanumeric with hyphens or underscores."
-        )
-
     if not isinstance(attempt, int) or attempt < 1:
         raise ValueError(f"Invalid attempt index {attempt}. Must be an integer >= 1.")
 
     root = Path(workspace_root).resolve()
-    tasks_root = (root / "evidence" / "tasks").resolve()
-    target_dir = (tasks_root / task_id / f"attempt_{attempt}").resolve()
-
-    if not is_path_contained(target_dir, tasks_root):
+    try:
+        resolve_task_dir(root, task_id)
+        target_dir = safe_resolve(f"evidence/tasks/{task_id}/attempt_{attempt}", root)
+    except StageCheckPathError as err:
         raise SecurityPathEscapeError(
-            f"Security violation: Task evidence path '{target_dir}' escapes '{tasks_root}'."
-        )
+            f"Security violation: Task evidence path escapes boundary: {err}"
+        ) from err
 
     if ensure_exists:
         target_dir.mkdir(parents=True, exist_ok=True)

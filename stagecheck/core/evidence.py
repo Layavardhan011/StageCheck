@@ -14,7 +14,8 @@ import stat
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from stagecheck.core.paths import find_workspace_root
+from stagecheck.core.agents import resolve_task_attempt_dir
+from stagecheck.core.paths import find_workspace_root, resolve_task_dir
 from stagecheck.core.permissions import controlled_write_transaction
 from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest, sha256_file
 
@@ -138,14 +139,7 @@ def verify_evidence_manifest(workspace_root: Path) -> Tuple[bool, List[str]]:
 
 def get_task_seal_path(workspace_root: Path, task_id: str, attempt: int) -> Path:
     """Return the authoritative path for a task attempt seal.json."""
-    return (
-        workspace_root
-        / "evidence"
-        / "tasks"
-        / task_id
-        / f"attempt_{attempt}"
-        / "seal.json"
-    )
+    return resolve_task_attempt_dir(workspace_root, task_id, attempt) / "seal.json"
 
 
 def create_task_seal(
@@ -162,14 +156,7 @@ def create_task_seal(
     binds the multi-repository commit vector (checked_heads), computes payload digests,
     and locks the seal into EVIDENCE_MANIFEST.json with mode 0444 (SEC-A5).
     """
-    attempt_dir = (
-        workspace_root
-        / "evidence"
-        / "tasks"
-        / task_id
-        / f"attempt_{attempt}"
-    )
-    attempt_dir.mkdir(parents=True, exist_ok=True)
+    attempt_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt, ensure_exists=True)
     seal_path = attempt_dir / "seal.json"
 
     # 1. Resolve prior attempt seal for chaining (attempt > 1)
@@ -250,7 +237,7 @@ def create_task_seal(
 
     # If final PASSED outcome, write master task seal at task root
     if outcome == "PASSED":
-        master_seal = workspace_root / "evidence" / "tasks" / task_id / "seal.json"
+        master_seal = resolve_task_dir(workspace_root, task_id) / "seal.json"
         with open(master_seal, "w", encoding="utf-8") as f:
             f.write(pretty_json_dumps(seal_data))
 
@@ -318,7 +305,7 @@ def append_issue_history(
     defects: List[Dict[str, Any]],
 ) -> Path:
     """Append verification results to cumulative TASK_<ID>_ISSUE_HISTORY.md ledger."""
-    task_dir = workspace_root / "evidence" / "tasks" / task_id
+    task_dir = resolve_task_dir(workspace_root, task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
     history_file = task_dir / f"TASK_{task_id}_ISSUE_HISTORY.md"
 

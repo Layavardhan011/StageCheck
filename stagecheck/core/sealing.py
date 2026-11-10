@@ -28,6 +28,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.paths import (
     PathOutsideBoundaryError,
     PathTraversalError,
@@ -245,7 +246,7 @@ def index_seal_in_manifest(
     manifest_file = ws / "evidence" / "EVIDENCE_MANIFEST.json"
     manifest_file.parent.mkdir(parents=True, exist_ok=True)
 
-    seal_file = ws / "evidence" / "tasks" / task_id / f"attempt_{attempt_index}" / "seal.json"
+    seal_file = resolve_task_attempt_dir(ws, task_id, attempt_index) / "seal.json"
     seal_bytes = seal_file.read_bytes()
     seal_sha256 = hashlib.sha256(seal_bytes).hexdigest()
 

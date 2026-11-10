@@ -18,8 +18,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from stagecheck.core.agents import resolve_task_attempt_dir
+from stagecheck.core.git import run_safe_git
 from stagecheck.core.locking import acquire_runtime_lock
-from stagecheck.core.paths import find_workspace_root
+from stagecheck.core.paths import find_workspace_root, resolve_task_dir
 from stagecheck.core.permissions import controlled_write_transaction
 from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps
 
@@ -62,7 +64,7 @@ def _get_defects_from_verdict(verdict_path: Path) -> Set[str]:
 
 def _detect_timeout_masking(workspace_root: Path, task_id: str, attempt: int) -> bool:
     """Detect if the only code modification made was increasing timeouts or sleep delays."""
-    attempt_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}"
+    attempt_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt)
     review_file = attempt_dir / "Phase-2A" / "pre_commit_review.json"
     if not review_file.is_file():
         return False
@@ -87,8 +89,7 @@ def _detect_timeout_masking(workspace_root: Path, task_id: str, attempt: int) ->
         if not base_head:
             continue
 
-        cmd = ["git", "-C", str(repo_dir), "diff", "-U0", f"{base_head}..HEAD"]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+        res = run_safe_git(repo_dir, ["diff", "-U0", f"{base_head}..HEAD"])
         if res.returncode != 0:
             continue
 
@@ -226,7 +227,7 @@ def write_escalation_report(
     defects: List[Dict[str, Any]],
 ) -> Path:
     """Generate diagnostic escalation_report.md under evidence/tasks/<task_id>/."""
-    task_dir = workspace_root / "evidence" / "tasks" / task_id
+    task_dir = resolve_task_dir(workspace_root, task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
     report_file = task_dir / "escalation_report.md"
 
@@ -304,21 +305,16 @@ def trip_circuit_breaker(
     report_path = write_escalation_report(workspace_root, task_id, attempt, evaluation, current_defects)
 
     # Optional desktop alert (non-failing)
-    if shutil.which("notify-send"):
-        try:
-            subprocess.run(
-                [
-                    "notify-send",
-                    "-u",
-                    "critical",
-                    "STAGECHECK CIRCUIT BREAKER TRIPPED",
-                    f"{task_id}: {evaluation.reason[:80]}...",
-                ],
-                capture_output=True,
-                check=False,
-            )
-        except Exception:
-            pass
+    try:
+        from stagecheck.core.sentinel import send_desktop_notification
+        send_desktop_notification(
+            title="STAGECHECK CIRCUIT BREAKER TRIPPED",
+            message=f"{task_id}: {evaluation.reason[:80]}...",
+            urgency="critical",
+            icon="dialog-error",
+        )
+    except Exception:
+        pass
 
     return report_path
 

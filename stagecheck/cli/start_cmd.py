@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from stagecheck.core.paths import find_workspace_root
+from stagecheck.core.paths import find_workspace_root, resolve_task_dir
 from stagecheck.core.permissions import controlled_write_transaction
 from stagecheck.core.state import load_active_state, save_active_state
 
@@ -30,6 +30,7 @@ def run_start(workspace: Optional[Path] = None, task: Optional[str] = None) -> i
         return 1
 
     try:
+        task_dir = resolve_task_dir(ws_root, task)
         with controlled_write_transaction(controls_dir):
             state = load_active_state(ws_root)
             state["task_id"] = task
@@ -42,7 +43,7 @@ def run_start(workspace: Optional[Path] = None, task: Optional[str] = None) -> i
             state.pop("status", None)
             save_active_state(ws_root, state)
 
-            task_phase1_dir = ws_root / f"evidence/tasks/{task}/attempt_1/Phase-1"
+            task_phase1_dir = task_dir / "attempt_1" / "Phase-1"
             task_phase1_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"SUCCESS: Task '{task}' started in attempt 1 (PHASE_1_PLANNING).")

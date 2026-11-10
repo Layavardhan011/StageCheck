@@ -22,6 +22,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
+from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.paths import find_workspace_root
 from stagecheck.core.state import load_active_state
 from stagecheck.core.utils import canonical_json_dumps, load_json_file
@@ -408,13 +409,8 @@ def run_rubric_evaluation(
         for r_dir in [d for d in repos_dir.iterdir() if d.is_dir()]:
             if (r_dir / ".git").is_dir():
                 try:
-                    import subprocess
-                    res = subprocess.run(
-                        ["git", "-C", str(r_dir), "status", "--porcelain"],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
+                    from stagecheck.core.git import run_safe_git
+                    res = run_safe_git(r_dir, ["status", "--porcelain"])
                     if res.returncode == 0 and res.stdout.strip():
                         uncommitted_diffs[r_dir.name] = res.stdout.strip()
                 except Exception:
@@ -491,7 +487,7 @@ def update_rubric_artifacts(
     task_id = rubric_payload["task_id"]
     attempt = rubric_payload["attempt"]
 
-    p2a_dir = root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-2A"
+    p2a_dir = resolve_task_attempt_dir(root, task_id, attempt) / "Phase-2A"
     p2a_dir.mkdir(parents=True, exist_ok=True)
 
     rubric_file = p2a_dir / "rubric_evaluation.json"

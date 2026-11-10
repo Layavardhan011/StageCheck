@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from stagecheck.checks.base import AuditContext, Defect, StageResult
+from stagecheck.core.agents import resolve_task_attempt_dir
+from stagecheck.core.paths import resolve_task_dir
 
 
 def run_stage9_carry_forward(ctx: AuditContext) -> StageResult:
@@ -35,7 +37,7 @@ def run_stage9_carry_forward(ctx: AuditContext) -> StageResult:
 
     # 2. For attempt > 1, verify prior attempt seal and ledger existence
     prior_attempt = ctx.attempt - 1
-    prior_dir = ctx.workspace_root / "evidence" / "tasks" / ctx.task_id / f"attempt_{prior_attempt}"
+    prior_dir = resolve_task_attempt_dir(ctx.workspace_root, ctx.task_id, prior_attempt)
     prior_seal_path = prior_dir / "seal.json"
 
     if not prior_dir.exists() or not prior_dir.is_dir():
@@ -87,7 +89,7 @@ def run_stage9_carry_forward(ctx: AuditContext) -> StageResult:
             )
 
     # 3. Check cumulative issue history ledger if present
-    issue_history_path = ctx.workspace_root / "evidence" / "tasks" / ctx.task_id / f"TASK_{ctx.task_id}_ISSUE_HISTORY.md"
+    issue_history_path = resolve_task_dir(ctx.workspace_root, ctx.task_id) / f"TASK_{ctx.task_id}_ISSUE_HISTORY.md"
     if not issue_history_path.is_file():
         # Check root or controls
         alt_history = ctx.workspace_root / f"TASK_{ctx.task_id}_ISSUE_HISTORY.md"

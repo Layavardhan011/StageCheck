@@ -122,6 +122,25 @@ class TestSentinel(unittest.TestCase):
         # Must execute without raising exception
         send_desktop_notification(title=malicious_title, message=malicious_msg)
 
+        # Verify option termination ('--'), html escaping, and urgency/icon sanitization
+        from unittest.mock import patch
+        with patch("stagecheck.core.sentinel.subprocess.run") as mock_run:
+            send_desktop_notification(
+                title="-leading-dash <b>title</b>",
+                message="--msg <script>x</script>",
+                urgency="--evil",
+                icon="-bad-icon",
+            )
+            self.assertTrue(mock_run.called)
+            cmd = mock_run.call_args[0][0]
+            self.assertEqual(cmd[0], "notify-send")
+            self.assertIn("--", cmd)
+            dash_idx = cmd.index("--")
+            self.assertEqual(cmd[cmd.index("--urgency") + 1], "normal")
+            self.assertEqual(cmd[cmd.index("--icon") + 1], "dialog-information")
+            self.assertEqual(cmd[dash_idx + 1], "-leading-dash &lt;b&gt;title&lt;/b&gt;")
+            self.assertEqual(cmd[dash_idx + 2], "--msg &lt;script&gt;x&lt;/script&gt;")
+
     def test_pid_lifecycle_and_stale_recovery(self) -> None:
         """Verify PID writing, reading, and automatic recovery of dead/stale PIDs."""
         sentinel = SentinelDaemon(self.workspace)

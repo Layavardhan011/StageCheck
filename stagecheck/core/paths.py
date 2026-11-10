@@ -7,6 +7,7 @@ operations, and traversal rejection to prevent symlink/TOCTOU vulnerabilities.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Optional, Union
 
@@ -224,4 +225,24 @@ def validate_attempt_root_symlinks(
 def to_portable_posix(path: Union[str, Path]) -> str:
     """Convert any filesystem path to a standard forward-slash POSIX relative string."""
     return Path(path).as_posix()
+
+
+TASK_ID_REGEX = re.compile(r"\A[a-zA-Z0-9_-]+\Z")
+
+
+def validate_task_id(task_id: str) -> str:
+    """Validate task_id against strict path-safe slug rules (no dots, slashes, or traversal)."""
+    if not isinstance(task_id, str) or not TASK_ID_REGEX.match(task_id):
+        raise ValueError(
+            f"Security policy violation [INVALID_TASK_ID]: task_id '{task_id}' is invalid. "
+            "Must contain only alphanumeric characters, dashes, and underscores."
+        )
+    return task_id
+
+
+def resolve_task_dir(workspace_root: Union[str, Path], task_id: str) -> Path:
+    """Validate task_id and resolve <workspace_root>/evidence/tasks/<task_id> safely."""
+    validate_task_id(task_id)
+    root = Path(workspace_root).resolve()
+    return safe_resolve(f"evidence/tasks/{task_id}", root)
 

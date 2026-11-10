@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from stagecheck.core.agents_md import write_agents_contract
 from stagecheck.core.evidence import update_evidence_manifest
 from stagecheck.core.locking import acquire_runtime_lock
-from stagecheck.core.paths import StageCheckPathError, find_workspace_root, safe_resolve
+from stagecheck.core.paths import StageCheckPathError, find_workspace_root, resolve_task_dir, validate_task_id
 from stagecheck.core.permissions import controlled_write_transaction
 from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_file
 
@@ -43,19 +43,18 @@ class UnauthorizedDispositionError(DispositionError):
 
 def _validate_task_id(task_id: str) -> None:
     """Validate task identifier against strict path-safe slug rules."""
-    if not isinstance(task_id, str) or not _TASK_ID_REGEX.match(task_id):
-        raise DispositionError(
-            f"Security policy violation [INVALID_TASK_ID]: task_id '{task_id}' is invalid. "
-            "Task IDs must consist strictly of alphanumeric characters, dashes, and underscores."
-        )
+    try:
+        validate_task_id(task_id)
+    except ValueError as err:
+        raise DispositionError(str(err)) from err
 
 
 def _resolve_task_evidence_dir(workspace_root: Path, task_id: str) -> Path:
     """Validate task_id and safely resolve its directory inside evidence/tasks/."""
-    _validate_task_id(task_id)
-    tasks_root = (workspace_root / "evidence" / "tasks").resolve()
     try:
-        return safe_resolve(task_id, tasks_root)
+        return resolve_task_dir(workspace_root, task_id)
+    except ValueError as err:
+        raise DispositionError(str(err)) from err
     except StageCheckPathError as err:
         raise DispositionError(f"Security policy violation [PATH_CONTAINMENT]: {err}") from err
 
@@ -188,21 +187,15 @@ def add_disposition(
     update_evidence_manifest(workspace_root, [history_file])
 
     # 6. Optional desktop alert (non-failing)
-    if shutil.which("notify-send"):
-        try:
-            subprocess.run(
-                [
-                    "notify-send",
-                    "-u",
-                    "normal",
-                    "STAGECHECK DISPOSITION RECORDED",
-                    f"Waiver granted for {defect_id} by {authorized_by}",
-                ],
-                capture_output=True,
-                check=False,
-            )
-        except Exception:
-            pass
+    try:
+        from stagecheck.core.sentinel import send_desktop_notification
+        send_desktop_notification(
+            title="STAGECHECK DISPOSITION RECORDED",
+            message=f"Waiver granted for {defect_id} by {authorized_by}",
+            urgency="normal",
+        )
+    except Exception:
+        pass
 
     return new_entry
 

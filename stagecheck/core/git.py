@@ -70,8 +70,23 @@ SAFE_GIT_SECURITY_FLAGS: List[str] = [
 ]
 
 
-def _run_git_cmd(repo_path: Path, args: List[str]) -> subprocess.CompletedProcess[str]:
-    """Execute a read-only git command in the target repository directory."""
+def run_safe_git(
+    repo_path: Path,
+    args: List[str],
+    check: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Execute a hardened read-only git command in the target repository directory.
+
+    Prepends SAFE_GIT_SECURITY_FLAGS, enforces --no-ext-diff and --no-textconv
+    on diff subcommands, strips GIT_* environment variables, and neutralizes
+    system/global git configuration.
+    """
+    effective_args = list(args)
+    if effective_args and effective_args[0] == "diff":
+        for flag in ("--no-textconv", "--no-ext-diff"):
+            if flag not in effective_args:
+                effective_args.insert(1, flag)
+
     # Enforce safe read-only environment without leaking tokens
     clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     clean_env.update(
@@ -84,14 +99,21 @@ def _run_git_cmd(repo_path: Path, args: List[str]) -> subprocess.CompletedProces
             "GIT_CONFIG_COUNT": "0",
         }
     )
-    cmd = ["git", *SAFE_GIT_SECURITY_FLAGS, "-C", str(repo_path), *args]
+    cmd = ["git", *SAFE_GIT_SECURITY_FLAGS, "-C", str(repo_path), *effective_args]
     return subprocess.run(
         cmd,
         capture_output=True,
         text=True,
-        check=False,
+        encoding="utf-8",
+        errors="replace",
+        check=check,
         env=clean_env,
     )
+
+
+def _run_git_cmd(repo_path: Path, args: List[str]) -> subprocess.CompletedProcess[str]:
+    """Backward-compatible alias for run_safe_git."""
+    return run_safe_git(repo_path, args, check=False)
 
 
 def discover_repository(

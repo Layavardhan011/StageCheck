@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
-from stagecheck.core.git import SAFE_GIT_SECURITY_FLAGS
+from stagecheck.core.git import SAFE_GIT_SECURITY_FLAGS, run_safe_git
+from stagecheck.core.paths import resolve_task_dir
 from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest, validate_schema
 from stagecheck.schemas import get_schema_path
 
@@ -93,11 +94,9 @@ def inspect_untracked_files(repo_path: Path) -> Tuple[List[str], int, int]:
             "Wait for active git operation to finish or resolve stale lock."
         )
 
-    res = subprocess.run(
-        ["git", "-C", str(repo_path), "ls-files", "--others", "--exclude-standard"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+    res = run_safe_git(
+        repo_path,
+        ["ls-files", "--others", "--exclude-standard"],
         check=True,
     )
     untracked = [line.strip() for line in res.stdout.splitlines() if line.strip()]
@@ -158,22 +157,12 @@ def verify_precommit_scope(
         modified_files: Set[str] = set()
 
         if base_commit:
-            res_tracked = subprocess.run(
-                ["git", "-C", str(repo_path), "diff", "--name-only", base_commit],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            res_tracked = run_safe_git(repo_path, ["diff", "--name-only", base_commit])
             for f in res_tracked.stdout.splitlines():
                 if f.strip():
                     modified_files.add(f.strip())
 
-        res_untracked = subprocess.run(
-            ["git", "-C", str(repo_path), "ls-files", "--others", "--exclude-standard"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        res_untracked = run_safe_git(repo_path, ["ls-files", "--others", "--exclude-standard"])
         for f in res_untracked.stdout.splitlines():
             if f.strip():
                 modified_files.add(f.strip())
@@ -320,7 +309,7 @@ def append_to_cumulative_issue_history(
     new_issues: List[Dict[str, Any]],
 ) -> None:
     """Append newly discovered defects to cumulative TASK_<ID>_ISSUE_HISTORY.md."""
-    task_dir = workspace_root / "evidence" / "tasks" / task_id
+    task_dir = resolve_task_dir(workspace_root, task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
     history_file = task_dir / f"{task_id.upper()}_ISSUE_HISTORY.md"
 

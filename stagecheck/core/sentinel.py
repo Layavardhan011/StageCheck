@@ -105,6 +105,9 @@ PRUNE_DIR_NAMES = {
 }
 
 
+_ALLOWED_URGENCY = {"low", "normal", "critical"}
+
+
 def send_desktop_notification(
     title: str,
     message: str,
@@ -113,17 +116,21 @@ def send_desktop_notification(
 ) -> None:
     """Send native Linux desktop notification via notify-send.
 
-    Escapes HTML/D-Bus markup to prevent Pango injection vulnerabilities (SEC-H1).
+    Escapes HTML/D-Bus markup to prevent Pango injection vulnerabilities (SEC-H1)
+    and terminates CLI options with '--'.
     Fails silently if notify-send or desktop environment is absent.
     """
+    safe_urgency = urgency if urgency in _ALLOWED_URGENCY else "normal"
+    safe_icon = icon if isinstance(icon, str) and not icon.startswith("-") else "dialog-information"
     safe_title = html.escape(str(title), quote=True)
     safe_message = html.escape(str(message), quote=True)
 
     cmd = [
         "notify-send",
-        "--urgency", urgency,
-        "--icon", icon,
+        "--urgency", safe_urgency,
+        "--icon", safe_icon,
         "--app-name", "StageCheck Sentinel",
+        "--",
         safe_title,
         safe_message,
     ]

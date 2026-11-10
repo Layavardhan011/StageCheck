@@ -26,11 +26,13 @@ from stagecheck.checks import (
     run_stage8_rerun,
     run_stage9_carry_forward,
 )
+from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.evidence import (
     append_issue_history,
     update_evidence_manifest,
 )
-from stagecheck.core.paths import find_workspace_root
+from stagecheck.core.git import run_safe_git
+from stagecheck.core.paths import find_workspace_root, resolve_task_dir
 from stagecheck.core.utils import (
     canonical_json_dumps,
     pretty_json_dumps,
@@ -92,14 +94,7 @@ class AuditOrchestrator:
             repo_path = self.workspace_root / rel_p
             if (repo_path / ".git").exists():
                 try:
-                    import subprocess
-                    head_res = subprocess.run(
-                        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        check=False,
-                    )
+                    head_res = run_safe_git(repo_path, ["rev-parse", "HEAD"])
                     if head_res.returncode == 0:
                         target_commits[name] = head_res.stdout.strip()
                 except Exception:
@@ -109,14 +104,7 @@ class AuditOrchestrator:
         if not all_registered and (self.workspace_root / ".git").exists():
             all_registered = ["root"]
             try:
-                import subprocess
-                head_res = subprocess.run(
-                    ["git", "-C", str(self.workspace_root), "rev-parse", "HEAD"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    check=False,
-                )
+                head_res = run_safe_git(self.workspace_root, ["rev-parse", "HEAD"])
                 if head_res.returncode == 0:
                     target_commits["root"] = head_res.stdout.strip()
                     base_commits["root"] = target_commits["root"]
@@ -136,14 +124,7 @@ class AuditOrchestrator:
             else:
                 # Also check working tree changes
                 try:
-                    import subprocess
-                    diff_res = subprocess.run(
-                        ["git", "-C", str(repo_path), "status", "--porcelain=v1"],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        check=False,
-                    )
+                    diff_res = run_safe_git(repo_path, ["status", "--porcelain=v1"])
                     if diff_res.stdout.strip():
                         touched.append(name)
                 except Exception:
@@ -152,15 +133,8 @@ class AuditOrchestrator:
             touched = list(all_registered)
 
         # 3. Claims
-        claims_path = (
-            self.workspace_root
-            / "evidence"
-            / "tasks"
-            / resolved_task_id
-            / f"attempt_{resolved_attempt}"
-            / "Phase-2B"
-            / "claims.json"
-        )
+        attempt_dir = resolve_task_attempt_dir(self.workspace_root, resolved_task_id, resolved_attempt)
+        claims_path = attempt_dir / "Phase-2B" / "claims.json"
         if not claims_path.is_file():
             claims_path = self.workspace_root / "claims.json"
         claims = _load_optional_json(claims_path)
@@ -170,15 +144,7 @@ class AuditOrchestrator:
         dispositions = disp_doc.get("dispositions", [])
 
         # 5. Declared Scope
-        scope_path = (
-            self.workspace_root
-            / "evidence"
-            / "tasks"
-            / resolved_task_id
-            / f"attempt_{resolved_attempt}"
-            / "Phase-1"
-            / "declared_scope.json"
-        )
+        scope_path = attempt_dir / "Phase-1" / "declared_scope.json"
         if not scope_path.is_file():
             scope_path = self.workspace_root / "controls" / "declared_scope.json"
         if not scope_path.is_file():
@@ -383,14 +349,7 @@ class AuditOrchestrator:
         }
 
         # Write Phase-3 directory artifacts
-        phase3_dir = (
-            self.workspace_root
-            / "evidence"
-            / "tasks"
-            / ctx.task_id
-            / f"attempt_{ctx.attempt}"
-            / "Phase-3"
-        )
+        phase3_dir = resolve_task_attempt_dir(self.workspace_root, ctx.task_id, ctx.attempt) / "Phase-3"
         phase3_dir.mkdir(parents=True, exist_ok=True)
 
         # 1. verdict.json
@@ -433,7 +392,7 @@ class AuditOrchestrator:
         rubric_path.write_text(pretty_json_dumps(rubric_payload), encoding="utf-8")
 
         # Also write task root verdict.json for high-level tools
-        task_root_dir = self.workspace_root / "evidence" / "tasks" / ctx.task_id
+        task_root_dir = resolve_task_dir(self.workspace_root, ctx.task_id)
         task_root_dir.mkdir(parents=True, exist_ok=True)
         with open(task_root_dir / "verdict.json", "w", encoding="utf-8") as f:
             f.write(pretty_json_dumps(verdict_data))

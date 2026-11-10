@@ -18,6 +18,7 @@ from stagecheck.core.git import (
     _run_git_cmd,
     discover_multi_repositories,
     discover_repository,
+    run_safe_git,
 )
 
 
@@ -191,6 +192,34 @@ class TestGitDiscovery(unittest.TestCase):
             self.assertIn("--binary", called_cmd)
             self.assertIn("--no-ext-diff", called_cmd)
             self.assertIn("--no-textconv", called_cmd)
+
+    def test_run_safe_git_blocks_fsmonitor_and_ext_diff(self) -> None:
+        """Verify run_safe_git prevents local core.fsmonitor and diff.external execution (SC-SEC-07)."""
+        repo_path = self.workspace / "repos" / "fsmonitor-repo"
+        self._init_git_repo(repo_path, initial_commit=True)
+
+        marker = self.workspace / "fsmonitor_marker"
+        diff_marker = self.workspace / "extdiff_marker"
+        subprocess.run(
+            ["git", "config", "core.fsmonitor", f"touch {marker} && false"],
+            cwd=str(repo_path), check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "diff.external", f"touch {diff_marker} && false"],
+            cwd=str(repo_path), check=True, capture_output=True,
+        )
+
+        # Modify tracked file so git diff and git status exercise diff/status paths
+        (repo_path / "README.md").write_text("# Modified\n", encoding="utf-8")
+
+        res_status = run_safe_git(repo_path, ["status", "--porcelain"])
+        self.assertEqual(res_status.returncode, 0)
+        self.assertIn("README.md", res_status.stdout)
+        self.assertFalse(marker.exists(), "run_safe_git must neutralize core.fsmonitor")
+
+        res_diff = run_safe_git(repo_path, ["diff"])
+        self.assertEqual(res_diff.returncode, 0)
+        self.assertFalse(diff_marker.exists(), "run_safe_git must neutralize diff.external")
 
 
 if __name__ == "__main__":

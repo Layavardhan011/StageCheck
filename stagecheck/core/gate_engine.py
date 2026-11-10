@@ -14,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.cooperative_review import (
     CommitDivergenceError,
     verify_committed_diff_fidelity,
@@ -225,7 +226,7 @@ def evaluate_gate_1_criteria(
     2. declared_scope.json exists, valid schema, discrete non-wildcard paths.
     3. prompt_verified.json exists and binds verified hash.
     """
-    p1_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-1"
+    p1_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt) / "Phase-1"
     criteria: List[GateCriterion] = []
     deliverables: List[Dict[str, str]] = []
 
@@ -346,7 +347,7 @@ def evaluate_gate_2a_criteria(
     1. pre_commit_status.json submitted by Agent 2 with status AWAITING_REVIEW.
     2. pre_commit_review.json generated with status APPROVED.
     """
-    p2a_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-2A"
+    p2a_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt) / "Phase-2A"
     criteria: List[GateCriterion] = []
     deliverables: List[Dict[str, str]] = []
 
@@ -434,8 +435,8 @@ def evaluate_gate_2b_criteria(
     6. Git remotes comply with authorized whitelist endpoints (approved_remote).
     7. Agent 2 zero remote push policy verified.
     """
-    p2a_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-2A"
-    p2b_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-2B"
+    p2a_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt) / "Phase-2A"
+    p2b_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt) / "Phase-2B"
     criteria: List[GateCriterion] = []
     deliverables: List[Dict[str, str]] = []
 
@@ -673,7 +674,7 @@ def evaluate_gate_3_criteria(
     1. Phase-3/verdict.json exists.
     2. verdict.json status is PASSED or CLEAR (0 blocking defects).
     """
-    p3_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}" / "Phase-3"
+    p3_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt) / "Phase-3"
     criteria: List[GateCriterion] = []
     deliverables: List[Dict[str, str]] = []
 
@@ -742,7 +743,7 @@ def evaluate_gate_4_criteria(
     criteria: List[GateCriterion] = []
     deliverables: List[Dict[str, str]] = []
 
-    attempt_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}"
+    attempt_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt)
     state = load_active_state(workspace_root)
     cleared_gates = state.get("cleared_gates", {})
 
@@ -929,7 +930,7 @@ def get_gate_receipt_path(
     attempt: int,
 ) -> Path:
     """Return canonical path where the gate receipt is stored."""
-    attempt_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}"
+    attempt_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt)
     mapping = {
         GateId.GATE_1: attempt_dir / "Phase-1" / "gate1_receipt.json",
         GateId.GATE_2A: attempt_dir / "Phase-2A" / "gate2a_receipt.json",
@@ -1006,7 +1007,7 @@ def advance_gate_atomic(
         resolved_task_id = str(task_id or state.get("task_id", "task-default"))
         resolved_attempt = int(attempt or state.get("attempt_index", 1))
 
-        attempt_dir = root / "evidence" / "tasks" / resolved_task_id / f"attempt_{resolved_attempt}"
+        attempt_dir = resolve_task_attempt_dir(root, resolved_task_id, resolved_attempt)
         receipt_path = get_gate_receipt_path(root, gate_id, resolved_task_id, resolved_attempt)
         seal_path = attempt_dir / "seal.json"
 
@@ -1192,7 +1193,7 @@ def advance_gate_atomic(
             update_evidence_manifest(root, [receipt_path])
 
             # Freeze completed phase directory per Table 10 (defense-in-depth immutability)
-            attempt_dir = root / "evidence" / "tasks" / resolved_task_id / f"attempt_{resolved_attempt}"
+            attempt_dir = resolve_task_attempt_dir(root, resolved_task_id, resolved_attempt)
             if gate_id == GateId.GATE_1:
                 freeze_phase_directory(attempt_dir / "Phase-1")
             elif gate_id == GateId.GATE_2A:
@@ -1270,7 +1271,7 @@ def verify_gate_receipts(
         verified_gates.append(gate_name)
 
     # 2. Check for unregistered gate receipt files on disk in attempt directory
-    attempt_dir = root / "evidence" / "tasks" / resolved_task_id / f"attempt_{resolved_attempt}"
+    attempt_dir = resolve_task_attempt_dir(root, resolved_task_id, resolved_attempt)
     if attempt_dir.is_dir():
         for f in attempt_dir.rglob("*receipt*.json"):
             if f.is_file():
@@ -1349,7 +1350,7 @@ def handle_audit_verdict(
             save_active_state(root, state)
 
         # Initialize next attempt Phase-1 directory
-        next_phase1 = root / "evidence" / "tasks" / task_id / f"attempt_{next_attempt}" / "Phase-1"
+        next_phase1 = resolve_task_attempt_dir(root, task_id, next_attempt) / "Phase-1"
         next_phase1.mkdir(parents=True, exist_ok=True)
 
         return {

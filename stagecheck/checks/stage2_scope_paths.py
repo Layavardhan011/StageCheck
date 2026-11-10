@@ -18,6 +18,7 @@ from stagecheck.core.branch_governance import (
     BranchGovernanceError,
     verify_multi_repo_governance,
 )
+from stagecheck.core.git import run_safe_git
 from stagecheck.core.paths import is_path_contained
 from stagecheck.core.prompt_gate import is_path_in_scope
 
@@ -65,8 +66,7 @@ def run_stage2_scope_paths(ctx: AuditContext) -> StageResult:
 
             # A. Check committed changes
             if base_commit and (repo_path / ".git").exists():
-                cmd = ["git", "-C", str(repo_path), "diff", "--name-only", f"{base_commit}..{target_commit}"]
-                res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                res = run_safe_git(repo_path, ["diff", "--name-only", f"{base_commit}..{target_commit}"])
                 if res.returncode == 0:
                     for f in res.stdout.splitlines():
                         if f.strip():
@@ -74,8 +74,7 @@ def run_stage2_scope_paths(ctx: AuditContext) -> StageResult:
 
             # B. Check working-tree uncommitted changes and untracked files
             if (repo_path / ".git").exists():
-                status_cmd = ["git", "-C", str(repo_path), "status", "--porcelain=v1", "--untracked-files=all"]
-                status_res = subprocess.run(status_cmd, capture_output=True, text=True, check=False)
+                status_res = run_safe_git(repo_path, ["status", "--porcelain=v1", "--untracked-files=all"])
                 if status_res.returncode == 0:
                     for line in status_res.stdout.splitlines():
                         if line.strip():
