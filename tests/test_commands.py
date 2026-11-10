@@ -324,6 +324,51 @@ class TestSecureCommandRunner(unittest.TestCase):
             with self.subTest(legit_cmd=cmd):
                 validate_command_security(cmd)
 
+    def test_untrusted_binary_path_rejected_in_execute_secure_command(self) -> None:
+        """Verify executing binaries located inside working directory or repos/ fails closed (SEC-B3 / SC-SEC-06)."""
+        evil_bin = self.repo_dir / "python3"
+        evil_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        evil_bin.chmod(0o755)
+
+        # Prepend repo_dir to PATH so shutil.which would find evil_bin
+        dirty_env = {"PATH": f"{self.repo_dir}:{os.environ.get('PATH', '')}"}
+        with self.assertRaises(ForbiddenCommandFlagError) as ctx:
+            execute_secure_command(
+                argv=["python3", "-m", "unittest"],
+                working_directory=self.repo_dir,
+                extra_env=dirty_env,
+                check_tree_integrity=False,
+            )
+        self.assertEqual(ctx.exception.exit_code, 126)
+        self.assertIn("UNTRUSTED_BINARY_PATH", str(ctx.exception))
+
+    def test_git_environment_variables_purged(self) -> None:
+        """Verify git environment controls (GIT_CONFIG, GIT_DIR, GIT_WORK_TREE) are purged."""
+        for var in ("GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_DIR", "GIT_WORK_TREE", "GIT_ASKPASS"):
+            os.environ[var] = "/etc/malicious"
+        try:
+            clean = build_sanitized_environment({"SAFE_FLAG": "1"})
+            for var in ("GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_DIR", "GIT_WORK_TREE", "GIT_ASKPASS"):
+                self.assertNotIn(var, clean)
+        finally:
+            for var in ("GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_DIR", "GIT_WORK_TREE", "GIT_ASKPASS"):
+                os.environ.pop(var, None)
+
+    def test_disallowed_runner_flags_comprehensive(self) -> None:
+        """Verify --override-ini, -exec, --config, and --prefix are blocked across toolchains."""
+        disallowed = [
+            ["pytest", "-o", "python_files=evil*.py"],
+            ["pytest", "--override-ini", "python_files=evil*.py"],
+            ["go", "test", "-exec", "/bin/sh", "./..."],
+            ["cargo", "test", "--config", "build.rustc-wrapper='evil'"],
+            ["npx", "--no-install", "test", "--prefix", "/evil"],
+        ]
+        for cmd in disallowed:
+            with self.subTest(cmd=cmd):
+                with self.assertRaises(ForbiddenCommandFlagError) as ctx:
+                    validate_command_security(cmd)
+                self.assertEqual(ctx.exception.exit_code, 126)
+
 
 if __name__ == "__main__":
     unittest.main()

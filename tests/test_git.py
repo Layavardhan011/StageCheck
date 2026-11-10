@@ -10,6 +10,7 @@ from pathlib import Path
 
 from stagecheck.core.git import (
     DirtyRepositoryError,
+    GitError,
     NotAGitRepositoryError,
     RepoBaseline,
     RepositoryNotFoundError,
@@ -220,6 +221,37 @@ class TestGitDiscovery(unittest.TestCase):
         res_diff = run_safe_git(repo_path, ["diff"])
         self.assertEqual(res_diff.returncode, 0)
         self.assertFalse(diff_marker.exists(), "run_safe_git must neutralize diff.external")
+
+    def test_assert_safe_repo_git_config_detects_malicious_keys(self) -> None:
+        """Verify assert_safe_repo_git_config fails closed on dangerous git config sections (SC-SEC-07)."""
+        from stagecheck.core.git import assert_safe_repo_git_config
+
+        dangerous_configs = [
+            ("filter \"evil\"", "clean", "evil-clean %f"),
+            ("filter \"evil\"", "smudge", "evil-smudge %f"),
+            ("diff \"evil\"", "command", "/bin/sh -c evil"),
+            ("merge \"evil\"", "driver", "/bin/sh -c evil"),
+            ("core", "sshCommand", "evil-ssh"),
+            ("credential", "helper", "evil-credential-helper"),
+            ("alias", "status", "!evil-cmd"),
+            ("remote \"origin\"", "uploadpack", "evil-uploadpack"),
+        ]
+
+        for section, key, val in dangerous_configs:
+            with self.subTest(section=section, key=key):
+                test_repo = self.workspace / "repos" / f"danger-{key}"
+                self._init_git_repo(test_repo, initial_commit=True)
+                cfg_path = test_repo / ".git" / "config"
+                with cfg_path.open("a", encoding="utf-8") as f:
+                    f.write(f"\n[{section}]\n    {key} = {val}\n")
+
+                with self.assertRaises(GitError) as ctx:
+                    assert_safe_repo_git_config(test_repo)
+                self.assertIn("UNSAFE_GIT_CONFIG", str(ctx.exception))
+
+                # run_safe_git must also fail closed
+                with self.assertRaises(GitError):
+                    run_safe_git(test_repo, ["status", "--porcelain"])
 
 
 if __name__ == "__main__":
