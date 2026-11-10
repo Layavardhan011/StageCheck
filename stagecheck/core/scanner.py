@@ -100,18 +100,24 @@ class SecretScanner:
         )
 
     @classmethod
-    def resolve_config_flags(cls, repo_dir: Path) -> List[str]:
-        """Locate authoritative Gitleaks config to prevent rule overrides (SEC-03)."""
-        candidate = repo_dir.parent.parent / "config" / ".gitleaks.toml"
-        if candidate.is_file():
-            return [f"--config={candidate}"]
-        root_candidate = Path("config/.gitleaks.toml").resolve()
-        if root_candidate.is_file():
-            return [f"--config={root_candidate}"]
+    def resolve_config_flags(cls, repo_dir: Optional[Path] = None) -> List[str]:
+        """Locate authoritative packaged Gitleaks config and fail closed if absent (SEC-03)."""
         pkg_candidate = Path(__file__).resolve().parent.parent / "config" / ".gitleaks.toml"
         if pkg_candidate.is_file():
             return [f"--config={pkg_candidate}"]
-        return []
+
+        try:
+            from stagecheck.core.portability import resolve_asset_path
+            pkg_root = Path(__file__).resolve().parents[2]
+            asset_path = resolve_asset_path("config/.gitleaks.toml", fallback_root=pkg_root)
+            if asset_path.is_file():
+                return [f"--config={asset_path}"]
+        except Exception:
+            pass
+
+        raise FileNotFoundError(
+            f"Authoritative packaged Gitleaks config missing at '{pkg_candidate}'. Failing closed."
+        )
 
     def resolve_binary(self) -> Optional[str]:
         """Resolve path to the scanner executable."""
@@ -295,7 +301,23 @@ class SecretScanner:
             return ScanExecutionResult(is_clear=False, defects=mapped_defects, status=status)
 
         binary = self.resolve_binary()
-        config_flags = self.resolve_config_flags(repo_dir)
+        try:
+            config_flags = self.resolve_config_flags(repo_dir)
+        except FileNotFoundError as err:
+            return ScanExecutionResult(
+                is_clear=False,
+                defects=[
+                    Defect(
+                        defect_id="secrets.config_missing",
+                        message=str(err),
+                        stage=stage,
+                        severity="CRITICAL",
+                        blocking=True,
+                        repo=repo_name,
+                    )
+                ],
+                status=ScannerStatus.SCANNER_ERROR,
+            )
         cmd = [
             binary,
             "detect",
@@ -445,7 +467,23 @@ class SecretScanner:
             return ScanExecutionResult(is_clear=False, defects=mapped_defects, status=status)
 
         binary = self.resolve_binary()
-        config_flags = self.resolve_config_flags(repo_dir)
+        try:
+            config_flags = self.resolve_config_flags(repo_dir)
+        except FileNotFoundError as err:
+            return ScanExecutionResult(
+                is_clear=False,
+                defects=[
+                    Defect(
+                        defect_id="pre_commit.scanner_config_missing",
+                        message=str(err),
+                        stage="pre_commit",
+                        severity="CRITICAL",
+                        blocking=True,
+                        repo=repo_name,
+                    )
+                ],
+                status=ScannerStatus.SCANNER_ERROR,
+            )
         cmd = [
             binary,
             "protect",

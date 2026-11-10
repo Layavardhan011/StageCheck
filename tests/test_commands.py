@@ -288,6 +288,42 @@ class TestSecureCommandRunner(unittest.TestCase):
         self.assertIsNone(resolve_runner_category("bash"))
         self.assertIsNone(resolve_runner_category("python2"))
 
+    def test_attached_bundled_and_negated_flag_bypasses_blocked(self) -> None:
+        """Verify attached/bundled short options, attached -m, and negated flags are rejected (SC-SEC-08)."""
+        bypass_cmds = [
+            ["python3", "-cprint(123)"],
+            ["python3", "-Icprint(123)"],
+            ["python3", "-mhttp.server"],
+            ["python3", "-Impip", "list"],
+            ["pytest", "-c/tmp/evil.ini"],
+            ["pytest", "-vc/tmp/evil.ini"],
+            ["pytest", "-ojunit_family=xunit2"],
+            ["pytest", "-peval"],
+            ["go", "test", "--exec=/bin/sh", "./..."],
+            ["npm", "test", "--ignore-scripts", "--ignore-scripts=false"],
+            ["npm", "test", "--ignore-scripts", "--no-ignore-scripts"],
+            ["npm", "test", "--ignore-scripts", "--foreground-scripts"],
+            ["npx", "pytest", "--no-install", "--no-install=false"],
+            ["npx", "pytest", "--no-install", "--yes"],
+            ["npx", "pytest", "--no-install", "-vy"],
+        ]
+        for cmd in bypass_cmds:
+            with self.subTest(cmd=cmd):
+                with self.assertRaises(ForbiddenCommandFlagError) as ctx:
+                    validate_command_security(cmd)
+                self.assertEqual(ctx.exception.exit_code, 126)
+
+        # Legitimate value-taking short flags & post-script args must still pass without false positives
+        legit_cmds = [
+            ["python3", "-Wonce", "-m", "unittest", "discover"],
+            ["pytest", "-ktest_copy", "tests/"],
+            ["python3", "tests/runner.py", "-c", "app_config_arg"],
+            ["npm", "test", "--ignore-scripts", "--", "-t", "AuthTest"],
+        ]
+        for cmd in legit_cmds:
+            with self.subTest(legit_cmd=cmd):
+                validate_command_security(cmd)
+
 
 if __name__ == "__main__":
     unittest.main()

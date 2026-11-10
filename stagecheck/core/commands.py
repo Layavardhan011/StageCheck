@@ -168,6 +168,86 @@ PROHIBITED_FLAGS: Dict[str, Set[str]] = {
     "cargo": {"--config", "--runner"},
 }
 
+# Short options per runner whose remainder in the same argv token is a value, not bundled flags
+_VALUE_TAKING_SHORT_OPTS: Dict[str, Set[str]] = {
+    "python": {"m", "W", "X", "Q"},
+    "pytest": {"k", "m", "W", "r", "n"},
+}
+
+_PROHIBITED_SHORT_FLAGS: Dict[str, Set[str]] = {
+    "python": {"c", "e"},
+    "pytest": {"c", "o", "p"},
+}
+
+
+def _check_python_args(args: List[str]) -> None:
+    """Inspect Python interpreter options before script/module entrypoint."""
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--" or arg == "-" or not arg.startswith("-"):
+            # Reached script filename or end-of-options; interpreter flag parsing stops here
+            break
+
+        if arg.startswith("--"):
+            flag = arg.split("=")[0].strip()
+            if flag in PROHIBITED_FLAGS["python"]:
+                raise ForbiddenCommandFlagError(
+                    f"Security policy violation [FORBIDDEN_FLAG]: Flag '{flag}' is prohibited for runner 'python'.",
+                    exit_code=126,
+                )
+            i += 1
+            continue
+
+        # Single-dash short option(s), possibly bundled or with attached value
+        chars = arg[1:]
+        consumed_next = False
+        for idx, ch in enumerate(chars):
+            if ch in _PROHIBITED_SHORT_FLAGS["python"]:
+                raise ForbiddenCommandFlagError(
+                    f"Security policy violation [FORBIDDEN_FLAG]: Flag '-{ch}' is prohibited for runner 'python'.",
+                    exit_code=126,
+                )
+            if ch == "m":
+                raw_mod = chars[idx + 1 :]
+                if not raw_mod:
+                    if i + 1 >= len(args):
+                        break
+                    raw_mod = args[i + 1]
+                    consumed_next = True
+                mod_lower = raw_mod.lower()
+                root_mod = mod_lower.split(".")[0]
+                if mod_lower in FORBIDDEN_PYTHON_MODULES or root_mod in FORBIDDEN_PYTHON_MODULES:
+                    raise ForbiddenCommandFlagError(
+                        f"Security policy violation [FORBIDDEN_MODULE]: Execution of module '{raw_mod}' is prohibited.",
+                        exit_code=126,
+                    )
+                # -m <module> terminates interpreter option parsing; remainder of argv goes to module
+                return
+            if ch in _VALUE_TAKING_SHORT_OPTS["python"]:
+                if idx + 1 == len(chars):
+                    consumed_next = True
+                break
+
+        i += 2 if consumed_next else 1
+
+
+def _check_short_bundle(runner: str, arg: str) -> None:
+    """Validate single-dash short options and bundles against _PROHIBITED_SHORT_FLAGS."""
+    prohibited_short = _PROHIBITED_SHORT_FLAGS.get(runner)
+    if not prohibited_short:
+        return
+    value_opts = _VALUE_TAKING_SHORT_OPTS.get(runner, set())
+    for ch in arg[1:]:
+        if ch in prohibited_short:
+            raise ForbiddenCommandFlagError(
+                f"Security policy violation [FORBIDDEN_FLAG]: Flag '-{ch}' is prohibited for runner '{runner}'.",
+                exit_code=126,
+            )
+        if ch in value_opts:
+            # Rest of this token is the option's argument value, not further flags
+            break
+
 
 def resolve_runner_category(binary_name: str) -> Optional[str]:
     """Resolve binary name to authorized runner category, supporting versioned variants."""
@@ -248,35 +328,49 @@ def validate_command_security(argv: List[str], cwd: Optional[Path] = None) -> No
         )
 
     args = argv[1:]
+    sep_idx = args.index("--") if "--" in args else len(args)
+    runner_args = args[:sep_idx]
+
     if runner == "python":
-        for i, arg in enumerate(args):
-            if arg == "-m" and i + 1 < len(args):
-                raw_mod = args[i + 1].lower()
-                root_mod = raw_mod.split(".")[0]
-                if raw_mod in FORBIDDEN_PYTHON_MODULES or root_mod in FORBIDDEN_PYTHON_MODULES:
-                    raise ForbiddenCommandFlagError(
-                        f"Security policy violation [FORBIDDEN_MODULE]: Execution of module '{args[i + 1]}' is prohibited.",
-                        exit_code=126,
-                    )
+        _check_python_args(args)
     elif runner == "npx":
-        if "--no-install" not in args:
+        if "--no-install" not in runner_args:
             raise ForbiddenCommandFlagError(
                 "Security policy violation [NPX_REMOTE_INSTALL]: npx must be invoked with '--no-install'.",
                 exit_code=126,
             )
-        subcmd = next((a for a in args if not a.startswith("-")), None)
+        for arg in runner_args:
+            base = arg.split("=")[0].strip()
+            if base in {"--install", "--yes", "-y"} or arg.startswith("--no-install="):
+                raise ForbiddenCommandFlagError(
+                    f"Security policy violation [NPX_REMOTE_INSTALL]: Conflicting/install flag '{arg}' is prohibited.",
+                    exit_code=126,
+                )
+            if arg.startswith("-") and not arg.startswith("--") and "y" in arg[1:]:
+                raise ForbiddenCommandFlagError(
+                    f"Security policy violation [NPX_REMOTE_INSTALL]: Conflicting short flag '{arg}' is prohibited.",
+                    exit_code=126,
+                )
+        subcmd = next((a for a in runner_args if not a.startswith("-")), None)
         if subcmd and subcmd.lower() not in AUTHORIZED_SUBCOMMANDS["npx"]:
             raise ForbiddenCommandFlagError(
                 f"Security policy violation [UNAUTHORIZED_SUBCOMMAND]: Subcommand '{subcmd}' is prohibited for npx.",
                 exit_code=126,
             )
     elif runner == "npm":
-        if "--ignore-scripts" not in args:
+        if "--ignore-scripts" not in runner_args:
             raise ForbiddenCommandFlagError(
                 "Security policy violation [NPM_LIFECYCLE_SCRIPTS]: npm test/run must include '--ignore-scripts'.",
                 exit_code=126,
             )
-        subcmd = next((a for a in args if not a.startswith("-")), None)
+        for arg in runner_args:
+            base = arg.split("=")[0].strip()
+            if arg.startswith("--ignore-scripts=") or base in {"--no-ignore-scripts", "--foreground-scripts"}:
+                raise ForbiddenCommandFlagError(
+                    f"Security policy violation [NPM_LIFECYCLE_SCRIPTS]: Lifecycle override flag '{arg}' is prohibited.",
+                    exit_code=126,
+                )
+        subcmd = next((a for a in runner_args if not a.startswith("-")), None)
         if not subcmd or subcmd.lower() not in AUTHORIZED_SUBCOMMANDS["npm"]:
             raise ForbiddenCommandFlagError(
                 f"Security policy violation [UNAUTHORIZED_SUBCOMMAND]: Subcommand '{subcmd}' is prohibited for npm.",
@@ -286,8 +380,8 @@ def validate_command_security(argv: List[str], cwd: Optional[Path] = None) -> No
         # Enforce script target allowlist and validate against package.json
         target_script = "test"
         if subcmd == "run":
-            run_index = args.index("run")
-            positional_after_run = [a for a in args[run_index + 1 :] if not a.startswith("-")]
+            run_index = runner_args.index("run")
+            positional_after_run = [a for a in runner_args[run_index + 1 :] if not a.startswith("-")]
             if not positional_after_run:
                 raise ForbiddenCommandFlagError(
                     "Security policy violation [MISSING_SCRIPT_TARGET]: 'npm run' requires a target script.",
@@ -310,22 +404,28 @@ def validate_command_security(argv: List[str], cwd: Optional[Path] = None) -> No
 
     elif runner in AUTHORIZED_SUBCOMMANDS:
         allowed = AUTHORIZED_SUBCOMMANDS[runner]
-        subcmd = next((a for a in args if not a.startswith("-")), None)
+        subcmd = next((a for a in runner_args if not a.startswith("-")), None)
         if subcmd and subcmd.lower() not in allowed:
             raise ForbiddenCommandFlagError(
                 f"Security policy violation [UNAUTHORIZED_SUBCOMMAND]: Subcommand '{subcmd}' is prohibited for '{runner}'.",
                 exit_code=126,
             )
 
-    # Prohibited flags check
-    prohibited = PROHIBITED_FLAGS.get(runner, set())
-    for arg in args:
-        flag = arg.split("=")[0].strip()
-        if flag in prohibited:
-            raise ForbiddenCommandFlagError(
-                f"Security policy violation [FORBIDDEN_FLAG]: Flag '{flag}' is prohibited for runner '{runner}'.",
-                exit_code=126,
-            )
+    # Prohibited flags check across all arguments for non-python runners
+    # (Python interpreter flags stop at script/-m and are checked by _check_python_args)
+    if runner != "python":
+        prohibited = PROHIBITED_FLAGS.get(runner, set())
+        for arg in args:
+            flag = arg.split("=")[0].strip()
+            if runner == "go" and flag.startswith("--"):
+                flag = "-" + flag[2:]
+            if flag in prohibited:
+                raise ForbiddenCommandFlagError(
+                    f"Security policy violation [FORBIDDEN_FLAG]: Flag '{flag}' is prohibited for runner '{runner}'.",
+                    exit_code=126,
+                )
+            if arg.startswith("-") and not arg.startswith("--") and len(arg) > 1:
+                _check_short_bundle(runner, arg)
 
 
 def capture_git_status_porcelain(repo_path: Union[str, Path]) -> str:
