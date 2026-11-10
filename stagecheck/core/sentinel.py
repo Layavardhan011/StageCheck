@@ -818,7 +818,7 @@ class SentinelDaemon:
 
         ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
         safe_rel = _sanitize_log_field(rel_path)
-        entry = json.dumps({"ts": ts, "tier": tier, "label": str(label), "path": safe_rel}) + "\n"
+        entry = f"[{ts}] [Tier {tier}] [{label}] {safe_rel}\n"
         try:
             flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
             fd = os.open(str(self.log_file), flags, 0o644)
