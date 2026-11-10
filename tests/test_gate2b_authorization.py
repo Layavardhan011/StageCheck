@@ -147,6 +147,8 @@ class TestGate2BAuthorization(unittest.TestCase):
             "task_id": self.task_id,
             "attempt": self.attempt,
             "cycle": 1,
+            "status": "AWAITING_REVIEW",
+            "touched_repositories": ["payment-service"],
             "base_commits": {"payment-service": self.base_commit},
             "summary": "Implementation ready for review",
         }

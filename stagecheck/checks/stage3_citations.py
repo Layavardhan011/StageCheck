@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from stagecheck.checks.base import AuditContext, Defect, StageResult
+from stagecheck.core.paths import StageCheckPathError, safe_resolve
 
 MAX_CITATION_FILE_SIZE = 20 * 1024 * 1024  # 20 MiB
 
@@ -28,19 +29,29 @@ def run_stage3_citations(ctx: AuditContext) -> StageResult:
             cite_type = cite.get("type")
             if cite_type in ("file", "document", "code"):
                 file_rel = cite.get("path") or cite.get("file")
-                lines = cite.get("lines", [])
+                lines = cite.get("lines")
                 expected_quote = cite.get("quote")
 
-                if not file_rel:
-                    continue
-
-                target_file = (ctx.workspace_root / file_rel).resolve()
-                # Security: verify canonical path is within workspace_root and not symlink
-                if not target_file.is_relative_to(ctx.workspace_root.resolve()):
+                if not isinstance(file_rel, str) or not file_rel.strip() or Path(file_rel).is_absolute():
                     defects.append(
                         Defect(
                             defect_id="citations.path_escaped",
-                            message=f"Cited path '{file_rel}' escapes workspace root",
+                            message=f"Cited path '{file_rel}' must be a non-empty workspace-relative string.",
+                            stage=stage_id,
+                            severity="CRITICAL",
+                            blocking=True,
+                            citation=cite,
+                        )
+                    )
+                    continue
+
+                try:
+                    target_file = safe_resolve(file_rel, ctx.workspace_root, allow_symlinks=False)
+                except StageCheckPathError as err:
+                    defects.append(
+                        Defect(
+                            defect_id="citations.path_escaped",
+                            message=f"Cited path '{file_rel}' escapes workspace root or traverses symlink: {err}",
                             stage=stage_id,
                             severity="CRITICAL",
                             blocking=True,
@@ -79,10 +90,37 @@ def run_stage3_citations(ctx: AuditContext) -> StageResult:
                         continue
                 except Exception as err:
                     errors.append(f"Failed to check size of '{file_rel}': {err}")
+                    defects.append(
+                        Defect(
+                            defect_id="citations.unreadable_file",
+                            message=f"Failed to stat cited file '{file_rel}': {err}",
+                            stage=stage_id,
+                            severity="HIGH",
+                            blocking=True,
+                            citation=cite,
+                        )
+                    )
                     continue
 
-                # Content line inspection
-                if lines and isinstance(lines, list) and len(lines) >= 2:
+                # Content line inspection (validate shape whenever lines or quote is present)
+                if lines is not None or expected_quote is not None:
+                    if (
+                        not isinstance(lines, list)
+                        or len(lines) != 2
+                        or any(not isinstance(v, int) or isinstance(v, bool) for v in lines)
+                    ):
+                        defects.append(
+                            Defect(
+                                defect_id="citations.invalid_citation",
+                                message=f"Invalid line range {lines!r} for '{file_rel}'. Must be [start, end] integers.",
+                                stage=stage_id,
+                                severity="HIGH",
+                                blocking=True,
+                                citation=cite,
+                            )
+                        )
+                        continue
+
                     try:
                         content_lines = target_file.read_text(encoding="utf-8", errors="ignore").splitlines()
                         start_line = lines[0]
@@ -103,16 +141,20 @@ def run_stage3_citations(ctx: AuditContext) -> StageResult:
                                     citation=cite,
                                 )
                             )
-                        elif expected_quote:
-                            # Verify snippet quote content
+                        elif expected_quote is not None:
                             actual_slice = "\n".join(content_lines[start_line - 1 : end_line])
-                            if expected_quote.strip() not in actual_slice and actual_slice.strip() not in expected_quote:
+                            if (
+                                not isinstance(expected_quote, str)
+                                or not expected_quote.strip()
+                                or not actual_slice.strip()
+                                or expected_quote.strip() not in actual_slice
+                            ):
                                 defects.append(
                                     Defect(
                                         defect_id="citations.content_mismatch",
                                         message=(
                                             f"Content cited in '{file_rel}#L{start_line}-L{end_line}' does not match "
-                                            f"actual file content in working tree."
+                                            f"actual non-empty file content in working tree."
                                         ),
                                         stage=stage_id,
                                         severity="HIGH",
@@ -122,6 +164,16 @@ def run_stage3_citations(ctx: AuditContext) -> StageResult:
                                 )
                     except Exception as err:
                         errors.append(f"Failed to read cited file '{file_rel}': {err}")
+                        defects.append(
+                            Defect(
+                                defect_id="citations.unreadable_file",
+                                message=f"Failed to read cited file '{file_rel}': {err}",
+                                stage=stage_id,
+                                severity="HIGH",
+                                blocking=True,
+                                citation=cite,
+                            )
+                        )
 
-    status = "FAIL" if any(d.blocking for d in defects) else "CLEAR"
+    status = "FAIL" if (errors or any(d.blocking for d in defects)) else "CLEAR"
     return StageResult(stage_id=stage_id, status=status, defects=defects, errors=errors)

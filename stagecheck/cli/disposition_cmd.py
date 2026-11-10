@@ -102,6 +102,21 @@ def run_disposition(
         return 1
 
     norm_action = action.lower()
+    if norm_action in ("abort", "retry") and not yes:
+        if not sys.stdin.isatty():
+            print(
+                f"ERROR: [disposition.non_interactive_blocked] Action '{norm_action}' requires an "
+                "interactive terminal or explicit human confirmation (--yes).",
+                file=sys.stderr,
+            )
+            return 1
+        choice = input(
+            f"\nConfirm disposition action '{norm_action}' on task '{task}'? [YES/NO] (Default: NO): "
+        ).strip().upper()
+        if choice not in ("YES", "Y"):
+            print("Disposition action cancelled by operator.", file=sys.stderr)
+            return 1
+
     if norm_action in ("waive", "accept_as_intentional", "waive_temporary", "not_applicable"):
         if not defect:
             print("ERROR: [disposition.missing_defect] Defect code (--defect) is required for waiver action.", file=sys.stderr)
@@ -138,15 +153,29 @@ def run_disposition(
             return 1
 
     if norm_action == "abort":
+        from stagecheck.core.locking import acquire_runtime_lock
+        from stagecheck.core.paths import validate_task_id
         from stagecheck.core.permissions import controlled_write_transaction
         from stagecheck.core.state import load_active_state, save_active_state
+        try:
+            validate_task_id(task)
+        except ValueError as err:
+            print(f"ERROR: [disposition.invalid_task] {err}", file=sys.stderr)
+            return 1
         controls_dir = workspace_root / "controls"
-        with controlled_write_transaction(controls_dir):
+        with acquire_runtime_lock(controls_dir):
             state = load_active_state(workspace_root)
-            state["phase"] = "ABORTED"
-            state["status"] = "FAILED_EXHAUSTED"
-            state["turn"] = "IDLE"
-            save_active_state(workspace_root, state)
+            if state.get("task_id") != task:
+                print(
+                    f"ERROR: [disposition.task_mismatch] Active task is '{state.get('task_id')}', not '{task}'.",
+                    file=sys.stderr,
+                )
+                return 1
+            with controlled_write_transaction(controls_dir):
+                state["phase"] = "ABORTED"
+                state["status"] = "FAILED_EXHAUSTED"
+                state["turn"] = "IDLE"
+                save_active_state(workspace_root, state)
         print(f"SUCCESS: Task '{task}' aborted by operator.")
         return 0
 

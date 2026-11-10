@@ -71,7 +71,19 @@ def run_stage1_preflight(ctx: AuditContext) -> StageResult:
     # 3. Assert Specification Manifest Baseline Invariants (FR-08 / Spec 05 / DEC-008)
     specs_dir = ctx.workspace_root / "specs"
     if specs_dir.is_dir():
-        spec_res = verify_spec_manifest(ctx.workspace_root)
+        try:
+            spec_res = verify_spec_manifest(ctx.workspace_root)
+        except Exception as err:
+            defects.append(
+                Defect(
+                    defect_id="preflight.spec_manifest_tampered",
+                    message=f"Specification manifest security/verification error: {err}",
+                    stage=stage_id,
+                    severity="CRITICAL",
+                    blocking=True,
+                )
+            )
+            spec_res = {"valid": True}
         if not spec_res.get("valid", False):
             if "START_MANIFEST.md" in spec_res.get("missing", []):
                 defects.append(
@@ -109,7 +121,7 @@ def run_stage1_preflight(ctx: AuditContext) -> StageResult:
         repo_dir = ctx.workspace_root / "repos" / repo_name
         if repo_dir.is_dir():
             for p in repo_dir.rglob("*"):
-                if p.is_file() and not any(part.startswith(".") for part in p.parts):
+                if p.is_file() and not any(part.startswith(".") for part in p.relative_to(repo_dir).parts):
                     try:
                         text = p.read_text(encoding="utf-8", errors="ignore")
                         if _PLACEHOLDER_PATTERN.search(text):

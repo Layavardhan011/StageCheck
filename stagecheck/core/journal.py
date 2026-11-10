@@ -15,8 +15,10 @@ Guarantees:
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import os
+import stat
 import sys
 import uuid
 from contextlib import contextmanager, suppress
@@ -25,7 +27,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
-from stagecheck.core.permissions import elevate_permissions_for_teardown
+from stagecheck.core.locking import LockCollisionError, acquire_runtime_lock
+from stagecheck.core.paths import StageCheckPathError, safe_resolve
+from stagecheck.core.permissions import (
+    apply_at_rest_permissions,
+    elevate_permissions_for_teardown,
+)
 
 
 class JournalError(Exception):
@@ -98,20 +105,43 @@ class TransactionJournal:
         }
         self.journal_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
+    def _validated_rel_path(self, target_path: Union[str, Path]) -> Tuple[Path, str]:
+        """Resolve target_path strictly inside workspace_root without following symlinks."""
+        try:
+            resolved = safe_resolve(target_path, self.workspace_root, allow_symlinks=False)
+            rel_path = resolved.relative_to(self.workspace_root).as_posix()
+        except (StageCheckPathError, ValueError) as err:
+            raise JournalError(f"Invalid journal target path '{target_path}': {err}") from err
+        if not rel_path or rel_path == ".":
+            raise JournalError(f"Invalid journal target path '{target_path}'.")
+        return resolved, rel_path
+
     def record_pre_image(self, target_path: Union[str, Path]) -> None:
         """Record pre-image snapshot of a target file before modification."""
-        p = Path(target_path).resolve()
-        try:
-            rel_path = p.relative_to(self.workspace_root).as_posix()
-        except ValueError:
-            rel_path = str(p)
+        p, rel_path = self._validated_rel_path(target_path)
 
         if rel_path in self.pre_images:
             return  # Already recorded initial state for this file
 
-        if p.is_file():
-            raw_bytes = p.read_bytes()
-            mode = p.stat().st_mode & 0o777
+        try:
+            lst = os.lstat(str(p))
+        except FileNotFoundError:
+            self.pre_images[rel_path] = None
+            self.pre_modes[rel_path] = 0o644
+            self.pre_encodings[rel_path] = "utf-8"
+        else:
+            if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
+                raise JournalError(
+                    f"Journal target '{rel_path}' must be a regular non-symlink file."
+                )
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(str(p), flags)
+            try:
+                with os.fdopen(fd, "rb") as stream:
+                    raw_bytes = stream.read()
+                mode = (lst.st_mode & 0o777) & 0o644
+            except Exception:
+                raise
             try:
                 content = raw_bytes.decode("utf-8")
                 encoding = "utf-8"
@@ -121,20 +151,12 @@ class TransactionJournal:
             self.pre_images[rel_path] = content
             self.pre_modes[rel_path] = mode
             self.pre_encodings[rel_path] = encoding
-        else:
-            self.pre_images[rel_path] = None
-            self.pre_modes[rel_path] = 0o644
-            self.pre_encodings[rel_path] = "utf-8"
 
         self._flush_journal()
 
     def record_staged_write(self, target_path: Union[str, Path]) -> None:
         """Record that a target path has been written to as part of this transaction."""
-        p = Path(target_path).resolve()
-        try:
-            rel_path = p.relative_to(self.workspace_root).as_posix()
-        except ValueError:
-            rel_path = str(p)
+        _, rel_path = self._validated_rel_path(target_path)
 
         if rel_path not in self.staged_paths:
             self.staged_paths.append(rel_path)
@@ -200,42 +222,82 @@ def _restore_pre_images(
     pre_encodings: Dict[str, str],
 ) -> Tuple[List[str], List[str]]:
     """Restore recorded file pre-images (UTF-8 or Base64) and unlink newly created files."""
+    ws_root = Path(workspace_root).resolve()
     restored: List[str] = []
     removed: List[str] = []
 
     for rel_path, content in reversed(list(pre_images.items())):
-        full_path = workspace_root / rel_path
-        mode = pre_modes.get(rel_path, 0o644)
+        if not isinstance(rel_path, str) or not rel_path or Path(rel_path).is_absolute():
+            raise JournalError(f"Refusing non-relative journal path during rollback: '{rel_path}'.")
+        try:
+            full_path = safe_resolve(rel_path, ws_root, allow_symlinks=False)
+            canonical_rel = full_path.relative_to(ws_root).as_posix()
+        except (StageCheckPathError, ValueError) as err:
+            raise JournalError(
+                f"Refusing unsafe journal path '{rel_path}' outside workspace: {err}"
+            ) from err
+        if not canonical_rel or canonical_rel == ".":
+            raise JournalError(f"Refusing invalid journal path '{rel_path}'.")
+
+        raw_mode = pre_modes.get(rel_path, 0o644)
+        if isinstance(raw_mode, bool) or not isinstance(raw_mode, int):
+            raise JournalError(f"Invalid pre_mode '{raw_mode}' for journal path '{rel_path}'.")
+        mode = raw_mode & 0o644
         encoding = pre_encodings.get(rel_path, "utf-8")
 
-        # Ensure parent directories are writable for rollback
+        # Ensure workspace-contained parent directories are writable for rollback
         curr = full_path.parent
-        while curr != workspace_root and curr != curr.parent:
+        while curr != ws_root and curr != curr.parent and curr.is_relative_to(ws_root):
+            if os.path.islink(curr):
+                raise JournalError(f"Symlink ancestor '{curr}' rejected during journal rollback.")
             if curr.exists():
                 with suppress(OSError):
                     os.chmod(curr, 0o755)
             curr = curr.parent
 
         if content is None:
-            # File did not exist prior to transaction -> remove it
-            if full_path.exists() or os.path.islink(full_path):
+            # File did not exist prior to transaction -> remove regular file (never follow symlinks)
+            try:
+                lst = os.lstat(str(full_path))
+            except FileNotFoundError:
+                lst = None
+            if lst is not None:
+                if stat.S_ISLNK(lst.st_mode) or stat.S_ISDIR(lst.st_mode):
+                    raise JournalError(
+                        f"Refusing to unlink symlink or directory '{rel_path}' during rollback."
+                    )
                 with suppress(OSError):
                     os.chmod(full_path, 0o644)
                 full_path.unlink(missing_ok=True)
-                removed.append(rel_path)
+                removed.append(canonical_rel)
         else:
-            # File existed -> restore original content and mode
+            # File existed -> restore original content and clamped mode via O_NOFOLLOW
             full_path.parent.mkdir(parents=True, exist_ok=True)
-            if full_path.exists():
+            try:
+                lst = os.lstat(str(full_path))
+            except FileNotFoundError:
+                lst = None
+            if lst is not None:
+                if stat.S_ISLNK(lst.st_mode) or stat.S_ISDIR(lst.st_mode):
+                    raise JournalError(
+                        f"Refusing to overwrite symlink or directory '{rel_path}' during rollback."
+                    )
                 with suppress(OSError):
                     os.chmod(full_path, 0o644)
-            if encoding == "base64":
-                full_path.write_bytes(base64.b64decode(content.encode("ascii")))
-            else:
-                full_path.write_text(content, encoding="utf-8")
+
+            payload = base64.b64decode(content.encode("ascii")) if encoding == "base64" else content.encode("utf-8")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                fd = os.open(str(full_path), flags, 0o644)
+            except OSError as err:
+                if err.errno == errno.ELOOP:
+                    raise JournalError(f"Symlink detected opening '{rel_path}' during rollback.") from err
+                raise
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(payload)
             with suppress(OSError):
                 os.chmod(full_path, mode)
-            restored.append(rel_path)
+            restored.append(canonical_rel)
 
     return restored, removed
 
@@ -276,44 +338,64 @@ def recover_interrupted_transactions(
     """
     ws = Path(workspace_root).resolve()
     journal_dir = ws / ".stagecheck_journal"
-    if not journal_dir.is_dir():
+    if not journal_dir.is_dir() or journal_dir.is_symlink():
         return []
 
     records: List[RecoveryRecord] = []
+    try:
+        with acquire_runtime_lock(ws):
+            active_items = sorted(journal_dir.glob("*.active.json"))
+            if not active_items:
+                return []
 
-    for item in sorted(journal_dir.glob("*.active.json")):
-        try:
-            raw_text = item.read_text(encoding="utf-8")
-            data = json.loads(raw_text)
-        except Exception as err:
-            # Corrupted journal record
-            if verbose:
-                print(f"[RECOVERY] WARNING: Unreadable active journal record '{item.name}': {err}", file=sys.stderr)
-            item.unlink(missing_ok=True)
-            continue
+            processed_any = False
+            for item in active_items:
+                if item.is_symlink():
+                    raise JournalError(f"Symlink journal record '{item.name}' rejected.")
+                try:
+                    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                    fd = os.open(str(item), flags)
+                    with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                        data = json.load(stream)
+                except Exception as err:
+                    # Corrupted journal record
+                    if verbose:
+                        print(f"[RECOVERY] WARNING: Unreadable active journal record '{item.name}': {err}", file=sys.stderr)
+                    item.unlink(missing_ok=True)
+                    continue
 
-        txn_id = data.get("txn_id", item.stem)
-        operation = data.get("operation", "UNKNOWN")
-        pre_images = data.get("pre_images", {})
-        pre_modes = data.get("pre_modes", {})
-        pre_encodings = data.get("pre_encodings", {})
+                if not isinstance(data, dict):
+                    item.unlink(missing_ok=True)
+                    continue
 
-        restored, removed = _restore_pre_images(ws, pre_images, pre_modes, pre_encodings)
+                txn_id = data.get("txn_id", item.stem)
+                operation = data.get("operation", "UNKNOWN")
+                pre_images = data.get("pre_images", {})
+                pre_modes = data.get("pre_modes", {})
+                pre_encodings = data.get("pre_encodings", {})
 
-        item.unlink(missing_ok=True)
+                restored, removed = _restore_pre_images(ws, pre_images, pre_modes, pre_encodings)
+                processed_any = True
 
-        rec = RecoveryRecord(
-            txn_id=txn_id,
-            operation=operation,
-            files_restored=restored,
-            files_removed=removed,
-            status="RECOVERED",
-            message=f"Cleaned interrupted transaction '{txn_id}' (operation: {operation}). Restored {len(restored)} files, removed {len(removed)} files.",
-        )
-        records.append(rec)
+                item.unlink(missing_ok=True)
 
-        if verbose:
-            print(f"[RECOVERY] {rec.message}")
+                rec = RecoveryRecord(
+                    txn_id=txn_id,
+                    operation=operation,
+                    files_restored=restored,
+                    files_removed=removed,
+                    status="RECOVERED",
+                    message=f"Cleaned interrupted transaction '{txn_id}' (operation: {operation}). Restored {len(restored)} files, removed {len(removed)} files.",
+                )
+                records.append(rec)
+
+                if verbose:
+                    print(f"[RECOVERY] {rec.message}")
+
+            if processed_any:
+                apply_at_rest_permissions(ws)
+    except LockCollisionError:
+        return []
 
     return records
 

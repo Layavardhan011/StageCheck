@@ -140,6 +140,14 @@ def send_desktop_notification(
         pass
 
 
+def _sanitize_log_field(value: str) -> str:
+    """Escape ASCII control characters so inotify filenames cannot inject fake log lines."""
+    return "".join(
+        ch if ord(ch) >= 0x20 and ord(ch) != 0x7F else f"\\x{ord(ch):02x}"
+        for ch in value
+    )
+
+
 def _is_path_in_scope(rel_path: str, declared_scope: Dict[str, Any]) -> bool:
     """Internal lightweight scope evaluator."""
     norm = rel_path.strip().replace("\\", "/")
@@ -151,6 +159,12 @@ def _is_path_in_scope(rel_path: str, declared_scope: Dict[str, Any]) -> bool:
     for allow in declared_scope.get("allowed_paths", []):
         allow_norm = allow.strip().replace("\\", "/")
         prefix = allow_norm.rstrip("/*")
+        if prefix == "repos":
+            continue
+        if allow_norm.startswith("repos/"):
+            parts = allow_norm.split("/")
+            if len(parts) < 3 or any(ch in parts[1] for ch in ("*", "?", "[")):
+                continue
         if norm == allow_norm or (prefix and (norm == prefix or norm.startswith(prefix + "/"))) or fnmatch(norm, allow_norm):
             return True
     return False
@@ -767,22 +781,55 @@ class SentinelDaemon:
                 tier, label = classify_event_path(self.root, rel_path)
                 self._log_event(rel_path, tier, label)
 
+    _MAX_LOG_BYTES = 512 * 1024
+    _ROTATE_KEEP_BYTES = 256 * 1024
+
+    def _rotate_log_if_needed(self) -> None:
+        """Rotate evidence/sentinel.log in-place when exceeding _MAX_LOG_BYTES."""
+        try:
+            if not self.log_file.exists() or self.log_file.is_symlink():
+                return
+            size = self.log_file.stat().st_size
+            if size < self._MAX_LOG_BYTES:
+                return
+            with self.log_file.open("rb") as f:
+                f.seek(max(0, size - self._ROTATE_KEEP_BYTES), os.SEEK_SET)
+                tail = f.read()
+            if b"\n" in tail:
+                tail = tail.split(b"\n", 1)[1]
+            flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(str(self.log_file), flags)
+            try:
+                os.write(fd, tail)
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
+
     def _log_event(self, rel_path: str, tier: int, label: str) -> None:
         """Append event to sentinel.log and update watchdog activity for relevant paths (FR-05 / DEC-027)."""
         if tier == 2 or rel_path.endswith("sentinel.log") or rel_path.endswith(".stagecheck_sentinel.pid"):
             return  # Silently drop Tier 2 and internal daemon log/pid files
 
+        if self.log_file.is_symlink():
+            return
+
+        self._rotate_log_if_needed()
+
         ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        entry = f"[{ts}] [Tier {tier}] [{label}] {rel_path}\n"
+        safe_rel = _sanitize_log_field(rel_path)
+        entry = json.dumps({"ts": ts, "tier": tier, "label": str(label), "path": safe_rel}) + "\n"
         try:
-            with self.log_file.open("a", encoding="utf-8") as f:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(str(self.log_file), flags, 0o644)
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
                 f.write(entry)
         except OSError:
             pass
 
         # Relevant path filtering (FR-05 / Issue 4)
         from stagecheck.core.supervisor import is_relevant_sentinel_path
-        if is_relevant_sentinel_path(rel_path):
+        if safe_rel == rel_path and is_relevant_sentinel_path(rel_path):
             self.last_activity_monotonic = time.monotonic()
 
 

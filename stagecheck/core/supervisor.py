@@ -49,7 +49,11 @@ def is_relevant_sentinel_path(rel_path: str) -> bool:
     Only events under product repositories or active phase evidence directories
     count as valid agent activity. Unrelated directories do NOT reset watchdog.
     """
-    norm = rel_path.replace("\\", "/").strip()
+    if not isinstance(rel_path, str):
+        return False
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in rel_path):
+        return False
+    norm = rel_path.strip()
     if norm.startswith(RELEVANT_PATH_PREFIXES):
         return True
     if any(sub in norm for sub in RELEVANT_PATH_SUBSTRINGS):
@@ -57,28 +61,75 @@ def is_relevant_sentinel_path(rel_path: str) -> bool:
     return False
 
 
-def get_last_relevant_filesystem_timestamp(workspace_root: Path) -> Optional[datetime.datetime]:
-    """Scan evidence/sentinel.log from end to find most recent relevant activity timestamp."""
+def get_last_relevant_filesystem_timestamp(
+    workspace_root: Path,
+    max_scan_bytes: int = 1024 * 1024,
+) -> Optional[datetime.datetime]:
+    """Scan evidence/sentinel.log backwards from EOF in bounded chunks to find most recent relevant timestamp."""
     log_file = workspace_root / "evidence" / "sentinel.log"
-    if not log_file.is_file():
+    if not log_file.is_file() or log_file.is_symlink():
         return None
+    chunk_size = 65536
+    now_ref = datetime.datetime.now(datetime.timezone.utc)
     try:
-        content = log_file.read_text(encoding="utf-8", errors="replace")
-        lines = content.splitlines()
-        for line in reversed(lines):
-            line = line.strip()
-            if not line:
-                continue
-            # Format: [2026-11-06T12:00:00+00:00] [Tier 1] [MODIFIED] repos/core/app.py
-            parts = line.split("] ", 3)
-            if len(parts) >= 4:
-                ts_str = parts[0].lstrip("[")
-                rel_path = parts[3].strip()
-                if is_relevant_sentinel_path(rel_path):
-                    try:
-                        return datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                    except Exception:
-                        pass
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(log_file), flags)
+        with os.fdopen(fd, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            file_size = f.tell()
+            pos = file_size
+            scanned = 0
+            remainder = b""
+
+            while pos > 0 and scanned < max_scan_bytes:
+                read_len = min(chunk_size, pos, max_scan_bytes - scanned)
+                pos -= read_len
+                f.seek(pos, os.SEEK_SET)
+                buf = f.read(read_len) + remainder
+                scanned += read_len
+
+                if pos > 0 and b"\n" in buf:
+                    remainder, block = buf.split(b"\n", 1)
+                else:
+                    remainder, block = b"", buf
+
+                lines = block.decode("utf-8", errors="replace").splitlines()
+                for line in reversed(lines):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in line):
+                        continue
+
+                    ts_str: Optional[str] = None
+                    rel_path: Optional[str] = None
+                    if line.startswith("{"):
+                        try:
+                            obj = json.loads(line)
+                            if isinstance(obj, dict):
+                                ts_val = obj.get("ts")
+                                path_val = obj.get("path")
+                                if isinstance(ts_val, str) and isinstance(path_val, str):
+                                    ts_str = ts_val
+                                    rel_path = path_val
+                        except Exception:
+                            continue
+                    else:
+                        # Legacy Format: [2026-11-06T12:00:00+00:00] [Tier 1] [MODIFIED] repos/core/app.py
+                        parts = line.split("] ", 3)
+                        if len(parts) >= 4:
+                            ts_str = parts[0].lstrip("[")
+                            rel_path = parts[3].strip()
+
+                    if ts_str and rel_path and is_relevant_sentinel_path(rel_path):
+                        try:
+                            parsed = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                            if parsed.tzinfo is None:
+                                parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+                            if parsed <= now_ref:
+                                return parsed
+                        except Exception:
+                            pass
     except Exception:
         pass
     return None

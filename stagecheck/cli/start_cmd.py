@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from stagecheck.core.locking import acquire_runtime_lock
 from stagecheck.core.paths import find_workspace_root, resolve_task_dir
 from stagecheck.core.permissions import controlled_write_transaction
 from stagecheck.core.state import load_active_state, save_active_state
@@ -31,20 +32,42 @@ def run_start(workspace: Optional[Path] = None, task: Optional[str] = None) -> i
 
     try:
         task_dir = resolve_task_dir(ws_root, task)
-        with controlled_write_transaction(controls_dir):
+        with acquire_runtime_lock(controls_dir):
             state = load_active_state(ws_root)
-            state["task_id"] = task
-            state["phase"] = "PHASE_1_PLANNING"
-            state["attempt_index"] = 1
-            state["repair_index"] = 0
-            state["circuit_breaker_tripped"] = False
-            state.pop("attempt", None)
-            state.pop("current_task", None)
-            state.pop("status", None)
-            save_active_state(ws_root, state)
+            phase = str(state.get("phase", "NOT_STARTED"))
+            if state.get("circuit_breaker_tripped") or phase not in (
+                "NOT_STARTED",
+                "UNINITIALIZED",
+                "IDLE",
+                "COMPLETED",
+                "SEALED_PASSED",
+                "ABORTED",
+            ):
+                raise RuntimeError(
+                    f"Cannot start '{task}': workspace is in phase '{phase}' "
+                    f"(circuit_breaker_tripped={state.get('circuit_breaker_tripped')})."
+                )
+            if (
+                state.get("task_id") == task
+                and (int(state.get("attempt_index", 1)) >= 3 or phase == "SEALED_PASSED")
+            ) or (task_dir / "attempt_3").exists():
+                raise RuntimeError(
+                    f"Attempt budget exhausted or task already sealed for '{task}'."
+                )
 
-            task_phase1_dir = task_dir / "attempt_1" / "Phase-1"
-            task_phase1_dir.mkdir(parents=True, exist_ok=True)
+            with controlled_write_transaction(controls_dir):
+                state["task_id"] = task
+                state["phase"] = "PHASE_1_PLANNING"
+                state["attempt_index"] = 1
+                state["repair_index"] = 0
+                state["circuit_breaker_tripped"] = False
+                state.pop("attempt", None)
+                state.pop("current_task", None)
+                state.pop("status", None)
+                save_active_state(ws_root, state)
+
+                task_phase1_dir = task_dir / "attempt_1" / "Phase-1"
+                task_phase1_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"SUCCESS: Task '{task}' started in attempt 1 (PHASE_1_PLANNING).")
         return 0

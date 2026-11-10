@@ -6,9 +6,12 @@ Gate-3, Gate-4), non-mutating gate inspection, and typed transition errors.
 
 from __future__ import annotations
 
+import copy
 import datetime
+import hmac
 import json
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -27,7 +30,7 @@ from stagecheck.core.git import (
     get_repo_remote_push_urls,
 )
 from stagecheck.core.locking import acquire_runtime_lock
-from stagecheck.core.paths import safe_resolve
+from stagecheck.core.paths import safe_resolve, validate_task_id
 from stagecheck.core.permissions import freeze_phase_directory
 from stagecheck.core.state import load_active_state, save_active_state
 from stagecheck.core.utils import (
@@ -147,7 +150,7 @@ GATE_ALLOWED_PRECURSORS: Dict[GateId, Set[str]] = {
     GateId.GATE_2A: {"PHASE_2A_CODING", "PHASE_2A_IMPLEMENTATION"},
     GateId.GATE_2B: {"PHASE_2A_CODING", "PHASE_2A_IMPLEMENTATION", "PHASE_2B_COMMITTING", "PHASE_2B_DELIVERY"},
     GateId.GATE_3: {"PHASE_3_AUDIT", "PHASE_3_AUDITING"},
-    GateId.GATE_4: {"GATE_4_SEALING", "PHASE_3_AUDIT", "PHASE_3_AUDITING"},
+    GateId.GATE_4: {"GATE_4_SEALING"},
 }
 
 GATE_TARGET_PHASE: Dict[GateId, str] = {
@@ -271,14 +274,26 @@ def evaluate_gate_1_criteria(
         try:
             scope_data = load_json_file(scope_file)
             allowed = scope_data.get("allowed_paths", [])
-            # Check for illegal wildcard escaping
-            has_forbidden_wildcard = any(p in ("*", "/**", "**") for p in allowed)
+            # Check for illegal top-level, repo-root, or globbed repo-name wildcards
+            has_forbidden_wildcard = False
+            for p in allowed:
+                if not isinstance(p, str):
+                    has_forbidden_wildcard = True
+                    break
+                norm_p = p.strip().lstrip("/")
+                if norm_p in ("*", "/**", "**", "repos", "repos/", "repos/*", "repos/**", "repos/**/*"):
+                    has_forbidden_wildcard = True
+                    break
+                parts = norm_p.split("/")
+                if parts[0] == "repos" and (len(parts) < 2 or any(ch in parts[1] for ch in "*?[")):
+                    has_forbidden_wildcard = True
+                    break
             if has_forbidden_wildcard:
                 criteria.append(GateCriterion(
                     criterion_id="gate1.scope_discrete",
                     description="Declared scope contains discrete non-wildcard repository paths",
                     status="FAILED",
-                    message="declared_scope.json contains prohibited top-level wildcard pattern.",
+                    message="declared_scope.json contains prohibited top-level or repository-wide wildcard pattern.",
                 ))
             else:
                 s_hash = sha256_file(scope_file)
@@ -516,28 +531,43 @@ def evaluate_gate_2b_criteria(
             })
 
     # 4. Discover repositories to evaluate
+    from stagecheck.core.cooperative_review import resolve_governed_repo_path
+
     repos_to_check: Dict[str, Path] = {}
+    baseline_heads: Dict[str, str] = {}
     prod_repos_file = workspace_root / "controls" / "PRODUCT_REPOSITORIES.json"
     if prod_repos_file.is_file():
         try:
             prod_data = load_json_file(prod_repos_file)
             for repo_name, meta in prod_data.get("repositories", {}).items():
-                rel = meta.get("path", f"repos/{repo_name}")
-                rp = workspace_root / rel
+                rp = resolve_governed_repo_path(workspace_root, repo_name)
                 if (rp / ".git").exists():
                     repos_to_check[repo_name] = rp
-        except Exception:
-            pass
+                    if meta.get("baseline_head"):
+                        baseline_heads[repo_name] = str(meta["baseline_head"])
+        except Exception as err:
+            criteria.append(GateCriterion(
+                criterion_id="gate2b.repositories_registry",
+                description="PRODUCT_REPOSITORIES.json valid and safe",
+                status="FAILED",
+                message=f"Invalid repository configuration in PRODUCT_REPOSITORIES.json: {err}",
+            ))
 
-    # Include any repos mentioned in pre_commit_review.json
+    # Include any repos mentioned in pre_commit_review.json safely
     if rev_data:
         for repo_name in rev_data.get("base_commits", {}).keys():
             if repo_name not in repos_to_check:
-                cand = workspace_root / "repos" / repo_name
-                if (cand / ".git").exists():
-                    repos_to_check[repo_name] = cand
-                elif (workspace_root / ".git").exists():
-                    repos_to_check[repo_name] = workspace_root
+                try:
+                    cand = resolve_governed_repo_path(workspace_root, repo_name)
+                    if (cand / ".git").exists():
+                        repos_to_check[repo_name] = cand
+                except Exception as err:
+                    criteria.append(GateCriterion(
+                        criterion_id=f"gate2b.commit_fidelity.{repo_name}",
+                        description=f"Committed diff fidelity in '{repo_name}'",
+                        status="FAILED",
+                        message=f"Invalid repository name '{repo_name}' in pre_commit_review.json: {err}",
+                    ))
 
     # Fallback to workspace_root if no repos registered yet
     if not repos_to_check and (workspace_root / ".git").exists():
@@ -585,7 +615,7 @@ def evaluate_gate_2b_criteria(
             ))
 
         # C. Committed Diff Fidelity (SEC-E1 & GAP-I2)
-        if rev_data and repo_name in base_commits:
+        if rev_data:
             head_proc = _run_git_cmd(repo_p, ["rev-parse", "HEAD"])
             if head_proc.returncode != 0:
                 criteria.append(GateCriterion(
@@ -596,35 +626,47 @@ def evaluate_gate_2b_criteria(
                 ))
             else:
                 target_commit = head_proc.stdout.strip()
-                try:
-                    verify_committed_diff_fidelity(
-                        workspace_root=workspace_root,
-                        touched_repos=[repo_name],
-                        base_commits=base_commits,
-                        approved_diff_hashes=approved_diff_hashes,
-                        target_commits={repo_name: target_commit},
-                    )
-                    approved_hash = approved_diff_hashes.get(repo_name, "")
-                    criteria.append(GateCriterion(
-                        criterion_id=f"gate2b.commit_fidelity.{repo_name}",
-                        description=f"Committed diff fidelity in '{repo_name}'",
-                        status="MET",
-                        message=f"Committed diff matches approved Phase 2A pre-commit review diff ({approved_hash[:12]}).",
-                    ))
-                except CommitDivergenceError as err:
-                    criteria.append(GateCriterion(
-                        criterion_id=f"gate2b.commit_fidelity.{repo_name}",
-                        description=f"Committed diff fidelity in '{repo_name}'",
-                        status="FAILED",
-                        message=str(err),
-                    ))
-                except Exception as err:
-                    criteria.append(GateCriterion(
-                        criterion_id=f"gate2b.commit_fidelity.{repo_name}",
-                        description=f"Committed diff fidelity in '{repo_name}'",
-                        status="FAILED",
-                        message=f"Diff fidelity check failed: {err}",
-                    ))
+                auth_base = baseline_heads.get(repo_name)
+                eff_base = base_commits.get(repo_name) or auth_base
+                needs_check = (repo_name in base_commits) or (auth_base and target_commit != auth_base)
+                if needs_check:
+                    if auth_base and base_commits.get(repo_name) and base_commits[repo_name].lower() != auth_base.lower():
+                        criteria.append(GateCriterion(
+                            criterion_id=f"gate2b.commit_fidelity.{repo_name}",
+                            description=f"Committed diff fidelity in '{repo_name}'",
+                            status="FAILED",
+                            message=f"Base commit mismatch for '{repo_name}': review used '{base_commits.get(repo_name)}', expected '{auth_base}'.",
+                        ))
+                    else:
+                        try:
+                            verify_committed_diff_fidelity(
+                                workspace_root=workspace_root,
+                                touched_repos=[repo_name],
+                                base_commits={repo_name: eff_base or ""},
+                                approved_diff_hashes=approved_diff_hashes,
+                                target_commits={repo_name: target_commit},
+                            )
+                            approved_hash = approved_diff_hashes.get(repo_name, "")
+                            criteria.append(GateCriterion(
+                                criterion_id=f"gate2b.commit_fidelity.{repo_name}",
+                                description=f"Committed diff fidelity in '{repo_name}'",
+                                status="MET",
+                                message=f"Committed diff matches approved Phase 2A pre-commit review diff ({approved_hash[:12]}).",
+                            ))
+                        except CommitDivergenceError as err:
+                            criteria.append(GateCriterion(
+                                criterion_id=f"gate2b.commit_fidelity.{repo_name}",
+                                description=f"Committed diff fidelity in '{repo_name}'",
+                                status="FAILED",
+                                message=str(err),
+                            ))
+                        except Exception as err:
+                            criteria.append(GateCriterion(
+                                criterion_id=f"gate2b.commit_fidelity.{repo_name}",
+                                description=f"Committed diff fidelity in '{repo_name}'",
+                                status="FAILED",
+                                message=f"Diff fidelity check failed: {err}",
+                            ))
 
         # D. Remote Authority Whitelist (SR-08 / DEC-021 / FP-ORG)
         push_urls = get_repo_remote_push_urls(repo_p)
@@ -757,20 +799,32 @@ def evaluate_gate_4_criteria(
 
     for g_name, r_path, is_mandatory in prereqs:
         must_require = is_mandatory or (g_name in cleared_gates)
-        if not r_path.is_file():
+        recorded_hash = cleared_gates.get(g_name)
+        if not must_require and not r_path.is_file():
+            continue
+        if must_require and not recorded_hash:
+            criteria.append(
+                GateCriterion(
+                    criterion_id=f"G4-PREREQ-{g_name}",
+                    description=f"Prerequisite {g_name} receipt verification",
+                    status="FAILED",
+                    message=f"Mandatory prerequisite {g_name} is not recorded in ACTIVE_STATE.json cleared_gates.",
+                )
+            )
+            continue
+        if not r_path.is_file() or r_path.is_symlink():
             if must_require:
                 criteria.append(
                     GateCriterion(
                         criterion_id=f"G4-PREREQ-{g_name}",
                         description=f"Prerequisite {g_name} receipt verification",
                         status="FAILED",
-                        message=f"Missing required receipt at '{r_path}'",
+                        message=f"Missing or symlinked required receipt at '{r_path}'",
                     )
                 )
         else:
             actual_hash = sha256_file(r_path)
-            recorded_hash = cleared_gates.get(g_name)
-            if recorded_hash and actual_hash != recorded_hash:
+            if not recorded_hash or actual_hash.lower() != str(recorded_hash).lower():
                 criteria.append(
                     GateCriterion(
                         criterion_id=f"G4-PREREQ-{g_name}",
@@ -780,36 +834,61 @@ def evaluate_gate_4_criteria(
                     )
                 )
             else:
-                criteria.append(
-                    GateCriterion(
-                        criterion_id=f"G4-PREREQ-{g_name}",
-                        description=f"Prerequisite {g_name} receipt verification",
-                        status="MET",
-                        message=f"Verified receipt for {g_name}",
+                try:
+                    r_data = load_json_file(r_path)
+                    validate_gate_receipt(r_data)
+                    if (
+                        r_data.get("gate_id") != g_name
+                        or r_data.get("task_id") != task_id
+                        or int(r_data.get("attempt", 0)) != attempt
+                        or r_data.get("status") != "PASSED"
+                    ):
+                        raise ValueError(
+                            f"Receipt metadata mismatch for {g_name} (gate={r_data.get('gate_id')}, task={r_data.get('task_id')}, attempt={r_data.get('attempt')}, status={r_data.get('status')})"
+                        )
+                    criteria.append(
+                        GateCriterion(
+                            criterion_id=f"G4-PREREQ-{g_name}",
+                            description=f"Prerequisite {g_name} receipt verification",
+                            status="MET",
+                            message=f"Verified receipt for {g_name}",
+                        )
                     )
-                )
-            deliverables.append({
-                "path": str(r_path.relative_to(workspace_root)),
-                "sha256": actual_hash,
-                "status": "VALID",
-            })
+                    deliverables.append({
+                        "path": str(r_path.relative_to(workspace_root)),
+                        "sha256": actual_hash,
+                        "status": "VALID",
+                    })
+                except Exception as err:
+                    criteria.append(
+                        GateCriterion(
+                            criterion_id=f"G4-PREREQ-{g_name}",
+                            description=f"Prerequisite {g_name} receipt verification",
+                            status="FAILED",
+                            message=f"Invalid prerequisite receipt {g_name}: {err}",
+                        )
+                    )
 
     # 2. Verdict check
     verdict_file = attempt_dir / "Phase-3" / "verdict.json"
-    if not verdict_file.is_file():
+    if not verdict_file.is_file() or verdict_file.is_symlink():
         criteria.append(
             GateCriterion(
                 criterion_id="G4-VERDICT-PASSED",
                 description="Phase 3 audit verdict status verification",
                 status="FAILED",
-                message=f"Missing Phase 3 verdict artifact at '{verdict_file}'",
+                message=f"Missing or symlinked Phase 3 verdict artifact at '{verdict_file}'",
             )
         )
     else:
         try:
             verdict_data = json.loads(verdict_file.read_text(encoding="utf-8"))
             v_status = verdict_data.get("status") or verdict_data.get("result")
-            blocking_count = verdict_data.get("blocking_defects_count", 0)
+            counts_obj = verdict_data.get("counts") if isinstance(verdict_data.get("counts"), dict) else {}
+            blocking_count = max(
+                int(counts_obj.get("blocking", 0) or 0),
+                int(verdict_data.get("blocking_defects_count", 0) or 0),
+            )
             if v_status in ("PASSED", "CLEAR") and blocking_count == 0:
                 criteria.append(
                     GateCriterion(
@@ -868,14 +947,25 @@ def check_gate_preconditions(
     """
     root = Path(workspace_root).resolve()
     gate_id = normalize_gate_id(gate)
+    if task_id is not None:
+        validate_task_id(task_id)
 
     state = load_active_state(root)
-    resolved_task_id = str(task_id or state.get("task_id", "task-default"))
-    resolved_attempt = int(attempt or state.get("attempt_index", 1))
+    active_task_id = str(state.get("task_id", "task-default"))
+    active_attempt = int(state.get("attempt_index", 1))
+    resolved_task_id = str(task_id or active_task_id)
+    resolved_attempt = int(attempt or active_attempt)
     current_phase = str(state.get("phase", "NOT_STARTED"))
     target_phase = GATE_TARGET_PHASE.get(gate_id, "UNKNOWN")
 
     failure_reasons: List[str] = []
+
+    if (task_id is not None and str(task_id) != active_task_id) or (
+        attempt is not None and int(attempt) != active_attempt
+    ):
+        failure_reasons.append(
+            f"Task/attempt mismatch against ACTIVE_STATE.json: requested ({task_id}, {attempt}), active ({active_task_id}, {active_attempt})."
+        )
 
     # 1. State machine transition check
     try:
@@ -981,6 +1071,28 @@ def generate_gate_receipt(
     return receipt_path, receipt_data, digest
 
 
+def _write_receipt_no_follow(workspace_root: Path, receipt_path: Path, content_str: str) -> None:
+    """Safely write a gate receipt without following symlinks and set mode 0444."""
+    rel_receipt = receipt_path.relative_to(workspace_root).as_posix()
+    safe_target = safe_resolve(rel_receipt, workspace_root, allow_symlinks=False)
+    if safe_target.is_symlink():
+        raise GateError(f"Refusing to follow symlinked receipt path '{safe_target}'.")
+    if safe_target.exists():
+        try:
+            safe_target.chmod(0o644)
+        except OSError:
+            pass
+    fd = os.open(safe_target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+    try:
+        os.write(fd, content_str.encode("utf-8"))
+    finally:
+        os.close(fd)
+    try:
+        safe_target.chmod(0o444)
+    except OSError:
+        pass
+
+
 def advance_gate_atomic(
     workspace_root: Union[str, Path],
     gate: Union[GateId, str],
@@ -1001,11 +1113,23 @@ def advance_gate_atomic(
     """
     root = Path(workspace_root).resolve()
     gate_id = normalize_gate_id(gate)
+    if task_id is not None:
+        validate_task_id(task_id)
 
     with acquire_runtime_lock(root):
         state = load_active_state(root)
-        resolved_task_id = str(task_id or state.get("task_id", "task-default"))
-        resolved_attempt = int(attempt or state.get("attempt_index", 1))
+        active_task_id = str(state.get("task_id", "task-default"))
+        active_attempt = int(state.get("attempt_index", 1))
+        if (task_id is not None and str(task_id) != active_task_id) or (
+            attempt is not None and int(attempt) != active_attempt
+        ):
+            raise GateCriteriaFailedError(
+                f"Cannot advance {gate_id.value}: task/attempt mismatch against ACTIVE_STATE.json "
+                f"(requested ({task_id}, {attempt}), active ({active_task_id}, {active_attempt}))",
+                failure_reasons=["task/attempt mismatch"],
+            )
+        resolved_task_id = str(task_id or active_task_id)
+        resolved_attempt = int(attempt or active_attempt)
 
         attempt_dir = resolve_task_attempt_dir(root, resolved_task_id, resolved_attempt)
         receipt_path = get_gate_receipt_path(root, gate_id, resolved_task_id, resolved_attempt)
@@ -1016,6 +1140,7 @@ def advance_gate_atomic(
             if (
                 state.get("status") == "SEALED_PASSED"
                 and receipt_path.is_file()
+                and not receipt_path.is_symlink()
                 and seal_path.is_file()
                 and "GATE_4" in state.get("cleared_gates", {})
             ):
@@ -1023,16 +1148,17 @@ def advance_gate_atomic(
                 is_valid, _ = verify_attempt_merkle_seal(attempt_dir, root)
                 if is_valid:
                     live_hash = sha256_file(receipt_path)
-                    return GateAdvanceResult(
-                        gate_id=gate_id.value,
-                        task_id=resolved_task_id,
-                        attempt=resolved_attempt,
-                        receipt_path=receipt_path,
-                        receipt_sha256=live_hash,
-                        from_phase=state.get("phase", "COMPLETED"),
-                        to_phase="SEALED_PASSED",
-                        turn="IDLE",
-                    )
+                    if live_hash.lower() == str(state["cleared_gates"]["GATE_4"]).lower():
+                        return GateAdvanceResult(
+                            gate_id=gate_id.value,
+                            task_id=resolved_task_id,
+                            attempt=resolved_attempt,
+                            receipt_path=receipt_path,
+                            receipt_sha256=live_hash,
+                            from_phase=state.get("phase", "COMPLETED"),
+                            to_phase="SEALED_PASSED",
+                            turn="IDLE",
+                        )
 
         # 1. Non-mutating precondition check
         report = check_gate_preconditions(root, gate_id, resolved_task_id, resolved_attempt)
@@ -1059,7 +1185,9 @@ def advance_gate_atomic(
             verified_by=verified_by,
         )
 
+        # Pre-check receipt directory and symlink containment before creating dirs/files
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        safe_resolve(receipt_path.relative_to(root).as_posix(), root, allow_symlinks=False)
 
         # Specialized transactional execution for Gate 4 sealing per DEC-025
         if gate_id == GateId.GATE_4:
@@ -1097,16 +1225,7 @@ def advance_gate_atomic(
                         pass
 
                 content_str = json.dumps(receipt_data, indent=2) + "\n"
-                if receipt_path.exists():
-                    try:
-                        receipt_path.chmod(0o644)
-                    except OSError:
-                        pass
-                receipt_path.write_text(content_str, encoding="utf-8")
-                try:
-                    receipt_path.chmod(0o444)
-                except OSError:
-                    pass
+                _write_receipt_no_follow(root, receipt_path, content_str)
                 journal.record_staged_write(receipt_path)
                 live_hash = sha256_file(receipt_path)
 
@@ -1147,8 +1266,8 @@ def advance_gate_atomic(
                 turn="IDLE",
             )
 
-        # Snapshot state for rollback
-        state_backup = dict(state)
+        # Snapshot state deeply for rollback
+        state_backup = copy.deepcopy(state)
         created_receipt = False
 
         try:
@@ -1162,19 +1281,8 @@ def advance_gate_atomic(
                 except OSError:
                     pass
 
-            # Write receipt file with 2-space indentation and trailing newline
             content_str = json.dumps(receipt_data, indent=2) + "\n"
-            # Ensure file is writable if it exists, or remove prior
-            if receipt_path.exists():
-                try:
-                    receipt_path.chmod(0o644)
-                except OSError:
-                    pass
-            receipt_path.write_text(content_str, encoding="utf-8")
-            try:
-                receipt_path.chmod(0o444)
-            except OSError:
-                pass
+            _write_receipt_no_follow(root, receipt_path, content_str)
             created_receipt = True
 
             # Calculate live receipt hash
@@ -1314,7 +1422,11 @@ def handle_audit_verdict(
     from stagecheck.core.permissions import controlled_write_transaction
 
     v_status = verdict_data.get("status") or verdict_data.get("result")
-    blocking_defects = verdict_data.get("blocking_defects_count", 0)
+    counts_obj = verdict_data.get("counts") if isinstance(verdict_data.get("counts"), dict) else {}
+    blocking_defects = max(
+        int(counts_obj.get("blocking", 0) or 0),
+        int(verdict_data.get("blocking_defects_count", 0) or 0),
+    )
     is_failed = v_status in ("FAILED", "BLOCKED") or blocking_defects > 0
 
     if not is_failed:

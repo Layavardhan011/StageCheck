@@ -44,6 +44,8 @@
               "task_id": {"type": "string"},
               "defect_id": {"type": "string"},
               "action": {"type": "string"},
+              "status": {"type": "string", "enum": ["APPROVED", "REVOKED", "REJECTED"]},
+              "repo": {"type": "string"},
               "rationale": {"type": "string"},
               "authorized_by": {"type": "string"},
               "authorized_at": {"type": "string"},

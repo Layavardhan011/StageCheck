@@ -50,6 +50,43 @@ FORBIDDEN_SCOPE_PREFIXES = (
 )
 
 
+def _resolve_target_repositories(root: Path) -> List[str]:
+    """Resolve authoritative target repositories from controls/ (or bare test repos/ dir)."""
+    controls_dir = root / "controls"
+    state_file = controls_dir / "ACTIVE_STATE.json"
+    prod_file = controls_dir / "PRODUCT_REPOSITORIES.json"
+
+    if controls_dir.is_dir() and (state_file.is_file() or prod_file.is_file()):
+        targets: List[str] = []
+        if state_file.is_file():
+            try:
+                raw_targets = json.loads(state_file.read_text(encoding="utf-8")).get("target_repositories", [])
+                if isinstance(raw_targets, list):
+                    targets = [str(r) for r in raw_targets if isinstance(r, str) and r]
+            except Exception as err:
+                raise ScopeValidationError(f"Failed to read target_repositories from ACTIVE_STATE.json: {err}") from err
+        if prod_file.is_file():
+            try:
+                registered = set(
+                    json.loads(prod_file.read_text(encoding="utf-8")).get("repositories", {}).keys()
+                )
+            except Exception as err:
+                raise ScopeValidationError(f"Failed to read PRODUCT_REPOSITORIES.json: {err}") from err
+            if targets:
+                targets = [r for r in targets if r in registered]
+            else:
+                targets = sorted(registered)
+        return targets
+
+    repos_dir = root / "repos"
+    if repos_dir.is_dir():
+        return sorted(
+            d.name for d in repos_dir.iterdir()
+            if d.is_dir() and not d.is_symlink()
+        )
+    return []
+
+
 def validate_declared_scope(
     workspace_root: Union[str, Path],
     declared_scope_data: Dict[str, Any],
@@ -109,7 +146,11 @@ def validate_declared_scope(
                     f"Scope violation: Path '{path_str}' targets protected governance area '{forbidden}'."
                 )
 
-    # 2. Check that allowed paths reside strictly under target repositories in repos/
+    # 3. Check that allowed paths reside strictly under target repositories in repos/
+    effective_targets = target_repositories if target_repositories is not None else _resolve_target_repositories(root)
+    if not effective_targets:
+        raise ScopeValidationError("Scope violation: target_repositories cannot be empty.")
+
     for allowed in declared_scope_data.get("allowed_paths", []):
         norm_allowed = allowed.strip().replace("\\", "/")
         if not norm_allowed.startswith("repos/"):
@@ -118,15 +159,19 @@ def validate_declared_scope(
             )
 
         parts = norm_allowed.split("/")
-        if len(parts) < 2 or not parts[1]:
+        if len(parts) < 3 or not parts[1] or not parts[2]:
             raise ScopeValidationError(
-                f"Scope violation: Allowed path '{allowed}' must specify a target repository under repos/."
+                f"Scope violation: Allowed path '{allowed}' must specify a path within 'repos/<repo-name>/'."
             )
 
         repo_name = parts[1]
-        if target_repositories and repo_name not in target_repositories:
+        if any(ch in repo_name for ch in ("*", "?", "[")):
             raise ScopeValidationError(
-                f"Scope violation: Repository '{repo_name}' is not in approved target repositories: {target_repositories}."
+                f"Scope violation: Wildcard repository selector '{repo_name}' is forbidden."
+            )
+        if repo_name not in effective_targets:
+            raise ScopeValidationError(
+                f"Scope violation: Repository '{repo_name}' is not in approved target repositories: {effective_targets}."
             )
 
 
@@ -197,13 +242,14 @@ def freeze_prompt_and_scope(
     # 1. Validate prompt
     prompt_sha256 = verify_prompt_blueprint(prompt_path)
 
-    # 2. Validate declared scope
+    # 2. Validate declared scope against authoritative target_repositories
     try:
         scope_data = json.loads(scope_path.read_text(encoding="utf-8"))
     except Exception as err:
         raise ScopeValidationError(f"declared_scope.json is not valid JSON: {err}") from err
 
-    validate_declared_scope(root, scope_data, target_repositories=target_repositories)
+    resolved_targets = target_repositories if target_repositories is not None else _resolve_target_repositories(root)
+    validate_declared_scope(root, scope_data, target_repositories=resolved_targets)
     scope_sha256 = sha256_file(scope_path)
 
     # 3. Create prompt_verified.json
@@ -343,6 +389,12 @@ def is_path_in_scope(
     for allow in allowed_list:
         allow_norm = allow.strip().replace("\\", "/")
         prefix = allow_norm.rstrip("/*")
+        if prefix == "repos":
+            continue
+        if allow_norm.startswith("repos/"):
+            parts = allow_norm.split("/")
+            if len(parts) < 3 or any(ch in parts[1] for ch in ("*", "?", "[")):
+                continue
         if (
             norm == allow_norm
             or (prefix and (norm == prefix or norm.startswith(prefix + "/")))

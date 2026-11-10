@@ -10,13 +10,14 @@ import datetime
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-from stagecheck.core.git import SAFE_GIT_SECURITY_FLAGS
+from stagecheck.core.git import SAFE_GIT_SECURITY_FLAGS, run_safe_git
 from stagecheck.core.utils import sha256_digest
 
 
@@ -126,8 +127,8 @@ AUTHORIZED_RUNNERS: Dict[str, str] = {
     "python": "python",
     "python3": "python",
     "npm": "npm",
-    "yarn": "npm",
-    "pnpm": "npm",
+    "yarn": "yarn",
+    "pnpm": "pnpm",
     "npx": "npx",
     "cargo": "cargo",
 }
@@ -136,6 +137,8 @@ AUTHORIZED_SUBCOMMANDS: Dict[str, Set[str]] = {
     "go": {"test"},
     "cargo": {"test"},
     "npm": {"test", "run"},
+    "yarn": {"test", "run"},
+    "pnpm": {"test", "run"},
     "npx": {"test", "pytest"},
 }
 
@@ -160,12 +163,59 @@ FORBIDDEN_PYTHON_MODULES: Set[str] = {
 
 # Runner-specific security allowlists and prohibited flags (SEC-B3 & Spec 06 & Spec 07)
 PROHIBITED_FLAGS: Dict[str, Set[str]] = {
-    "go": {"-exec", "-toolexec"},
-    "pytest": {"-o", "--override-ini", "-c", "-p"},
+    "go": {"-exec", "-toolexec", "-C"},
+    "pytest": {"-o", "--override-ini", "-c", "--config-file", "-p"},
     "python": {"-c", "-e"},
-    "npm": {"--node-options", "--inspect", "--inspect-brk", "--globalSetup"},
-    "npx": {"--node-options", "--inspect", "--inspect-brk", "--globalSetup"},
-    "cargo": {"--config", "--runner"},
+    "npm": {
+        "--node-options",
+        "--inspect",
+        "--inspect-brk",
+        "--globalSetup",
+        "-c",
+        "--call",
+        "--prefix",
+        "-C",
+        "--script-shell",
+        "--userconfig",
+        "--globalconfig",
+    },
+    "yarn": {
+        "--node-options",
+        "--inspect",
+        "--inspect-brk",
+        "--globalSetup",
+        "-c",
+        "--call",
+        "--cwd",
+        "--use-yarnrc",
+    },
+    "pnpm": {
+        "--node-options",
+        "--inspect",
+        "--inspect-brk",
+        "--globalSetup",
+        "-c",
+        "--call",
+        "-C",
+        "--dir",
+        "--config",
+        "--shell-emulator",
+    },
+    "npx": {
+        "--node-options",
+        "--inspect",
+        "--inspect-brk",
+        "--globalSetup",
+        "-c",
+        "--call",
+        "-p",
+        "--package",
+        "--prefix",
+        "-C",
+        "--script-shell",
+        "--shell-auto-fallback",
+    },
+    "cargo": {"--config", "--runner", "-C", "--manifest-path"},
 }
 
 # Short options per runner whose remainder in the same argv token is a value, not bundled flags
@@ -177,10 +227,23 @@ _VALUE_TAKING_SHORT_OPTS: Dict[str, Set[str]] = {
 _PROHIBITED_SHORT_FLAGS: Dict[str, Set[str]] = {
     "python": {"c", "e"},
     "pytest": {"c", "o", "p"},
+    "npm": {"c", "C"},
+    "npx": {"c", "C", "p", "y"},
+    "yarn": {"c"},
+    "pnpm": {"c", "C"},
+    "cargo": {"C"},
+}
+
+# Safe pre-subcommand boolean flags for Node package runners so flag values cannot disguise subcommands
+_NODE_SAFE_PRE_SUBCMD_FLAGS: Dict[str, Set[str]] = {
+    "npm": {"--ignore-scripts", "-s", "--silent", "-q", "--quiet", "--verbose", "-d", "--no-audit", "--no-fund", "--offline", "--prefer-offline", "--no-progress"},
+    "yarn": {"--ignore-scripts", "-s", "--silent", "--verbose", "--offline", "--prefer-offline", "--non-interactive", "--no-progress"},
+    "pnpm": {"--ignore-scripts", "-s", "--silent", "--reporter", "--offline", "--prefer-offline", "--no-color"},
+    "npx": {"--no-install", "-q", "--quiet"},
 }
 
 
-def _check_python_args(args: List[str]) -> None:
+def _check_python_args(args: List[str], cwd: Optional[Path] = None) -> None:
     """Inspect Python interpreter options before script/module entrypoint."""
     i = 0
     while i < len(args):
@@ -196,6 +259,9 @@ def _check_python_args(args: List[str]) -> None:
                     f"Security policy violation [FORBIDDEN_FLAG]: Flag '{flag}' is prohibited for runner 'python'.",
                     exit_code=126,
                 )
+            if flag == "--check-hash-based-pycs" and "=" not in arg:
+                i += 2
+                continue
             i += 1
             continue
 
@@ -222,6 +288,10 @@ def _check_python_args(args: List[str]) -> None:
                         f"Security policy violation [FORBIDDEN_MODULE]: Execution of module '{raw_mod}' is prohibited.",
                         exit_code=126,
                     )
+                sub_runner = resolve_runner_category(root_mod)
+                if sub_runner and sub_runner != "python":
+                    next_idx = i + 2 if consumed_next else i + 1
+                    validate_command_security([root_mod, *args[next_idx:]], cwd=cwd)
                 # -m <module> terminates interpreter option parsing; remainder of argv goes to module
                 return
             if ch in _VALUE_TAKING_SHORT_OPTS["python"]:
@@ -295,6 +365,28 @@ def validate_npm_package_json(cwd: Path, target_script: str) -> None:
         )
 
 
+def _extract_positional_subcommand(
+    runner: str,
+    runner_args: List[str],
+    safe_pre_flags: Set[str],
+) -> Tuple[str, int]:
+    """Extract subcommand while rejecting unapproved pre-subcommand flags."""
+    for idx, arg in enumerate(runner_args):
+        if arg.startswith("-"):
+            base = arg.split("=")[0].strip()
+            if base not in safe_pre_flags and arg not in safe_pre_flags:
+                raise ForbiddenCommandFlagError(
+                    f"Security policy violation [FORBIDDEN_PRE_SUBCOMMAND_FLAG]: Flag '{arg}' is prohibited before subcommand for '{runner}'.",
+                    exit_code=126,
+                )
+            continue
+        return arg, idx
+    raise ForbiddenCommandFlagError(
+        f"Security policy violation [MISSING_SUBCOMMAND]: Runner '{runner}' requires an authorized subcommand.",
+        exit_code=126,
+    )
+
+
 def validate_command_security(argv: List[str], cwd: Optional[Path] = None) -> None:
     """Validate argument vector against runner-specific allowlists and flag policies.
 
@@ -318,7 +410,14 @@ def validate_command_security(argv: List[str], cwd: Optional[Path] = None) -> No
     if not argv or not isinstance(argv, list):
         raise ValueError("Command argv must be a non-empty list of strings.")
 
-    binary = Path(argv[0]).name.lower()
+    raw_bin = argv[0]
+    if not isinstance(raw_bin, str) or not raw_bin or "/" in raw_bin or "\\" in raw_bin or raw_bin in {".", ".."}:
+        raise ForbiddenCommandFlagError(
+            f"Security policy violation [UNTRUSTED_BINARY_PATH]: Path-qualified or invalid runner '{raw_bin}' is prohibited.",
+            exit_code=126,
+        )
+
+    binary = raw_bin.lower()
     runner = resolve_runner_category(binary)
 
     if not runner:
@@ -327,12 +426,38 @@ def validate_command_security(argv: List[str], cwd: Optional[Path] = None) -> No
             exit_code=126,
         )
 
+    if cwd is not None:
+        cwd_resolved = Path(cwd).resolve()
+        resolved_bin = shutil.which(raw_bin)
+        if resolved_bin:
+            resolved_path = Path(resolved_bin).resolve()
+            if resolved_path.is_relative_to(cwd_resolved):
+                raise ForbiddenCommandFlagError(
+                    f"Security policy violation [UNTRUSTED_BINARY_PATH]: Runner resolves inside working directory '{resolved_bin}'.",
+                    exit_code=126,
+                )
+
     args = argv[1:]
     sep_idx = args.index("--") if "--" in args else len(args)
     runner_args = args[:sep_idx]
 
+    # Prohibited flags check across all arguments for non-python runners first
+    if runner != "python":
+        prohibited = PROHIBITED_FLAGS.get(runner, set())
+        for arg in args:
+            flag = arg.split("=")[0].strip()
+            if runner == "go" and flag.startswith("--"):
+                flag = "-" + flag[2:]
+            if flag in prohibited:
+                raise ForbiddenCommandFlagError(
+                    f"Security policy violation [FORBIDDEN_FLAG]: Flag '{flag}' is prohibited for runner '{runner}'.",
+                    exit_code=126,
+                )
+            if arg.startswith("-") and not arg.startswith("--") and len(arg) > 1:
+                _check_short_bundle(runner, arg)
+
     if runner == "python":
-        _check_python_args(args)
+        _check_python_args(args, cwd=cwd)
     elif runner == "npx":
         if "--no-install" not in runner_args:
             raise ForbiddenCommandFlagError(
@@ -351,16 +476,19 @@ def validate_command_security(argv: List[str], cwd: Optional[Path] = None) -> No
                     f"Security policy violation [NPX_REMOTE_INSTALL]: Conflicting short flag '{arg}' is prohibited.",
                     exit_code=126,
                 )
-        subcmd = next((a for a in runner_args if not a.startswith("-")), None)
-        if subcmd and subcmd.lower() not in AUTHORIZED_SUBCOMMANDS["npx"]:
+        subcmd, sub_idx = _extract_positional_subcommand("npx", runner_args, _NODE_SAFE_PRE_SUBCMD_FLAGS["npx"])
+        if subcmd.lower() not in AUTHORIZED_SUBCOMMANDS["npx"]:
             raise ForbiddenCommandFlagError(
                 f"Security policy violation [UNAUTHORIZED_SUBCOMMAND]: Subcommand '{subcmd}' is prohibited for npx.",
                 exit_code=126,
             )
-    elif runner == "npm":
+        if subcmd.lower() == "pytest":
+            trailing = [a for a in runner_args[sub_idx + 1 :] if a != "--no-install"]
+            validate_command_security(["pytest", *trailing, *args[sep_idx:]], cwd=cwd)
+    elif runner in {"npm", "yarn", "pnpm"}:
         if "--ignore-scripts" not in runner_args:
             raise ForbiddenCommandFlagError(
-                "Security policy violation [NPM_LIFECYCLE_SCRIPTS]: npm test/run must include '--ignore-scripts'.",
+                f"Security policy violation [NPM_LIFECYCLE_SCRIPTS]: {runner} test/run must include '--ignore-scripts'.",
                 exit_code=126,
             )
         for arg in runner_args:
@@ -370,21 +498,31 @@ def validate_command_security(argv: List[str], cwd: Optional[Path] = None) -> No
                     f"Security policy violation [NPM_LIFECYCLE_SCRIPTS]: Lifecycle override flag '{arg}' is prohibited.",
                     exit_code=126,
                 )
-        subcmd = next((a for a in runner_args if not a.startswith("-")), None)
-        if not subcmd or subcmd.lower() not in AUTHORIZED_SUBCOMMANDS["npm"]:
+        subcmd, sub_idx = _extract_positional_subcommand(runner, runner_args, _NODE_SAFE_PRE_SUBCMD_FLAGS[runner])
+        subcmd_lower = subcmd.lower()
+        if subcmd_lower not in AUTHORIZED_SUBCOMMANDS[runner]:
             raise ForbiddenCommandFlagError(
-                f"Security policy violation [UNAUTHORIZED_SUBCOMMAND]: Subcommand '{subcmd}' is prohibited for npm.",
+                f"Security policy violation [UNAUTHORIZED_SUBCOMMAND]: Subcommand '{subcmd}' is prohibited for {runner}.",
                 exit_code=126,
             )
 
-        # Enforce script target allowlist and validate against package.json
         target_script = "test"
-        if subcmd == "run":
-            run_index = runner_args.index("run")
-            positional_after_run = [a for a in runner_args[run_index + 1 :] if not a.startswith("-")]
+        if subcmd_lower == "run":
+            post_run = runner_args[sub_idx + 1 :]
+            positional_after_run: List[str] = []
+            for a in post_run:
+                if a.startswith("-"):
+                    base = a.split("=")[0].strip()
+                    if base not in _NODE_SAFE_PRE_SUBCMD_FLAGS[runner]:
+                        raise ForbiddenCommandFlagError(
+                            f"Security policy violation [FORBIDDEN_FLAG]: Flag '{a}' is prohibited in '{runner} run'.",
+                            exit_code=126,
+                        )
+                else:
+                    positional_after_run.append(a)
             if not positional_after_run:
                 raise ForbiddenCommandFlagError(
-                    "Security policy violation [MISSING_SCRIPT_TARGET]: 'npm run' requires a target script.",
+                    f"Security policy violation [MISSING_SCRIPT_TARGET]: '{runner} run' requires a target script.",
                     exit_code=126,
                 )
             target_script = positional_after_run[0]
@@ -395,7 +533,7 @@ def validate_command_security(argv: List[str], cwd: Optional[Path] = None) -> No
                 )
             if target_script.lower() not in AUTHORIZED_NPM_RUN_TARGETS:
                 raise ForbiddenCommandFlagError(
-                    f"Security policy violation [UNAUTHORIZED_NPM_SCRIPT]: 'npm run {target_script}' is not an approved test target.",
+                    f"Security policy violation [UNAUTHORIZED_NPM_SCRIPT]: '{runner} run {target_script}' is not an approved test target.",
                     exit_code=126,
                 )
 
@@ -404,43 +542,22 @@ def validate_command_security(argv: List[str], cwd: Optional[Path] = None) -> No
 
     elif runner in AUTHORIZED_SUBCOMMANDS:
         allowed = AUTHORIZED_SUBCOMMANDS[runner]
-        subcmd = next((a for a in runner_args if not a.startswith("-")), None)
-        if subcmd and subcmd.lower() not in allowed:
+        if not runner_args or runner_args[0].startswith("-") or runner_args[0].lower() not in allowed:
+            bad = runner_args[0] if runner_args else "<empty>"
             raise ForbiddenCommandFlagError(
-                f"Security policy violation [UNAUTHORIZED_SUBCOMMAND]: Subcommand '{subcmd}' is prohibited for '{runner}'.",
+                f"Security policy violation [UNAUTHORIZED_SUBCOMMAND]: Subcommand '{bad}' is prohibited for '{runner}'.",
                 exit_code=126,
             )
-
-    # Prohibited flags check across all arguments for non-python runners
-    # (Python interpreter flags stop at script/-m and are checked by _check_python_args)
-    if runner != "python":
-        prohibited = PROHIBITED_FLAGS.get(runner, set())
-        for arg in args:
-            flag = arg.split("=")[0].strip()
-            if runner == "go" and flag.startswith("--"):
-                flag = "-" + flag[2:]
-            if flag in prohibited:
-                raise ForbiddenCommandFlagError(
-                    f"Security policy violation [FORBIDDEN_FLAG]: Flag '{flag}' is prohibited for runner '{runner}'.",
-                    exit_code=126,
-                )
-            if arg.startswith("-") and not arg.startswith("--") and len(arg) > 1:
-                _check_short_bundle(runner, arg)
 
 
 def capture_git_status_porcelain(repo_path: Union[str, Path]) -> str:
     """Capture clean git status including untracked files."""
-    cmd = [
-        "git",
-        *SAFE_GIT_SECURITY_FLAGS,
-        "-C",
-        str(repo_path),
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=all",
-    ]
     try:
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        res = run_safe_git(
+            Path(repo_path),
+            ["status", "--porcelain=v1", "--untracked-files=all"],
+            check=True,
+        )
         return res.stdout.strip()
     except Exception as err:
         raise CommandSecurityError(f"Failed to inspect working tree status in '{repo_path}': {err}") from err
@@ -500,8 +617,29 @@ def execute_secure_command(
     validate_command_security(argv, cwd=cwd)
     clean_env_dict = build_sanitized_environment(extra_env)
 
+    resolved_bin = shutil.which(argv[0], path=clean_env_dict.get("PATH"))
+    if not resolved_bin:
+        raise CommandSecurityError(
+            f"Approved test runner '{argv[0]}' not found in sanitized PATH.",
+            exit_code=127,
+        )
+    resolved_bin_path = Path(resolved_bin).resolve()
+    if resolved_bin_path.is_relative_to(cwd):
+        raise ForbiddenCommandFlagError(
+            f"Security policy violation [UNTRUSTED_BINARY_PATH]: Runner '{argv[0]}' resolves inside working directory '{resolved_bin_path}'.",
+            exit_code=126,
+        )
+    # Also ensure resolved binary does not live inside any sibling workspace repos/ directory
+    for ancestor in cwd.parents:
+        if ancestor.name == "repos" and resolved_bin_path.is_relative_to(ancestor):
+            raise ForbiddenCommandFlagError(
+                f"Security policy violation [UNTRUSTED_BINARY_PATH]: Runner '{argv[0]}' resolves inside workspace repos directory '{resolved_bin_path}'.",
+                exit_code=126,
+            )
+
+    in_git_repo = (cwd / ".git").exists() or any((p / ".git").exists() for p in cwd.parents)
     before_status = ""
-    if check_tree_integrity and (cwd / ".git").exists():
+    if check_tree_integrity and in_git_repo:
         before_status = capture_git_status_porcelain(cwd)
 
     t0 = time.time()
@@ -511,9 +649,10 @@ def execute_secure_command(
     stdout_str = ""
     stderr_str = ""
 
+    exec_argv = [str(resolved_bin_path), *argv[1:]]
     try:
         proc = subprocess.run(
-            argv,
+            exec_argv,
             cwd=str(cwd),
             env=clean_env_dict,
             shell=False,
@@ -541,7 +680,7 @@ def execute_secure_command(
 
     # Audit tree integrity after execution
     tree_mutated = False
-    if check_tree_integrity and (cwd / ".git").exists():
+    if check_tree_integrity and in_git_repo:
         after_status = capture_git_status_porcelain(cwd)
         if before_status != after_status:
             tree_mutated = True

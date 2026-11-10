@@ -164,7 +164,7 @@ class TestPrettyJSONFormatting(unittest.TestCase):
 
         add_disposition(
             workspace_root=self.workspace,
-            task_id="task-disp",
+            task_id="task-init",
             defect_id="sec.gitleaks",
             rationale="Test waiver",
             authorized_by="owner",
@@ -174,7 +174,7 @@ class TestPrettyJSONFormatting(unittest.TestCase):
         disp_file = self.workspace / "controls" / "DISPOSITIONS.json"
         self.assert_pretty_json_file(disp_file)
 
-        resume_after_disposition(self.workspace, "task-disp")
+        resume_after_disposition(self.workspace, "task-init")
         elevate_permissions_for_teardown(self.workspace)
         state_file = self.workspace / "controls" / "ACTIVE_STATE.json"
         self.assert_pretty_json_file(state_file)

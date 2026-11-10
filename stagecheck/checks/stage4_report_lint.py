@@ -64,6 +64,15 @@ def run_stage4_report_lint(ctx: AuditContext) -> StageResult:
 
     except Exception as err:
         errors.append(f"Failed to read delivery report: {err}")
+        defects.append(
+            Defect(
+                defect_id="report_lint.unreadable_delivery_report",
+                message=f"Failed to read or decode delivery report: {err}",
+                stage=stage_id,
+                severity="HIGH",
+                blocking=True,
+            )
+        )
 
-    status = "FAIL" if any(d.blocking for d in defects) else "CLEAR"
+    status = "FAIL" if (errors or any(d.blocking for d in defects)) else "CLEAR"
     return StageResult(stage_id=stage_id, status=status, defects=defects, errors=errors)

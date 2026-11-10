@@ -87,7 +87,8 @@ class TestCircuitBreaker(unittest.TestCase):
             state = json.load(f)
         self.assertEqual(state["phase"], "AWAITING_HUMAN_DISPOSITION")
         self.assertTrue(state["circuit_breaker_tripped"])
-        self.assertEqual(state["halt_trigger"], "max_attempts_exhausted")
+        self.assertNotIn("halt_trigger", state)
+        self.assertIn("maximum permitted attempt threshold", state.get("halt_reason", ""))
 
     def test_stagnant_defects_zero_progress_trigger(self):
         """Verify Trigger 2: Consecutive attempts with identical blocking defects trip breaker."""
@@ -236,7 +237,7 @@ class TestCircuitBreaker(unittest.TestCase):
         self.assertFalse(updated["circuit_breaker_tripped"])
         self.assertEqual(updated["phase"], "PHASE_1_PLANNING")
         self.assertEqual(updated["attempt_index"], 3)
-        self.assertEqual(updated["last_reset"]["authorized_by"], "developer@example.com")
+        self.assertEqual(updated["resets_authorized"][-1]["authorized_by"], "developer@example.com")
 
     def test_attempt_budget_cap_enforcement(self):
         """Verify DEC-028 / FR-06: Attempt budget hard cap of 3 cannot be bypassed via retry."""

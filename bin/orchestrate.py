@@ -173,23 +173,23 @@ def main():
             status=None;verdict.update(checked_head='response',dirty=False,status_sha256=digest(b''),response=True)
         else:
             repo=canonical(args.repo)
-            git=command(['git','-C',str(repo),'rev-parse','--show-toplevel'],repo)
+            git=safe_git(['rev-parse','--show-toplevel'],repo)
             if git['exit_status'] or canonical(git['stdout'].strip())!=repo:
                 raise ToolError('repo argument must be the exact git repository root')
-            head=command(['git','-C',str(repo),'rev-parse','HEAD'],repo)
-            base=command(['git','-C',str(repo),'rev-parse','--verify',args.base+'^{commit}'],repo)
+            head=safe_git(['rev-parse','HEAD'],repo)
+            base=safe_git(['rev-parse','--verify',args.base+'^{commit}'],repo)
             if head['exit_status'] or base['exit_status']:
                 raise ToolError('cannot resolve launcher head/base')
             verdict['checked_head']=head['stdout'].strip()
-            status=command(['git','-C',str(repo),'status','--porcelain=v1','-uall'],repo)
+            status=safe_git(['status','--porcelain=v1','-uall'],repo)
             create(out/'repository_status.json',status)
             if status['exit_status']:
                 raise ToolError('cannot establish repository status')
             verdict.update(dirty=bool(status['stdout']),status_sha256=status['stdout_sha256'])
             if verdict['dirty'] and not args.allow_dirty:
                 raise ToolError('dirty repository refused; owner may explicitly select --allow-dirty to inspect working-tree bytes')
-            paths=command(['git','-C',str(repo),'diff','--no-ext-diff','--no-textconv','--name-only','-z',base['stdout'].strip(),'--'],repo)
-            untracked=command(['git','-C',str(repo),'ls-files','--others','--exclude-standard','-z'],repo)
+            paths=safe_git(['diff','--no-ext-diff','--no-textconv','--name-only','-z',base['stdout'].strip(),'--'],repo)
+            untracked=safe_git(['ls-files','--others','--exclude-standard','-z'],repo)
             if paths['exit_status'] or untracked['exit_status']:
                 raise ToolError('cannot enumerate changed paths')
             changed=sorted({str(repo/p) for p in (paths['stdout']+untracked['stdout']).split('\0') if p})
@@ -224,9 +224,9 @@ def main():
         else:
             metadata={'cwd':str(Path.cwd()),'repo':str(repo),'head':verdict['checked_head'],'base':run['base'],
                       'status':status,
-                      'branch':command(['git','-C',str(repo),'branch','--show-current'],repo),
-                      'staged':command(['git','-C',str(repo),'diff','--no-ext-diff','--no-textconv','--cached','--name-only','-z'],repo),
-                      'unstaged':command(['git','-C',str(repo),'diff','--no-ext-diff','--no-textconv','--name-only','-z'],repo),
+                      'branch':safe_git(['branch','--show-current'],repo),
+                      'staged':safe_git(['diff','--no-ext-diff','--no-textconv','--cached','--name-only','-z'],repo),
+                      'unstaged':safe_git(['diff','--no-ext-diff','--no-textconv','--name-only','-z'],repo),
                       'python':command([sys.executable,'--version'],repo),'contract_sha256':verdict['contract_sha256'],
                       'orchestrator_instruction':{'path':str(tool/'agent_instructions'/main_file),'sha256':digest(main_raw),
                                                   'execution':'deterministic Python; no orchestrator model call'}}
@@ -273,7 +273,7 @@ def main():
             verdict['not_run'] += [a['id']+': input or secret/identity check did not admit model inputs' for a in selected]
         elif not args.response:
             data=claims(ctx)
-            diff=command(['git','-C',str(repo),'diff','--no-ext-diff','--no-textconv',run['base'],'--'],repo)
+            diff=safe_git(['diff','--no-ext-diff','--no-textconv',run['base'],'--'],repo)
             # Agent packet contains facts and diff, never reasoning or peer outputs.
             packet={'claims':data,'changed_paths':changed,'diff':diff['stdout'],
                     'allowed_paths':[str(p) for p in ctx.allowed],'checked_head':run['checked_head'],
@@ -334,7 +334,7 @@ def main():
                 identities.update({e['path']:e['sha256'] for e in finding['evidence']})
             if any(digest(ctx.read(p))!=sha for p,sha in identities.items()):
                 raise ToolError('model evidence or instruction identity changed after review')
-        if any(digest(ctx.read(p))!=sha for p,sha in verdict['input_hashes'].items()) or (not args.response and (metadata['status']!=command(['git','-C',str(repo),'status','--porcelain=v1','-uall'],repo) or verdict['checked_head']!=command(['git','-C',str(repo),'rev-parse','HEAD'],repo)['stdout'].strip())):
+        if any(digest(ctx.read(p))!=sha for p,sha in verdict['input_hashes'].items()) or (not args.response and (metadata['status']!=safe_git(['status','--porcelain=v1','-uall'],repo) or verdict['checked_head']!=safe_git(['rev-parse','HEAD'],repo)['stdout'].strip())):
             raise ToolError('concurrent input/repository change; no conclusion')
         escalation=any(c['escalate'] for c in verdict['checks'])
         # Identical findings are coalesced, never silently counted twice.

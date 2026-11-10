@@ -37,26 +37,48 @@ def acquire_bootstrap_lock(workspace_root: Path) -> Generator[int, None, None]:
     root = Path(workspace_root).resolve()
     lock_file = root / ".stagecheck-init.lock"
 
-    fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o600)
-    try:
+    while True:
+        fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o600)
+        locked_current = False
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (BlockingIOError, OSError) as err:
-            raise LockCollisionError(
-                f"Workspace initialization is already running (locked by .stagecheck-init.lock)."
-            ) from err
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (BlockingIOError, OSError) as err:
+                raise LockCollisionError(
+                    "Workspace initialization is already running (locked by .stagecheck-init.lock)."
+                ) from err
 
+            try:
+                fd_stat = os.fstat(fd)
+                path_stat = os.lstat(lock_file)
+            except FileNotFoundError:
+                path_stat = None
+
+            if (
+                path_stat is not None
+                and (fd_stat.st_dev, fd_stat.st_ino) == (path_stat.st_dev, path_stat.st_ino)
+            ):
+                locked_current = True
+                break
+        finally:
+            if not locked_current:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+    try:
         yield fd
 
     finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        os.close(fd)
-        # Attempt to unlink bootstrap lock file on completion
+        # Unlink only if lock_file still refers to the inode we locked, before unlocking/closing
         with contextlib.suppress(OSError):
-            lock_file.unlink(missing_ok=True)
+            fd_stat = os.fstat(fd)
+            path_stat = os.lstat(lock_file)
+            if (fd_stat.st_dev, fd_stat.st_ino) == (path_stat.st_dev, path_stat.st_ino):
+                lock_file.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 @contextlib.contextmanager

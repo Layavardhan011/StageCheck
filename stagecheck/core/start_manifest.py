@@ -77,17 +77,24 @@ def generate_start_manifest(
     manifest_file = specs_dir / START_MANIFEST_FILENAME
     ts = timestamp or datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-    # Collect all files in specs/ excluding START_MANIFEST.md
-    spec_files: List[Tuple[str, str, str]] = []
-    for f in sorted(specs_dir.glob("*")):
-        if f.name == START_MANIFEST_FILENAME or f.is_dir():
+    # Collect all regular files in specs/ recursively excluding root START_MANIFEST.md
+    spec_files: List[Tuple[str, str, str, str]] = []
+    for f in sorted(specs_dir.rglob("*")):
+        if f.is_dir():
             continue
-        rel_path = f"specs/{f.name}"
+        if f.is_symlink():
+            raise SpecManifestSecurityError(
+                f"Symbolic link prohibited in specifications directory: '{f}'."
+            )
+        rel_sub = f.relative_to(specs_dir).as_posix()
+        if rel_sub == START_MANIFEST_FILENAME:
+            continue
+        rel_path = f"specs/{rel_sub}"
         f_hash = sha256_file(f)
-        status = "Authoritative Roadmap" if f.name == "TASK_PLAN.json" else (
-            "System Architecture" if f.name == "ARCHITECTURE.md" else "Specification Deliverable"
+        status = "Authoritative Roadmap" if rel_sub == "TASK_PLAN.json" else (
+            "System Architecture" if rel_sub == "ARCHITECTURE.md" else "Specification Deliverable"
         )
-        spec_files.append((f.name, rel_path, f_hash, status))
+        spec_files.append((rel_sub, rel_path, f_hash, status))
 
     manifest_lines = [
         "# Project Specification Baseline Manifest (`START_MANIFEST.md`)\n\n",
@@ -129,7 +136,7 @@ def parse_start_manifest(workspace_root: Union[str, Path]) -> Dict[str, str]:
     # Parse Markdown table rows: | `file` | `specs/file` | `hash` | ... |
     # Matches rows with 3 or 4 columns
     row_pattern = re.compile(
-        r"\|\s*`?([a-zA-Z0-9._\-]+)`?\s*\|\s*`?([a-zA-Z0-9._\-/]+)`?\s*\|\s*`?([0-9a-fA-F]{64})`?\s*\|"
+        r"\|\s*`?([a-zA-Z0-9._\-/]+)`?\s*\|\s*`?([a-zA-Z0-9._\-/]+)`?\s*\|\s*`?([0-9a-fA-F]{64})`?\s*\|"
     )
 
     for line in text.splitlines():
@@ -205,19 +212,29 @@ def verify_spec_manifest(
         }
 
     entries = parse_start_manifest(root)
-    # Get set of recorded filenames (strip 'specs/' prefix if present)
-    recorded_filenames = {
-        k.replace("specs/", ""): v for k, v in entries.items() if "/" not in k
-    }
+    # Get mapping of relative path under specs/ -> expected sha256
+    recorded_filenames: Dict[str, str] = {}
+    for k, v in entries.items():
+        if k.startswith("specs/"):
+            rel_k = k[len("specs/") :]
+            if rel_k and rel_k != START_MANIFEST_FILENAME:
+                recorded_filenames[rel_k] = v
 
     verified: List[str] = []
     missing: List[str] = []
     tampered: List[Dict[str, str]] = []
     unregistered: List[str] = []
 
-    # 1. Verify every recorded file exists and matches hash
+    # 1. Verify every recorded file exists within specs/ without escaping or symlinks
+    specs_resolved = specs_dir.resolve()
     for fname, expected_hash in sorted(recorded_filenames.items()):
-        fpath = specs_dir / fname
+        if ".." in Path(fname).parts or Path(fname).is_absolute():
+            raise SpecManifestSecurityError(f"Unsafe specification path in manifest: '{fname}'")
+        fpath = (specs_dir / fname)
+        if not fpath.resolve().is_relative_to(specs_resolved):
+            raise SpecManifestSecurityError(f"Escaping specification path in manifest: '{fname}'")
+        if fpath.is_symlink():
+            raise SpecManifestSecurityError(f"Symbolic link prohibited in specs/: '{fpath}'")
         if not fpath.is_file():
             missing.append(fname)
         else:
@@ -231,12 +248,17 @@ def verify_spec_manifest(
             else:
                 verified.append(fname)
 
-    # 2. Check for unregistered files in specs/ (Addition detection)
-    for f in sorted(specs_dir.glob("*")):
-        if f.name == START_MANIFEST_FILENAME or f.is_dir():
+    # 2. Check recursively for unregistered regular files in specs/
+    for f in sorted(specs_dir.rglob("*")):
+        if f.is_dir():
             continue
-        if f.name not in recorded_filenames:
-            unregistered.append(f.name)
+        if f.is_symlink():
+            raise SpecManifestSecurityError(f"Symbolic link prohibited in specs/: '{f}'")
+        rel_sub = f.relative_to(specs_dir).as_posix()
+        if rel_sub == START_MANIFEST_FILENAME:
+            continue
+        if rel_sub not in recorded_filenames:
+            unregistered.append(rel_sub)
 
     is_valid = len(missing) == 0 and len(tampered) == 0 and len(unregistered) == 0
 

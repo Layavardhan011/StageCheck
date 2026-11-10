@@ -240,6 +240,8 @@ class TestEndToEndLifecycle(unittest.TestCase):
         run_git(["add", "."], cwd=repo_dir)
         run_git(["commit", "-m", "feat: malicious scope escape"], cwd=repo_dir)
 
+        # Verify authoritative baseline mismatch / unapproved post-commit bypass is rejected by approve-review
+        base_commit = json.loads((self.ws / "controls/PRODUCT_REPOSITORIES.json").read_text())["repositories"]["core-service"]["baseline_head"]
         phase2a_dir = self.ws / "evidence/tasks/task-303/attempt_1/Phase-2A"
         phase2a_dir.mkdir(parents=True, exist_ok=True)
         head_commit = run_git(["rev-parse", "HEAD"], cwd=repo_dir).stdout.strip()
@@ -254,7 +256,32 @@ class TestEndToEndLifecycle(unittest.TestCase):
             "summary": "Review",
         }
         (phase2a_dir / "pre_commit_status.json").write_text(json.dumps(status_data, indent=2) + "\n")
-        run_approve_review("task-303", attempt=1, workspace=str(self.ws))
+        self.assertNotEqual(run_approve_review("task-303", attempt=1, workspace=str(self.ws)), 0)
+
+        # Simulate reaching Phase 3 audit with an approved review for defense-in-depth verification
+        from stagecheck.core.cooperative_review import record_pre_commit_review
+        from stagecheck.core.state import load_active_state, save_active_state
+        diff_res = subprocess.run(
+            ["git", "-C", str(repo_dir), "diff", "--binary", f"{base_commit}..{head_commit}"],
+            capture_output=True, check=True,
+        )
+        from stagecheck.core.utils import sha256_digest
+        diff_sha = sha256_digest(diff_res.stdout)
+        (phase2a_dir / "pre_commit_review.json").write_text(json.dumps({
+            "schema_version": "2.0",
+            "task_id": "task-303",
+            "attempt": 1,
+            "cycle": 1,
+            "status": "APPROVED",
+            "summary": "Simulated review to test Phase 3 defense-in-depth",
+            "base_commits": {"core-service": base_commit},
+            "approved_diff_hashes": {"core-service": diff_sha},
+            "approved_snapshot_sha256": diff_sha,
+            "approved_diff_sha256": diff_sha,
+            "pre_existing_issues_ignored": [],
+            "architectural_intents_approved": [],
+            "new_issues_found": [],
+        }, indent=2))
 
         # Delivery report for Phase 2B
         phase2b_dir = self.ws / "evidence/tasks/task-303/attempt_1/Phase-2B"
@@ -319,6 +346,12 @@ class TestEndToEndLifecycle(unittest.TestCase):
         run_git(["add", "."], cwd=frontend_dir)
         run_git(["commit", "-m", "feat: frontend with secret leak"], cwd=frontend_dir)
 
+        prod_repos = json.loads((self.ws / "controls/PRODUCT_REPOSITORIES.json").read_text())["repositories"]
+        base_backend = prod_repos["backend"]["baseline_head"]
+        base_frontend = prod_repos["frontend"]["baseline_head"]
+        head_backend = run_git(["rev-parse", "HEAD"], cwd=backend_dir).stdout.strip()
+        head_frontend = run_git(["rev-parse", "HEAD"], cwd=frontend_dir).stdout.strip()
+
         phase2a_dir = self.ws / "evidence/tasks/task-404/attempt_1/Phase-2A"
         phase2a_dir.mkdir(parents=True, exist_ok=True)
         status_data = {
@@ -328,14 +361,30 @@ class TestEndToEndLifecycle(unittest.TestCase):
             "cycle": 1,
             "status": "AWAITING_REVIEW",
             "touched_repositories": ["backend", "frontend"],
-            "base_commits": {
-                "backend": run_git(["rev-parse", "HEAD"], cwd=backend_dir).stdout.strip(),
-                "frontend": run_git(["rev-parse", "HEAD"], cwd=frontend_dir).stdout.strip(),
-            },
+            "base_commits": {"backend": head_backend, "frontend": head_frontend},
             "summary": "Multi repo review",
         }
         (phase2a_dir / "pre_commit_status.json").write_text(json.dumps(status_data, indent=2) + "\n")
-        run_approve_review("task-404", attempt=1, workspace=str(self.ws))
+        self.assertNotEqual(run_approve_review("task-404", attempt=1, workspace=str(self.ws)), 0)
+
+        from stagecheck.core.utils import sha256_digest
+        diff_b = sha256_digest(subprocess.run(["git", "-C", str(backend_dir), "diff", "--binary", f"{base_backend}..{head_backend}"], capture_output=True, check=True).stdout)
+        diff_f = sha256_digest(subprocess.run(["git", "-C", str(frontend_dir), "diff", "--binary", f"{base_frontend}..{head_frontend}"], capture_output=True, check=True).stdout)
+        (phase2a_dir / "pre_commit_review.json").write_text(json.dumps({
+            "schema_version": "2.0",
+            "task_id": "task-404",
+            "attempt": 1,
+            "cycle": 1,
+            "status": "APPROVED",
+            "summary": "Simulated multi-repo review to test Phase 3 aggregate audit",
+            "base_commits": {"backend": base_backend, "frontend": base_frontend},
+            "approved_diff_hashes": {"backend": diff_b, "frontend": diff_f},
+            "approved_snapshot_sha256": diff_b,
+            "approved_diff_sha256": diff_b,
+            "pre_existing_issues_ignored": [],
+            "architectural_intents_approved": [],
+            "new_issues_found": [],
+        }, indent=2))
 
         # Delivery report for Phase 2B
         phase2b_dir = self.ws / "evidence/tasks/task-404/attempt_1/Phase-2B"

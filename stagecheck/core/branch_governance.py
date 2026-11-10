@@ -91,6 +91,11 @@ def validate_branch_compliance(
         )
 
 
+def _assert_safe_git_rev(rev: str, repo_name: str) -> None:
+    if not isinstance(rev, str) or not rev or rev.startswith("-") or not re.fullmatch(r"[0-9a-fA-F]{4,64}|HEAD(?:[~^][0-9]*)*", rev):
+        raise BranchGovernanceError(f"Invalid git revision '{rev}' for repository '{repo_name}'.")
+
+
 def get_git_tree_sha(repo_path: Union[str, Path]) -> str:
     """Extract Git tree root SHA (HEAD^{tree}) for a repository."""
     res = run_safe_git(Path(repo_path), ["rev-parse", "HEAD^{tree}"])
@@ -101,7 +106,8 @@ def get_git_tree_sha(repo_path: Union[str, Path]) -> str:
 
 def get_repo_diff(repo_path: Union[str, Path], base_commit: str) -> str:
     """Generate git diff relative to base_commit."""
-    res = run_safe_git(Path(repo_path), ["diff", "--binary", base_commit])
+    _assert_safe_git_rev(base_commit, Path(repo_path).name)
+    res = run_safe_git(Path(repo_path), ["diff", "--binary", "--end-of-options", base_commit, "--"])
     if res.returncode != 0:
         raise GitError(f"Failed to generate diff for '{repo_path}': {res.stderr.strip()}")
     return res.stdout
@@ -201,9 +207,12 @@ def verify_multi_repo_governance(
     baseline_data: Dict[str, Dict[str, Any]] = {}
     if baseline_file.is_file():
         try:
-            baseline_data = json.loads(baseline_file.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+            loaded = json.loads(baseline_file.read_text(encoding="utf-8"))
+        except Exception as err:
+            raise BranchGovernanceError(f"Malformed repo_baseline.json at '{baseline_file}': {err}") from err
+        if not isinstance(loaded, dict):
+            raise BranchGovernanceError(f"Malformed repo_baseline.json at '{baseline_file}': expected JSON object.")
+        baseline_data = loaded
 
     checked_heads: Dict[str, Dict[str, Any]] = {}
     approved_diff_hashes: Dict[str, str] = {}
@@ -238,11 +247,17 @@ def verify_multi_repo_governance(
         if base_commits and repo_name in base_commits:
             expected_base = base_commits[repo_name]
         elif repo_name in baseline_data:
-            expected_base = baseline_data[repo_name].get("head_commit")
+            base_entry = baseline_data[repo_name]
+            if not isinstance(base_entry, dict):
+                raise BranchGovernanceError(f"Malformed repo_baseline.json entry for '{repo_name}'.")
+            expected_base = base_entry.get("head_commit")
 
         if expected_base and expected_base != current_head:
-            # If base commit specified, verify it is an ancestor of current head
-            res = run_safe_git(repo_path, ["merge-base", "--is-ancestor", expected_base, current_head])
+            _assert_safe_git_rev(expected_base, repo_name)
+            res = run_safe_git(
+                repo_path,
+                ["merge-base", "--is-ancestor", "--end-of-options", expected_base, current_head],
+            )
             if res.returncode != 0:
                 raise BaseCommitMismatchError(
                     f"Base commit mismatch in '{repo_name}': expected base '{expected_base}' "
@@ -275,14 +290,28 @@ def verify_multi_repo_governance(
 
         tree_sha = get_git_tree_sha(repo_path)
         base_record = baseline_data.get(repo_name)
+        if base_record is not None and not isinstance(base_record, dict):
+            raise BranchGovernanceError(f"Malformed repo_baseline.json entry for '{repo_name}'.")
 
+        expected_untouched_head = (base_commits or {}).get(repo_name) or (
+            base_record.get("head_commit") if base_record else None
+        )
+        if not expected_untouched_head:
+            raise UntouchedRepoViolationError(
+                f"Untouched repository violation: missing baseline commit for '{repo_name}'."
+            )
+        if current_info.head_commit != expected_untouched_head:
+            raise UntouchedRepoViolationError(
+                f"Untouched repository violation: HEAD commit in '{repo_name}' changed from "
+                f"'{expected_untouched_head}' to '{current_info.head_commit}'."
+            )
         if base_record:
-            if current_info.head_commit != base_record.get("head_commit"):
+            if base_record.get("head_commit") and current_info.head_commit != base_record.get("head_commit"):
                 raise UntouchedRepoViolationError(
                     f"Untouched repository violation: HEAD commit in '{repo_name}' changed from "
                     f"'{base_record.get('head_commit')}' to '{current_info.head_commit}'."
                 )
-            if tree_sha != base_record.get("tree_sha"):
+            if base_record.get("tree_sha") and tree_sha != base_record.get("tree_sha"):
                 raise UntouchedRepoViolationError(
                     f"Untouched repository violation: Git tree in '{repo_name}' changed from "
                     f"'{base_record.get('tree_sha')}' to '{tree_sha}'."

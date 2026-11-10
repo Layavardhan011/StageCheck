@@ -199,6 +199,7 @@ def real_verdicts(ctx,exclude=None):
                 value=loads(raw)
                 schema(value,load(ctx.tool/'schemas/verdict.schema.json'))
                 if value.get('type')!='verdict' or value['task_id']!=task.name:raise ToolError('real verdict task identity differs')
+                if value.get('response'):continue
                 found[digest(raw)]={'path':str(p),'value':value}
         except (ToolError,OSError,KeyError,ValueError) as exc:
             invalid.append({'task':task.name,'reason':str(exc)})

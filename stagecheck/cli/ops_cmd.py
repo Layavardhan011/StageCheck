@@ -28,8 +28,14 @@ def run_unlock(
             ActiveTaskTeardownBlockedError,
             NonInteractiveTeardownError,
             assert_safe_teardown_preconditions,
+            commit_safe_teardown,
         )
-        assert_safe_teardown_preconditions(workspace_root, force=force, abort_active=abort_active)
+        assert_safe_teardown_preconditions(
+            workspace_root,
+            force=force,
+            abort_active=abort_active,
+            commit=False,
+        )
     except ActiveTaskTeardownBlockedError as err:
         print(f"ERROR: [unlock.active_task_blocked] {err}", file=sys.stderr)
         return 1
@@ -45,6 +51,12 @@ def run_unlock(
         if response.strip().lower() not in ("y", "yes"):
             print("Aborted by user.")
             return 1
+
+    try:
+        commit_safe_teardown(workspace_root, abort_active=abort_active, force=force)
+    except Exception as err:
+        print(f"ERROR: [unlock.teardown_commit_error] {err}", file=sys.stderr)
+        return 1
 
     elevate_permissions_for_teardown(workspace_root)
     print(f"SUCCESS: Elevated workspace permissions for '{workspace_root}'. Ready for clean teardown.")

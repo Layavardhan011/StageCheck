@@ -277,29 +277,22 @@ def trip_circuit_breaker(
     current_defects: List[Dict[str, Any]],
 ) -> Path:
     """Trip the circuit breaker, update ACTIVE_STATE.json, and emit alerts."""
-    state_file = workspace_root / "controls" / "ACTIVE_STATE.json"
-    active_state = {}
-    if state_file.is_file():
-        try:
-            with open(state_file, "r", encoding="utf-8") as f:
-                active_state = json.load(f)
-        except Exception:
-            pass
+    from stagecheck.core.state import load_active_state, save_active_state
 
-    # Update state under controlled write transaction and lock
     controls_dir = workspace_root / "controls"
     controls_dir.mkdir(parents=True, exist_ok=True)
-    with controlled_write_transaction(controls_dir):
-        with acquire_runtime_lock(controls_dir):
+    with acquire_runtime_lock(controls_dir):
+        with controlled_write_transaction(controls_dir):
+            state_file = controls_dir / "ACTIVE_STATE.json"
+            active_state = load_active_state(workspace_root) if state_file.is_file() else {}
+            active_state.pop("halt_trigger", None)
+            active_state.pop("last_reset", None)
             active_state["phase"] = "AWAITING_HUMAN_DISPOSITION"
             active_state["circuit_breaker_tripped"] = True
             active_state["halt_reason"] = evaluation.reason
-            active_state["halt_trigger"] = evaluation.trigger
             active_state["task_id"] = task_id
             active_state["attempt_index"] = attempt
-
-            with open(state_file, "w", encoding="utf-8") as f:
-                f.write(pretty_json_dumps(active_state))
+            save_active_state(workspace_root, active_state)
 
     # Generate escalation report
     report_path = write_escalation_report(workspace_root, task_id, attempt, evaluation, current_defects)
@@ -334,12 +327,13 @@ def reset_circuit_breaker(
     if not state_file.is_file():
         raise ResetAttemptsError("ACTIVE_STATE.json not found in controls directory.")
 
+    from stagecheck.core.state import load_active_state, save_active_state
+
     controls_dir = workspace_root / "controls"
-    with controlled_write_transaction(controls_dir):
-        with acquire_runtime_lock(controls_dir):
+    with acquire_runtime_lock(controls_dir):
+        with controlled_write_transaction(controls_dir):
             try:
-                with open(state_file, "r", encoding="utf-8") as f:
-                    active_state = json.load(f)
+                active_state = load_active_state(workspace_root)
             except Exception as err:
                 raise ResetAttemptsError(f"Failed to read ACTIVE_STATE.json: {err}") from err
 
@@ -366,20 +360,21 @@ def reset_circuit_breaker(
                     f"({current_attempt}/{MAX_DEFAULT_ATTEMPTS}). Retries are strictly prohibited."
                 )
 
-            # 4. Unlatch breaker state with monotonic attempt budgeting
+            # 4. Unlatch breaker state with monotonic attempt budgeting and schema-compliant audit entry
             next_attempt = current_attempt + 1
             active_state["circuit_breaker_tripped"] = False
             active_state["halt_reason"] = None
-            active_state["halt_trigger"] = None
+            active_state.pop("halt_trigger", None)
+            active_state.pop("last_reset", None)
             active_state["attempt_index"] = next_attempt
             active_state["phase"] = "PHASE_1_PLANNING"
-            active_state["last_reset"] = {
-                "authorized_by": authorized_by,
+            active_state.setdefault("resets_authorized", []).append({
                 "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "prior_attempt_index": current_attempt,
-            }
+                "authorized_by": authorized_by,
+                "from_attempt": current_attempt,
+                "to_attempt": next_attempt,
+            })
 
-            with open(state_file, "w", encoding="utf-8") as f:
-                f.write(pretty_json_dumps(active_state))
+            save_active_state(workspace_root, active_state)
 
             return active_state

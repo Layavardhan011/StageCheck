@@ -32,51 +32,51 @@ class NonInteractiveTeardownError(TeardownError):
     """Raised when stagecheck unlock is executed in non-interactive environment without --force or CI."""
 
 
+def _is_active_task_state(state: dict) -> bool:
+    status = state.get("status")
+    task_id = state.get("task_id")
+    phase = state.get("phase", "")
+    return bool(
+        task_id
+        and (
+            status == "IN_PROGRESS"
+            or (
+                phase not in ("NOT_STARTED", "IDLE", "COMPLETED", "SEALED_PASSED", "ABORTED")
+                and status not in ("SEALED_PASSED", "ABORTED")
+            )
+        )
+    )
+
+
 def assert_safe_teardown_preconditions(
     workspace_root: Union[str, Path],
     force: bool = False,
     abort_active: bool = False,
+    commit: bool = True,
 ) -> None:
     """Validate workspace teardown preconditions per Spec M11 / DEC-011.
 
     Guards:
     1. Active Task Protection: If task is active or IN_PROGRESS, require explicit --abort-active-task.
     2. Headless TTY / CI Verification: In non-interactive environments, require --force and CI=true or STAGECHECK_CI_MODE=1.
-    3. Structured Audit Record: Log event to evidence/teardown.log and terminate Sentinel daemon.
+    3. Structured Audit Record: Log event to evidence/teardown.log and terminate Sentinel daemon (when commit=True).
     """
     root = Path(workspace_root).resolve()
-    from stagecheck.core.state import load_active_state, save_active_state
+    from stagecheck.core.state import load_active_state
 
     state = load_active_state(root)
-    status = state.get("status")
     task_id = state.get("task_id")
-    phase = state.get("phase", "")
+    is_active = _is_active_task_state(state)
 
-    # Check if task is actively executing
-    is_active = (
-        status == "IN_PROGRESS"
-        or (
-            phase not in ("NOT_STARTED", "IDLE", "COMPLETED", "SEALED_PASSED", "ABORTED")
-            and status not in ("SEALED_PASSED", "ABORTED")
+    # Guard 1: Active task check (read-only first!)
+    if is_active and not abort_active:
+        raise ActiveTaskTeardownBlockedError(
+            f"Teardown blocked: Task '{task_id}' is currently IN_PROGRESS. "
+            "Unlocking the workspace would compromise active audit evidence. "
+            "To force termination, supply explicit flag: --abort-active-task"
         )
-    )
 
-    if is_active and task_id:
-        if not abort_active:
-            raise ActiveTaskTeardownBlockedError(
-                f"Teardown blocked: Task '{task_id}' is currently IN_PROGRESS. "
-                "Unlocking the workspace would compromise active audit evidence. "
-                "To force termination, supply explicit flag: --abort-active-task"
-            )
-        # Record task abortion in active state
-        controls_dir = root / "controls"
-        with controlled_write_transaction(controls_dir):
-            state["phase"] = "ABORTED"
-            state["status"] = "ABORTED"
-            state["turn"] = "IDLE"
-            save_active_state(root, state)
-
-    # Guard 2: Headless TTY / CI Verification
+    # Guard 2: Headless TTY / CI Verification (must succeed BEFORE any state mutation!)
     if not sys.stdin.isatty():
         is_ci = os.environ.get("CI") == "true" or os.environ.get("STAGECHECK_CI_MODE") == "1"
         if not (force and is_ci):
@@ -85,11 +85,44 @@ def assert_safe_teardown_preconditions(
                 "--force and run within an authorized CI environment (CI=true)."
             )
 
+    if commit:
+        commit_safe_teardown(root, abort_active=abort_active, force=force)
+
+
+def commit_safe_teardown(
+    workspace_root: Union[str, Path],
+    abort_active: bool = False,
+    force: bool = False,
+) -> None:
+    """Commit active-task abort, Sentinel termination, and teardown audit log after confirmation."""
+    root = Path(workspace_root).resolve()
+    from stagecheck.core.locking import acquire_runtime_lock
+    from stagecheck.core.state import load_active_state, save_active_state
+
+    controls_dir = root / "controls"
+    task_id: Optional[str] = None
+    aborted = False
+
+    if controls_dir.is_dir():
+        with acquire_runtime_lock(controls_dir):
+            state = load_active_state(root)
+            task_id = state.get("task_id")
+            if _is_active_task_state(state) and abort_active:
+                with controlled_write_transaction(controls_dir):
+                    state["phase"] = "ABORTED"
+                    state["status"] = "ABORTED"
+                    state["turn"] = "IDLE"
+                    save_active_state(root, state)
+                aborted = True
+    else:
+        state = load_active_state(root)
+        task_id = state.get("task_id")
+
     # Guard 3: Structured audit record & sentinel termination
     log_teardown_audit_event(
         workspace_root=root,
         task_id=task_id,
-        aborted=abort_active if is_active else False,
+        aborted=aborted,
         forced=force,
     )
 
@@ -106,19 +139,21 @@ def log_teardown_audit_event(
     evidence_dir.mkdir(parents=True, exist_ok=True)
     teardown_log = evidence_dir / "teardown.log"
 
-    # Stop Sentinel if running
+    # Stop Sentinel if running (symlink and PID > 1 guarded)
     sentinel_pid = None
     sentinel_pid_file = root / ".stagecheck_sentinel.pid"
-    if sentinel_pid_file.is_file():
+    if sentinel_pid_file.is_file() and not sentinel_pid_file.is_symlink():
         try:
             pid_str = sentinel_pid_file.read_text(encoding="utf-8").strip()
             if pid_str.isdigit():
-                sentinel_pid = int(pid_str)
-                import signal
-                try:
-                    os.kill(sentinel_pid, signal.SIGTERM)
-                except OSError:
-                    pass
+                cand_pid = int(pid_str)
+                if cand_pid > 1:
+                    sentinel_pid = cand_pid
+                    import signal
+                    try:
+                        os.kill(sentinel_pid, signal.SIGTERM)
+                    except OSError:
+                        pass
             sentinel_pid_file.unlink(missing_ok=True)
         except Exception:
             pass
@@ -141,15 +176,21 @@ def log_teardown_audit_event(
         "sentinel_pid_stopped": sentinel_pid,
     }
 
-    # Open with O_APPEND under permissions
-    if teardown_log.is_file():
+    with controlled_write_transaction(evidence_dir):
+        if teardown_log.is_symlink():
+            raise TeardownError(f"Security violation: '{teardown_log}' is a symlink.")
+        if teardown_log.is_file():
+            try:
+                os.chmod(teardown_log, 0o644)
+            except OSError:
+                pass
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(teardown_log), flags, 0o644)
         try:
-            os.chmod(teardown_log, 0o644)
-        except OSError:
-            pass
-
-    with open(teardown_log, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+        except Exception:
+            raise
 
     return teardown_log
 
@@ -196,6 +237,25 @@ def apply_at_rest_permissions(workspace_root: Union[str, Path]) -> None:
                         os.chmod(str(item), MODE_FILE_RO)
         finally:
             os.chmod(str(evidence_dir), MODE_DIR_RO)
+
+    # 3. Re-freeze any sealed attempt subtrees (preserve immutability at rest)
+    if tasks_dir.is_dir():
+        for task_entry in tasks_dir.iterdir():
+            if not task_entry.is_dir() or task_entry.is_symlink():
+                continue
+            for attempt_entry in task_entry.iterdir():
+                if not attempt_entry.is_dir() or attempt_entry.is_symlink():
+                    continue
+                if (attempt_entry / "seal.json").is_file():
+                    freeze_phase_directory(attempt_entry)
+                else:
+                    for phase_entry in attempt_entry.iterdir():
+                        if phase_entry.is_dir() and not phase_entry.is_symlink():
+                            if (
+                                (phase_entry / "prompt_verified.json").is_file()
+                                or any(phase_entry.glob("gate*_receipt.json"))
+                            ):
+                                freeze_phase_directory(phase_entry)
 
 
 def elevate_permissions_for_teardown(workspace_root: Union[str, Path]) -> None:

@@ -14,16 +14,58 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
-from stagecheck.core.git import SAFE_GIT_SECURITY_FLAGS, run_safe_git
-from stagecheck.core.paths import resolve_task_dir
+from stagecheck.core.git import SAFE_GIT_SECURITY_FLAGS, run_safe_git, run_safe_git_bytes
+from stagecheck.core.paths import StageCheckPathError, resolve_task_dir, safe_resolve
 from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest, validate_schema
 from stagecheck.schemas import get_schema_path
+
+_REPO_NAME_RE = re.compile(r"\A[a-zA-Z0-9._-]+\Z")
+_COMMIT_SHA_RE = re.compile(r"\A[0-9a-fA-F]{40,64}\Z")
+
+
+def validate_commit_sha(commit_sha: Any, repo_name: str) -> str:
+    """Validate that a commit SHA is a strict 40-64 char hex digest (never a CLI flag)."""
+    if not isinstance(commit_sha, str) or not _COMMIT_SHA_RE.match(commit_sha):
+        raise ReviewGateError(f"Invalid commit SHA '{commit_sha}' for repository '{repo_name}'.")
+    return commit_sha
+
+
+def resolve_governed_repo_path(root: Path, repo_name: str) -> Path:
+    """Resolve repository path safely against workspace repos/ and PRODUCT_REPOSITORIES.json."""
+    if not isinstance(repo_name, str) or not _REPO_NAME_RE.match(repo_name) or repo_name in (".", ".."):
+        raise ReviewGateError(f"Invalid repository name '{repo_name}'.")
+
+    prod_repos_file = root / "controls" / "PRODUCT_REPOSITORIES.json"
+    if prod_repos_file.is_file():
+        try:
+            p_data = json.loads(prod_repos_file.read_text(encoding="utf-8"))
+        except Exception as err:
+            raise ReviewGateError(f"Malformed PRODUCT_REPOSITORIES.json: {err}") from err
+        registered = p_data.get("repositories")
+        if not isinstance(registered, dict):
+            raise ReviewGateError("PRODUCT_REPOSITORIES.json missing valid 'repositories' object.")
+        if registered:
+            if repo_name not in registered:
+                raise ReviewGateError(f"Unregistered repository '{repo_name}' in PRODUCT_REPOSITORIES.json.")
+            custom_rel = registered[repo_name].get("path")
+            if custom_rel:
+                try:
+                    return safe_resolve(custom_rel, root)
+                except StageCheckPathError as err:
+                    raise ReviewGateError(f"Repository '{repo_name}' path escapes workspace: {err}") from err
+
+    try:
+        repos_dir = safe_resolve("repos", root)
+        return safe_resolve(repo_name, repos_dir)
+    except StageCheckPathError as err:
+        raise ReviewGateError(f"Repository '{repo_name}' path escapes workspace repos/: {err}") from err
 
 
 class ReviewGateError(Exception):
@@ -148,19 +190,44 @@ def verify_precommit_scope(
 
     violations: List[str] = []
 
+    if not touched_repos:
+        return ["Missing touched_repositories: at least one repository must be evaluated in pre-commit review."]
+
     for repo_name in touched_repos:
-        repo_path = root / "repos" / repo_name
-        if not repo_path.is_dir():
+        try:
+            repo_path = resolve_governed_repo_path(root, repo_name)
+        except ReviewGateError as err:
+            violations.append(str(err))
             continue
 
-        base_commit = base_commits.get(repo_name)
+        if not repo_path.is_dir():
+            violations.append(f"Repository directory missing for '{repo_name}': '{repo_path}'.")
+            continue
+
+        base_commit = (base_commits or {}).get(repo_name)
+        if not base_commit:
+            violations.append(f"Missing required base_commit for repository '{repo_name}'.")
+            continue
+        try:
+            validate_commit_sha(base_commit, repo_name)
+        except ReviewGateError as err:
+            violations.append(str(err))
+            continue
+
         modified_files: Set[str] = set()
 
-        if base_commit:
-            res_tracked = run_safe_git(repo_path, ["diff", "--name-only", base_commit])
-            for f in res_tracked.stdout.splitlines():
-                if f.strip():
-                    modified_files.add(f.strip())
+        res_tracked = run_safe_git(repo_path, ["diff", "--name-only", "--end-of-options", base_commit, "--"])
+        if res_tracked.returncode != 0:
+            violations.append(f"Failed git diff in '{repo_name}' against base '{base_commit}': {res_tracked.stderr.strip()}")
+            continue
+        for f in res_tracked.stdout.splitlines():
+            if f.strip():
+                modified_files.add(f.strip())
+
+        res_staged = run_safe_git(repo_path, ["diff", "--cached", "--name-only"])
+        for f in res_staged.stdout.splitlines():
+            if f.strip():
+                modified_files.add(f.strip())
 
         res_untracked = run_safe_git(repo_path, ["ls-files", "--others", "--exclude-standard"])
         for f in res_untracked.stdout.splitlines():
@@ -203,23 +270,9 @@ def compute_uncommitted_diff_hashes(
     from stagecheck.core.utils import sha256_file
 
     for repo_name in sorted(touched_repos):
-        repo_path = repos_dir / repo_name
-        if not repo_path.is_dir():
-            prod_repos_file = root / "controls" / "PRODUCT_REPOSITORIES.json"
-            if prod_repos_file.is_file():
-                try:
-                    p_data = json.loads(prod_repos_file.read_text(encoding="utf-8"))
-                    custom_rel = p_data.get("repositories", {}).get(repo_name, {}).get("path")
-                    if custom_rel and (root / custom_rel).is_dir():
-                        repo_path = root / custom_rel
-                except Exception:
-                    pass
-            if not repo_path.is_dir() and (root / ".git").is_dir():
-                repo_path = root
+        repo_path = resolve_governed_repo_path(root, repo_name)
 
-        base_commit = base_commits.get(repo_name)
-        if not base_commit:
-            raise ReviewGateError(f"Missing required base_commit for repository '{repo_name}'.")
+        base_commit = validate_commit_sha(base_commits.get(repo_name), repo_name)
 
         # Inspect untracked non-ignored files & enforce limits (ARCH-03 / FR-09)
         untracked_files, u_count, u_bytes = inspect_untracked_files(repo_path)
@@ -232,18 +285,11 @@ def compute_uncommitted_diff_hashes(
             sha256_digest("\n".join(untracked_lines).encode("utf-8")) if untracked_lines else "0" * 64
         )
 
-        cmd = [
-            "git",
-            *SAFE_GIT_SECURITY_FLAGS,
-            "-C",
-            str(repo_path),
-            "diff",
-            "--binary",
-            "--no-ext-diff",
-            "--no-textconv",
-            base_commit,
-        ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        res = run_safe_git_bytes(
+            repo_path,
+            ["diff", "--binary", "--end-of-options", base_commit, "--"],
+            check=True,
+        )
         diff_bytes = res.stdout
 
         total_diff_bytes += len(diff_bytes)
@@ -379,11 +425,13 @@ def record_pre_commit_review(
 
     touched_repos = list(base_commits.keys())
     if status == "APPROVED":
+        if not touched_repos:
+            raise ReviewGateError("Review cannot be APPROVED with empty base_commits.")
         # 1. Enforce staged secret scanning gate before commit authorization (Spec 08, Spec 14, SEC-M1)
         from stagecheck.core.scanner import SecretScanner
         scanner = SecretScanner()
         for repo_name in touched_repos:
-            repo_path = root / "repos" / repo_name
+            repo_path = resolve_governed_repo_path(root, repo_name)
             if repo_path.is_dir():
                 staged_res = scanner.scan_staged_changes(repo_dir=repo_path, repo_name=repo_name)
                 if not staged_res.is_clear:
@@ -509,19 +557,10 @@ def verify_committed_diff_fidelity(
     repos_dir = root / "repos"
 
     for repo_name in touched_repos:
-        repo_path = repos_dir / repo_name
-        if not repo_path.is_dir():
-            prod_repos_file = root / "controls" / "PRODUCT_REPOSITORIES.json"
-            if prod_repos_file.is_file():
-                try:
-                    p_data = json.loads(prod_repos_file.read_text(encoding="utf-8"))
-                    custom_rel = p_data.get("repositories", {}).get(repo_name, {}).get("path")
-                    if custom_rel and (root / custom_rel).is_dir():
-                        repo_path = root / custom_rel
-                except Exception:
-                    pass
-            if not repo_path.is_dir() and (root / ".git").is_dir():
-                repo_path = root
+        try:
+            repo_path = resolve_governed_repo_path(root, repo_name)
+        except ReviewGateError as err:
+            raise CommitDivergenceError(str(err)) from err
 
         base_commit = base_commits.get(repo_name)
         target_commit = target_commits.get(repo_name)
@@ -532,18 +571,17 @@ def verify_committed_diff_fidelity(
                 f"Missing baseline, target, or approved diff hash for repository '{repo_name}'."
             )
 
-        cmd = [
-            "git",
-            *SAFE_GIT_SECURITY_FLAGS,
-            "-C",
-            str(repo_path),
-            "diff",
-            "--binary",
-            "--no-ext-diff",
-            "--no-textconv",
-            f"{base_commit}..{target_commit}",
-        ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        try:
+            validate_commit_sha(base_commit, repo_name)
+            validate_commit_sha(target_commit, repo_name)
+        except ReviewGateError as err:
+            raise CommitDivergenceError(str(err)) from err
+
+        res = run_safe_git_bytes(
+            repo_path,
+            ["diff", "--binary", "--end-of-options", f"{base_commit}..{target_commit}", "--"],
+            check=True,
+        )
         committed_diff_hash = sha256_digest(res.stdout)
 
         if committed_diff_hash != approved_hash:

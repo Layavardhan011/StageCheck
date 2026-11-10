@@ -390,31 +390,79 @@ def run_rubric_evaluation(
 
     catalog = load_270_rule_catalog()
 
-    # Discover target repo and context
+    # Discover all registered repositories & gather live context (fast <200ms SLA)
     repos_dir = root / "repos"
-    target_repo = repos_dir
+    repo_dirs: List[Path] = []
     if repos_dir.is_dir():
-        subdirs = [d for d in repos_dir.iterdir() if d.is_dir() and not d.name.startswith(".")]
-        if subdirs:
-            target_repo = subdirs[0]
+        repo_dirs = [d for d in sorted(repos_dir.iterdir()) if d.is_dir() and not d.name.startswith(".")]
+    target_repo = repo_dirs[0] if repo_dirs else repos_dir
 
-    # Gather quick context for evaluation
+    # Load declared scope & pre-commit touched repositories if present
+    attempt_dir = resolve_task_attempt_dir(root, resolved_task, resolved_attempt)
+    declared_scope: Dict[str, Any] = {}
+    scope_file = attempt_dir / "Phase-1" / "declared_scope.json"
+    if scope_file.is_file():
+        try:
+            declared_scope = json.loads(scope_file.read_text(encoding="utf-8"))
+        except Exception:
+            declared_scope = {}
+
+    touched_repo_names: Optional[Set[str]] = None
+    status_file = attempt_dir / "Phase-2A" / "pre_commit_status.json"
+    if status_file.is_file():
+        try:
+            status_doc = json.loads(status_file.read_text(encoding="utf-8"))
+            if isinstance(status_doc.get("touched_repositories"), list):
+                touched_repo_names = set(status_doc["touched_repositories"])
+        except Exception:
+            pass
+
     uncommitted_diffs: Dict[str, str] = {}
     untouched_dirty: List[str] = []
     out_of_scope_files: List[str] = []
     secrets_found: List[str] = []
 
-    # Check git status in repos
-    if repos_dir.is_dir():
-        for r_dir in [d for d in repos_dir.iterdir() if d.is_dir()]:
-            if (r_dir / ".git").is_dir():
-                try:
-                    from stagecheck.core.git import run_safe_git
-                    res = run_safe_git(r_dir, ["status", "--porcelain"])
-                    if res.returncode == 0 and res.stdout.strip():
-                        uncommitted_diffs[r_dir.name] = res.stdout.strip()
-                except Exception:
-                    pass
+    from stagecheck.core.git import run_safe_git
+    from stagecheck.core.prompt_gate import is_path_in_scope
+
+    _SECRET_RE = re.compile(
+        r"(?:AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9_]{20,}|-----BEGIN (?:RSA|EC|OPENSSH|PRIVATE) KEY-----|sk-[A-Za-z0-9]{20,})"
+    )
+
+    for r_dir in repo_dirs:
+        if (r_dir / ".git").exists():
+            try:
+                res = run_safe_git(r_dir, ["status", "--porcelain=v1", "--untracked-files=all"])
+                if res.returncode == 0 and res.stdout.strip():
+                    uncommitted_diffs[r_dir.name] = res.stdout.strip()
+                    if touched_repo_names is not None and r_dir.name not in touched_repo_names:
+                        untouched_dirty.append(r_dir.name)
+                    for line in res.stdout.splitlines():
+                        if not line.strip():
+                            continue
+                        rel_p = line[3:].strip()
+                        if " -> " in rel_p:
+                            rel_p = rel_p.split(" -> ")[1].strip()
+                        ws_rel = f"repos/{r_dir.name}/{rel_p}"
+                        if declared_scope and not is_path_in_scope(ws_rel, declared_scope):
+                            out_of_scope_files.append(ws_rel)
+                        fpath = r_dir / rel_p
+                        if fpath.is_file() and not fpath.is_symlink() and fpath.stat().st_size <= 1024 * 1024:
+                            if _SECRET_RE.search(fpath.read_text(encoding="utf-8", errors="ignore")):
+                                secrets_found.append(ws_rel)
+            except Exception:
+                pass
+
+    # Include any Phase-3 scanner defects if already recorded
+    scanner_rep = attempt_dir / "Phase-3" / "scanner_report.json"
+    if scanner_rep.is_file():
+        try:
+            s_doc = json.loads(scanner_rep.read_text(encoding="utf-8"))
+            for d in s_doc.get("defects", []):
+                if d.get("blocking"):
+                    secrets_found.append(d.get("message", d.get("defect_id", "secret_detected")))
+        except Exception:
+            pass
 
     context = {
         "uncommitted_diffs": uncommitted_diffs,
@@ -429,6 +477,19 @@ def run_rubric_evaluation(
     for rule in catalog:
         if target_domain and rule.domain.upper() != target_domain.upper():
             continue
+
+        # In multi-repo workspaces, exemption holds only if ALL registered repos satisfy predicate
+        if rule.exemption_predicate and len(repo_dirs) > 1:
+            pred_fn = EXEMPTION_PREDICATES.get(rule.exemption_predicate)
+            if pred_fn and not all(pred_fn(root, r_d) for r_d in repo_dirs):
+                saved_pred = rule.exemption_predicate
+                rule.exemption_predicate = None
+                try:
+                    res = evaluate_rubric_rule(rule, root, target_repo, context)
+                finally:
+                    rule.exemption_predicate = saved_pred
+                evaluations.append(res)
+                continue
 
         res = evaluate_rubric_rule(rule, root, target_repo, context)
         evaluations.append(res)

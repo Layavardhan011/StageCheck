@@ -27,7 +27,9 @@ from stagecheck.core.git import (
     GitError,
     RepoBaseline,
     _run_git_cmd,
+    assert_safe_repo_git_config,
     discover_repository,
+    run_safe_git,
 )
 from stagecheck.core.paths import safe_resolve
 
@@ -197,7 +199,8 @@ class TopologyWorktreeManager:
                         f"Original repository directory not found: '{original_repo_path}'"
                     )
 
-                # Capture baseline and enforce clean status if requested
+                # Capture baseline and enforce clean status + safe git config
+                assert_safe_repo_git_config(original_repo_path)
                 baseline = discover_repository(
                     repo_path=original_repo_path,
                     name=repo_name,
@@ -214,72 +217,24 @@ class TopologyWorktreeManager:
                 worktree_dest = self.repos_container / repo_name
                 layout.baselines[repo_name] = baseline.to_dict()
 
-                # If repo was untouched and touched_repos is non-empty, we can use a relative symlink
-                use_symlink = (
-                    bool(self.touched_repos)
-                    and repo_name not in self.touched_repos
+                # Always create detached ephemeral Git worktrees at baseline commit (never symlink live repos/)
+                res = run_safe_git(
+                    original_repo_path,
+                    ["worktree", "add", "--detach", str(worktree_dest), base_commit],
+                    check=False,
                 )
-
-                if use_symlink:
-                    # Sibling relative symlink: ../../../../repos/<repo_name>
-                    rel_target = Path("../../../../") / repo_rel_path
-                    try:
-                        worktree_dest.symlink_to(rel_target)
-                    except OSError as sym_err:
-                        raise WorktreeSetupError(
-                            f"Failed to create relative symlink for untouched repo '{repo_name}': {sym_err}"
-                        )
-                    item = EphemeralRepoWorktree(
-                        name=repo_name,
-                        original_path=original_repo_path,
-                        worktree_path=worktree_dest,
-                        base_commit=base_commit,
-                        is_symlink=True,
-                        is_active=True,
+                if res.returncode != 0:
+                    raise WorktreeSetupError(
+                        f"Failed to add git worktree for '{repo_name}' at commit {base_commit}: {res.stderr.strip()}"
                     )
-                else:
-                    # Detached Git worktree
-                    cmd = [
-                        "git",
-                        *SAFE_GIT_SECURITY_FLAGS,
-                        "-C",
-                        str(original_repo_path),
-                        "worktree",
-                        "add",
-                        "--detach",
-                        str(worktree_dest),
-                        base_commit,
-                    ]
-                    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-                    clean_env.update(
-                        {
-                            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                            "LANG": "C",
-                            "LC_ALL": "C",
-                            "GIT_CONFIG_NOSYSTEM": "1",
-                            "GIT_CONFIG_GLOBAL": "/dev/null",
-                            "GIT_CONFIG_COUNT": "0",
-                        }
-                    )
-                    res = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        env=clean_env,
-                    )
-                    if res.returncode != 0:
-                        raise WorktreeSetupError(
-                            f"Failed to add git worktree for '{repo_name}' at commit {base_commit}: {res.stderr.strip()}"
-                        )
-                    item = EphemeralRepoWorktree(
-                        name=repo_name,
-                        original_path=original_repo_path,
-                        worktree_path=worktree_dest,
-                        base_commit=base_commit,
-                        is_symlink=False,
-                        is_active=True,
-                    )
+                item = EphemeralRepoWorktree(
+                    name=repo_name,
+                    original_path=original_repo_path,
+                    worktree_path=worktree_dest,
+                    base_commit=base_commit,
+                    is_symlink=False,
+                    is_active=True,
+                )
 
                 created_worktrees.append(item)
                 layout.worktrees[repo_name] = item
@@ -313,30 +268,23 @@ class TopologyWorktreeManager:
 
             try:
                 dest = item.worktree_path
-                # Security: ensure dest is strictly within base_wt
-                if not dest.resolve().is_relative_to(base_wt):
+                # Security: verify parent is strictly within base_wt before symlink check
+                if not dest.parent.resolve().is_relative_to(base_wt):
                     continue
 
                 if item.is_symlink or os.path.islink(dest):
                     dest.unlink(missing_ok=True)
                 else:
-                    # Remove git worktree
-                    cmd = [
-                        "git",
-                        *SAFE_GIT_SECURITY_FLAGS,
-                        "-C",
-                        str(item.original_path),
-                        "worktree",
-                        "remove",
-                        "--force",
-                        str(dest),
-                    ]
-                    subprocess.run(cmd, capture_output=True, check=False)
-
-                    # Prune worktree metadata
-                    subprocess.run(
-                        ["git", *SAFE_GIT_SECURITY_FLAGS, "-C", str(item.original_path), "worktree", "prune"],
-                        capture_output=True,
+                    if not dest.resolve().is_relative_to(base_wt):
+                        continue
+                    run_safe_git(
+                        item.original_path,
+                        ["worktree", "remove", "--force", str(dest)],
+                        check=False,
+                    )
+                    run_safe_git(
+                        item.original_path,
+                        ["worktree", "prune"],
                         check=False,
                     )
             except Exception:
@@ -395,8 +343,4 @@ def prune_abandoned_worktrees(workspace_root: Union[str, Path]) -> None:
     if repos_dir.is_dir():
         for child in repos_dir.iterdir():
             if child.is_dir() and (child / ".git").exists():
-                subprocess.run(
-                    ["git", *SAFE_GIT_SECURITY_FLAGS, "-C", str(child), "worktree", "prune", "--expire", "now"],
-                    capture_output=True,
-                    check=False,
-                )
+                run_safe_git(child, ["worktree", "prune", "--expire", "now"], check=False)

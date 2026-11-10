@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.gate_engine import normalize_phase
+from stagecheck.core.locking import acquire_runtime_lock
 from stagecheck.core.paths import find_workspace_root
 from stagecheck.core.state import load_active_state, save_active_state
 from stagecheck.core.utils import canonical_json_dumps, load_json_file
@@ -60,9 +61,6 @@ def check_and_record_turn_rate_limit(
     Returns:
         (allowed, retry_after)
     """
-    if os.environ.get("STAGECHECK_DISABLE_RATE_LIMIT") == "1":
-        return True, 0.0
-
     tracker_file = workspace_root / ".stagecheck_turn_tracker.json"
     lock_file = workspace_root / ".stagecheck_turn_tracker.lock"
 
@@ -261,12 +259,17 @@ def compute_turn_status(
         instructions = f"Current phase is '{phase}'."
 
     # Watchdog activity reset during active agent phases (FR-05 / Issue 4)
-    if reset_watchdog and phase in ("PHASE_1_PLANNING", "PHASE_1_REPAIR", "PHASE_2A_CODING", "PHASE_2B_COMMITTING"):
+    active_watchdog_phases = ("PHASE_1_PLANNING", "PHASE_1_REPAIR", "PHASE_2A_CODING", "PHASE_2B_COMMITTING")
+    if reset_watchdog and phase in active_watchdog_phases:
         try:
-            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            state.setdefault("watchdog", {})["last_active_timestamp"] = now_iso
-            state.setdefault("watchdog", {})["last_active_monotonic"] = time.monotonic()
-            save_active_state(root, state)
+            with acquire_runtime_lock(root):
+                fresh = load_active_state(root)
+                fresh_phase = normalize_phase(fresh.get("phase", "NOT_STARTED"))
+                if not fresh.get("circuit_breaker_tripped") and fresh_phase in active_watchdog_phases:
+                    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    fresh.setdefault("watchdog", {})["last_active_timestamp"] = now_iso
+                    fresh.setdefault("watchdog", {})["last_active_monotonic"] = time.monotonic()
+                    save_active_state(root, fresh)
         except Exception:
             pass
 

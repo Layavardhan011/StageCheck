@@ -147,7 +147,7 @@ class TestPromptDebounce(unittest.TestCase):
             "## 12. Traceability Matrix & Manifest Attestation\nTrace\n"
         )
         (p1_dir / "declared_scope.json").write_text(
-            json.dumps({"schema_version": "2.0", "task_id": "task-101", "allowed_paths": ["repos/**"]})
+            json.dumps({"schema_version": "2.0", "task_id": "task-101", "allowed_paths": ["repos/core-service/**"]})
         )
 
         # Freeze with INOTIFY_SILENCE_30S

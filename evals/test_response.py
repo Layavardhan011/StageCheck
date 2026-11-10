@@ -283,9 +283,10 @@ class Hook(unittest.TestCase):
         self.data['claims'][0]['citations'][0]=cite;self.save()
         result=execute(self.run,'citations',self.home/'delivery-excluded');self.assertTrue(result['errors']);self.assertFalse(result['not_run'])
     def test_claude_new_answer_while_previous_sent_back(self):
-        previous={'decision':'sent_back','turn_id':None,'response_task_id':'resp-claude-session--1','finding_ids':[]}
+        prefix='resp-'+rh.digest(rh.encode(['claude','session-01']))[:16]
+        previous={'decision':'sent_back','turn_id':None,'response_task_id':prefix+'-1','finding_ids':[]}
         task,repair,counts,last=rh.task_counts('claude','session-01',{'stop_hook_active':False},[previous])
-        self.assertFalse(repair);self.assertEqual(task,'resp-claude-session--2')
+        self.assertFalse(repair);self.assertEqual(task,prefix+'-2')
         task,repair,counts,last=rh.task_counts('claude','session-01',{'stop_hook_active':True},[previous])
         self.assertTrue(repair);self.assertEqual(task,previous['response_task_id'])
     def test_repairs_final_and_reset(self):

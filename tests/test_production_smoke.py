@@ -112,15 +112,20 @@ class TestProductionSmoke(unittest.TestCase):
         self.assertEqual(status2["active_task"], "task-101")
 
         # 6. Execute Phase 2A pre-commit review
+        base_commit = subprocess.run(
+            ["git", "-C", str(self.workspace_dir / "repos" / "core-service"), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
         phase2a_dir = self.workspace_dir / "evidence/tasks/task-101/attempt_1/Phase-2A"
         phase2a_dir.mkdir(parents=True, exist_ok=True)
         status_payload = {
             "schema_version": "2.0",
             "task_id": "task-101",
+            "attempt": 1,
             "cycle": 1,
-            "status": "READY_FOR_REVIEW",
+            "status": "AWAITING_REVIEW",
             "touched_repositories": ["core-service"],
-            "base_commits": {},
+            "base_commits": {"core-service": base_commit},
             "summary": "Implemented core-service components.",
         }
         (phase2a_dir / "pre_commit_status.json").write_text(

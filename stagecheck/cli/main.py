@@ -208,13 +208,20 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Startup auto-recovery of interrupted transactions (FR-10 / DEC-010)
     ws_arg = getattr(args, "workspace", None)
+    ws_root = None
     try:
         from stagecheck.core.journal import recover_interrupted_transactions
-        from stagecheck.core.paths import find_workspace_root
+        from stagecheck.core.paths import WorkspaceRootNotFoundError, find_workspace_root
         ws_root = Path(ws_arg).resolve() if ws_arg else find_workspace_root()
-        recover_interrupted_transactions(ws_root, verbose=True)
-    except Exception:
-        pass
+    except WorkspaceRootNotFoundError:
+        ws_root = None
+
+    if ws_root is not None:
+        try:
+            recover_interrupted_transactions(ws_root, verbose=True)
+        except Exception as err:
+            print(f"ERROR: [journal.recovery_failed] {err}", file=sys.stderr)
+            return 1
 
     if args.subcommand == "init":
         from stagecheck.cli.init_cmd import run_init
@@ -228,17 +235,23 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.subcommand == "start":
         from stagecheck.cli.start_cmd import run_start
-        from stagecheck.core.paths import find_workspace_root
+        from stagecheck.core.paths import WorkspaceRootNotFoundError, find_workspace_root
         ws = getattr(args, "workspace", None)
+        if ws:
+            return run_start(
+                workspace=Path(ws).resolve(),
+                task=args.task,
+            )
         try:
-            ws_root = Path(ws).resolve() if ws else find_workspace_root()
-            if (ws_root / "controls").is_dir():
-                return run_start(
-                    workspace=ws_root,
-                    task=args.task,
-                )
-        except Exception:
-            pass
+            ws_root = find_workspace_root()
+        except WorkspaceRootNotFoundError:
+            print(f"StageCheck v{stagecheck.__version__}: Dispatched subcommand 'start'")
+            return 0
+        if (ws_root / "controls").is_dir():
+            return run_start(
+                workspace=ws_root,
+                task=args.task,
+            )
         print(f"StageCheck v{stagecheck.__version__}: Dispatched subcommand 'start'")
         return 0
 

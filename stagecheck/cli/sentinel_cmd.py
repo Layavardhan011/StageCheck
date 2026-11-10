@@ -51,11 +51,26 @@ def run_sentinel(
         return 0
 
     elif action == "logs":
+        import os
         log_file = Path(sentinel.status()["log_file"])
+        if log_file.is_symlink():
+            print(f"ERROR: Sentinel log '{log_file}' is a symbolic link.", file=sys.stderr)
+            return 1
         if not log_file.is_file():
             print(f"No Sentinel logs found at '{log_file}'.")
             return 0
-        content = log_file.read_text(encoding="utf-8").strip()
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(log_file), flags)
+        with os.fdopen(fd, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            offset = max(0, size - 65536)
+            f.seek(offset, os.SEEK_SET)
+            raw = f.read()
+        if offset > 0 and b"\n" in raw:
+            raw = raw.split(b"\n", 1)[1]
+        lines = raw.decode("utf-8", errors="replace").splitlines()[-200:]
+        content = "\n".join(lines).strip()
         print(content if content else "Sentinel log file is empty.")
         return 0
 

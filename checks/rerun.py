@@ -124,12 +124,17 @@ def execute_copy(ctx, auto, cite, module, rel):
         if argv[1] == 'test':
             rest, i = [], 2
             while i < len(argv):
-                if argv[i] == '-count':
+                a = argv[i]
+                if a == '-count':
                     i += 2
-                    continue
-                if not argv[i].startswith('-count='):
-                    rest.append(argv[i])
-                i += 1
+                elif a.startswith('-count='):
+                    i += 1
+                elif a in VALUE_FLAGS:
+                    rest.extend(argv[i:i + 2])
+                    i += 2
+                else:
+                    rest.append(a)
+                    i += 1
             argv = [argv[0], argv[1], '-count=1'] + rest
         try:
             return ctx.run_command(argv, copy / rel, timeout=auto['timeout_seconds'], env=env)

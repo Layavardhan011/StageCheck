@@ -34,7 +34,7 @@ class StageResult:
 
     @property
     def is_clear(self) -> bool:
-        return self.status == "CLEAR" and not any(d.blocking for d in self.defects)
+        return self.status == "CLEAR" and not self.errors and not any(d.blocking for d in self.defects)
 
     def to_dict(self) -> Dict[str, Any]:
         return {

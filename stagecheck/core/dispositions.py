@@ -21,7 +21,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from stagecheck.core.agents_md import write_agents_contract
 from stagecheck.core.evidence import update_evidence_manifest
 from stagecheck.core.locking import acquire_runtime_lock
-from stagecheck.core.paths import StageCheckPathError, find_workspace_root, resolve_task_dir, validate_task_id
+from stagecheck.core.paths import (
+    StageCheckPathError,
+    find_workspace_root,
+    resolve_task_dir,
+    safe_resolve,
+    validate_task_id,
+)
 from stagecheck.core.permissions import controlled_write_transaction
 from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_file
 
@@ -126,9 +132,9 @@ def add_disposition(
         "status": "APPROVED",
     }
 
-    # 2. Atomic Controlled Write Transaction
-    with controlled_write_transaction(controls_dir):
-        with acquire_runtime_lock(controls_dir):
+    # 2. Atomic Controlled Write Transaction (lock-first ordering)
+    with acquire_runtime_lock(controls_dir):
+        with controlled_write_transaction(controls_dir):
             disp_data = load_dispositions(workspace_root)
             dispositions = disp_data.setdefault("dispositions", [])
 
@@ -156,7 +162,7 @@ def add_disposition(
     # 4. Update EVIDENCE_MANIFEST with updated DISPOSITIONS.json and AGENTS.md
     update_evidence_manifest(workspace_root, [disp_path, workspace_root / "AGENTS.md"])
 
-    # 5. Append audit event to TASK_<ID>_ISSUE_HISTORY.md
+    # 5. Append audit event to TASK_<ID>_ISSUE_HISTORY.md (no symlink follow)
     task_dir = _resolve_task_evidence_dir(workspace_root, task_id)
     evidence_dir = workspace_root / "evidence"
     is_ev_ro = evidence_dir.is_dir() and not os.access(evidence_dir, os.W_OK)
@@ -167,7 +173,9 @@ def add_disposition(
     finally:
         if is_ev_ro:
             os.chmod(evidence_dir, 0o555)
-    history_file = task_dir / f"TASK_{task_id}_ISSUE_HISTORY.md"
+    history_file = safe_resolve(f"TASK_{task_id}_ISSUE_HISTORY.md", task_dir, allow_symlinks=False)
+    if history_file.is_symlink():
+        raise DispositionError(f"Refusing to follow symlinked issue history '{history_file}'.")
 
     disp_hash = sha256_file(disp_path)
     event_lines = [
@@ -217,13 +225,19 @@ def resume_after_disposition(
         raise DispositionError("ACTIVE_STATE.json not found in controls directory.")
 
     controls_dir = workspace_root / "controls"
-    with controlled_write_transaction(controls_dir):
-        with acquire_runtime_lock(controls_dir):
+    with acquire_runtime_lock(controls_dir):
+        with controlled_write_transaction(controls_dir):
             try:
                 with open(state_file, "r", encoding="utf-8") as f:
                     state = json.load(f)
             except Exception as err:
                 raise DispositionError(f"Failed to read ACTIVE_STATE.json: {err}") from err
+
+            active_task = state.get("task_id")
+            if active_task and active_task != task_id:
+                raise DispositionError(
+                    f"Task mismatch on resume: requested '{task_id}', active state tracks '{active_task}'."
+                )
 
             # If circuit breaker is tripped, disposition alone does not reset it
             if state.get("circuit_breaker_tripped"):
@@ -246,7 +260,9 @@ def resume_after_disposition(
                 disp_ids = {
                     d.get("defect_id")
                     for d in dispositions_doc.get("dispositions", [])
-                    if d.get("defect_id") and d.get("status") == "APPROVED"
+                    if d.get("defect_id")
+                    and d.get("status") == "APPROVED"
+                    and d.get("task_id") == task_id
                 }
 
                 unresolved_blocking = 0

@@ -82,16 +82,31 @@ GO_CLASS = ('test', 'vet', 'build', 'list')
 
 def git_consequential(argv):
     words = list(argv[1:])
-    # -C <dir>, --git-dir=/--work-tree= and -c <key=value> with a harmless key keep a read command
-    # read-only; a -c key that can start a program (core.fsmonitor, diff.external, core.pager, ...) is consequential.
-    while words and (words[0] in GIT_GLOBAL_PAIRS and len(words) >= 2 or words[0].startswith(GIT_GLOBAL_EQ)):
+    # Reject --git-dir, --work-tree, and -C repository/config overrides for ungranted read-only git;
+    # only safe -c <key=value> overrides keep a read command non-consequential.
+    while words and (
+        (words[0] in GIT_GLOBAL_PAIRS and len(words) >= 2)
+        or words[0] in ('--git-dir', '--work-tree')
+        or words[0].startswith(GIT_GLOBAL_EQ)
+        or words[0].startswith('-C')
+    ):
+        if (
+            words[0] in ('--git-dir', '--work-tree', '-C')
+            or words[0].startswith(GIT_GLOBAL_EQ)
+            or words[0].startswith('-C')
+        ):
+            return True
         if words[0] == '-c' and words[1].split('=', 1)[0].lower() not in SAFE_GIT_CONFIG:
             return True
-        words = words[1:] if words[0].startswith(GIT_GLOBAL_EQ) else words[2:]
+        words = words[2:]
     if not words:
         return True
     sub, args = words[0], words[1:]
-    writes_output = any(x in OUTPUT_FLAGS or x.startswith('--output=') or x.startswith('--open-files-in-pager=') for x in args)
+    writes_output = any(
+        x in OUTPUT_FLAGS
+        or x.startswith(('--output=', '--open-files-in-pager=', '-O'))
+        for x in args
+    )
     if sub == 'branch':
         return args not in ([], ['--show-current'], ['--list'])
     if sub == 'remote':
@@ -160,7 +175,12 @@ def consequential(argv):
     if name in TEXT_READERS:
         return False
     if name == 'sort':
-        return any(x.startswith('--output') or (x.startswith('-') and not x.startswith('--') and 'o' in x[1:]) for x in args)
+        return any(
+            x == '--compress-program'
+            or x.startswith(('--output', '--compress-program='))
+            or (x.startswith('-') and not x.startswith('--') and 'o' in x[1:])
+            for x in args
+        )
     if name == 'sed':
         return not sed_read_only(args)
     if name == 'find':
@@ -195,11 +215,11 @@ def check(ctx, value):
     config = loads(ctx.read(ctx.tool / 'config/commands.json'))
     if not ctx.run.get('response'):
         repo = canonical(ctx.run['repo'])
-        names = ctx.run_command(['git','-C',str(repo),'remote'], repo)
+        names = ctx.run_safe_git(['remote'], repo)
         if names['exit_status']:
             raise ToolError('cannot inspect effective git remotes')
         for name in names['stdout'].splitlines():
-            urls = ctx.run_command(['git','-C',str(repo),'remote','get-url','--push','--all',name], repo)
+            urls = ctx.run_safe_git(['remote','get-url','--push','--all',name], repo)
             if urls['exit_status']:
                 raise ToolError('cannot resolve push URL')
             for url in urls['stdout'].splitlines():

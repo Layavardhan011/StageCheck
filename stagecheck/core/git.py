@@ -6,6 +6,7 @@ unborn HEAD handling, commit baseline capture, and clean working tree validation
 
 from __future__ import annotations
 
+import configparser
 import json
 import os
 import subprocess
@@ -70,24 +71,94 @@ SAFE_GIT_SECURITY_FLAGS: List[str] = [
 ]
 
 
-def run_safe_git(
-    repo_path: Path,
-    args: List[str],
-    check: bool = False,
-) -> subprocess.CompletedProcess[str]:
-    """Execute a hardened read-only git command in the target repository directory.
+def _resolve_git_config_files(repo_path: Path) -> List[Path]:
+    """Locate .git/config (and commondir/config for worktrees) without invoking git."""
+    git_entry = repo_path / ".git"
+    configs: List[Path] = []
+    if git_entry.is_dir():
+        cfg = git_entry / "config"
+        if cfg.is_file():
+            configs.append(cfg)
+    elif git_entry.is_file():
+        try:
+            text = git_entry.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError as err:
+            raise GitError(f"Failed to read gitdir pointer '{git_entry}': {err}") from err
+        if text.startswith("gitdir:"):
+            raw_dir = text.split(":", 1)[1].strip()
+            git_dir = (repo_path / raw_dir).resolve() if not os.path.isabs(raw_dir) else Path(raw_dir).resolve()
+            cfg = git_dir / "config"
+            if cfg.is_file():
+                configs.append(cfg)
+            commondir_file = git_dir / "commondir"
+            if commondir_file.is_file():
+                raw_common = commondir_file.read_text(encoding="utf-8", errors="replace").strip()
+                common_dir = (git_dir / raw_common).resolve() if not os.path.isabs(raw_common) else Path(raw_common).resolve()
+                common_cfg = common_dir / "config"
+                if common_cfg.is_file() and common_cfg not in configs:
+                    configs.append(common_cfg)
+    return configs
 
-    Prepends SAFE_GIT_SECURITY_FLAGS, enforces --no-ext-diff and --no-textconv
-    on diff subcommands, strips GIT_* environment variables, and neutralizes
-    system/global git configuration.
-    """
+
+def assert_safe_repo_git_config(repo_path: Path) -> None:
+    """Parse repository-local git config safely in Python and fail closed on command-executing keys."""
+    for cfg_path in _resolve_git_config_files(repo_path):
+        parser = configparser.RawConfigParser(allow_no_value=True, strict=False)
+        try:
+            parser.read(cfg_path, encoding="utf-8")
+        except Exception as err:
+            raise GitError(f"Unsafe or unparseable repository git config '{cfg_path}': {err}") from err
+
+        for section in parser.sections():
+            sec_lower = section.strip().lower()
+            sec_prefix = sec_lower.split()[0].split('"')[0]
+            keys = {k.strip().lower() for k in parser[section].keys()}
+
+            if sec_prefix == "filter" and keys & {"clean", "smudge", "process"}:
+                raise GitError(
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting filter driver in '{cfg_path}' section [{section}]."
+                )
+            if sec_prefix == "diff" and keys & {"command", "textconv"}:
+                raise GitError(
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting diff driver in '{cfg_path}' section [{section}]."
+                )
+            if sec_prefix == "merge" and "driver" in keys:
+                raise GitError(
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting merge driver in '{cfg_path}' section [{section}]."
+                )
+            if sec_prefix == "alias" and keys:
+                raise GitError(
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting repo alias in '{cfg_path}'."
+                )
+            if sec_prefix == "credential" and "helper" in keys:
+                raise GitError(
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting credential.helper in '{cfg_path}'."
+                )
+            if sec_prefix == "core" and keys & {"sshcommand", "gitproxy", "alternaterefscommand"}:
+                raise GitError(
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting command-executing core setting in '{cfg_path}'."
+                )
+            if sec_prefix == "gpg" and "program" in keys:
+                raise GitError(
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting gpg.program in '{cfg_path}'."
+                )
+            if sec_prefix == "remote" and keys & {"uploadpack", "receivepack"}:
+                raise GitError(
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting remote transport command in '{cfg_path}'."
+                )
+
+
+def _build_safe_git_command(
+    repo_path: Path, args: List[str]
+) -> tuple[List[str], Dict[str, str]]:
+    """Validate repo config and construct hardened git command + sanitized env."""
+    assert_safe_repo_git_config(Path(repo_path))
     effective_args = list(args)
     if effective_args and effective_args[0] == "diff":
         for flag in ("--no-textconv", "--no-ext-diff"):
             if flag not in effective_args:
                 effective_args.insert(1, flag)
 
-    # Enforce safe read-only environment without leaking tokens
     clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     clean_env.update(
         {
@@ -100,12 +171,37 @@ def run_safe_git(
         }
     )
     cmd = ["git", *SAFE_GIT_SECURITY_FLAGS, "-C", str(repo_path), *effective_args]
+    return cmd, clean_env
+
+
+def run_safe_git(
+    repo_path: Path,
+    args: List[str],
+    check: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Execute a hardened read-only git command returning decoded UTF-8 text."""
+    cmd, clean_env = _build_safe_git_command(Path(repo_path), args)
     return subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
+        check=check,
+        env=clean_env,
+    )
+
+
+def run_safe_git_bytes(
+    repo_path: Path,
+    args: List[str],
+    check: bool = False,
+) -> subprocess.CompletedProcess[bytes]:
+    """Execute a hardened read-only git command returning raw stdout bytes."""
+    cmd, clean_env = _build_safe_git_command(Path(repo_path), args)
+    return subprocess.run(
+        cmd,
+        capture_output=True,
         check=check,
         env=clean_env,
     )
@@ -300,11 +396,11 @@ def get_repo_remote_push_urls(repo_path: Union[str, Path]) -> List[str]:
 
 
 def get_approved_remote_urls(workspace_root: Union[str, Path]) -> Set[str]:
-    """Resolve approved push URLs from workspace controls and configuration."""
+    """Resolve approved push URLs from protected workspace controls (controls/ only)."""
     root = Path(workspace_root).resolve()
     approved: Set[str] = set()
 
-    # 1. controls/remotes.json
+    # 1. controls/remotes.json (protected under 0555/0444 controls/)
     c_remotes = root / "controls" / "remotes.json"
     if c_remotes.is_file():
         try:
@@ -314,17 +410,7 @@ def get_approved_remote_urls(workspace_root: Union[str, Path]) -> Set[str]:
         except Exception:
             pass
 
-    # 2. config/remotes.json
-    cfg_remotes = root / "config" / "remotes.json"
-    if cfg_remotes.is_file():
-        try:
-            data = json.loads(cfg_remotes.read_text(encoding="utf-8"))
-            for u in data.get("approved_push_urls", []):
-                approved.add(u)
-        except Exception:
-            pass
-
-    # 3. controls/PRODUCT_REPOSITORIES.json
+    # 2. controls/PRODUCT_REPOSITORIES.json (AGENTS.md SHA-256 bound)
     prod_repos = root / "controls" / "PRODUCT_REPOSITORIES.json"
     if prod_repos.is_file():
         try:

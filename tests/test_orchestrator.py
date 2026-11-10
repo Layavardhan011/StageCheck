@@ -126,6 +126,7 @@ class TestNineStageVerification(unittest.TestCase):
             "cycle": 1,
             "status": "APPROVED",
             "summary": "Ready to commit",
+            "base_commits": {"app": head_commit},
             "pre_existing_issues_ignored": [],
             "architectural_intents_approved": [],
             "new_issues_found": [],
@@ -337,12 +338,18 @@ class TestNineStageVerification(unittest.TestCase):
 
     def test_stage5_authority_review_approval(self):
         """Test Stage 5 verifies pre-commit review approval gate."""
+        head_commit = subprocess.run(
+            ["git", "-C", str(self.repo_dir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
         ctx = AuditContext(
             workspace_root=self.workspace_root,
             task_id=self.task_id,
             attempt=self.attempt,
             touched_repos=["app"],
             all_registered_repos=["app"],
+            base_commits={"app": head_commit},
+            target_commits={"app": head_commit},
         )
         # Missing pre_commit_review.json
         res_missing = run_stage5_authority(ctx)
@@ -485,13 +492,22 @@ class TestNineStageVerification(unittest.TestCase):
         res2_fail = run_stage9_carry_forward(ctx_att2)
         self.assertFalse(res2_fail.is_clear)
 
-        # Attempt 2 with prior seal -> CLEAR
-        prior_dir = self.workspace_root / "evidence" / "tasks" / self.task_id / "attempt_1"
-        prior_dir.mkdir(parents=True, exist_ok=True)
-        prior_seal = prior_dir / "seal.json"
-        prior_seal.write_text(
-            canonical_json_dumps({"payload_sha256": "0" * 64, "manifest_sha256": "0" * 64}),
-            encoding="utf-8",
+        # Attempt 2 with cryptographically valid prior seal & non-empty issue history -> CLEAR
+        from stagecheck.core.evidence import append_issue_history, create_task_seal
+        append_issue_history(
+            self.workspace_root,
+            self.task_id,
+            attempt=1,
+            outcome="FAILED",
+            defects=[{"defect_id": "test.prior_defect", "check_id": "rerun", "severity": "HIGH", "mode": "blocking"}],
+        )
+        create_task_seal(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            attempt=1,
+            verdict_data={"result": "BLOCKED", "status": "FAILED"},
+            checked_heads={"app": "0" * 40},
+            outcome="FAILED",
         )
         res2_pass = run_stage9_carry_forward(ctx_att2)
         self.assertTrue(res2_pass.is_clear)
@@ -608,6 +624,7 @@ class TestNineStageVerification(unittest.TestCase):
             "schema_version": "2.0",
             "dispositions": [
                 {
+                    "task_id": self.task_id,
                     "defect_id": "scope_paths.out_of_scope_modification",
                     "authorized_by": "human-governor",
                     "rationale": "Temporary authorized file",

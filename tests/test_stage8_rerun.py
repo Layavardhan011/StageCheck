@@ -184,7 +184,7 @@ class TestTopologyPreservingWorktrees(unittest.TestCase):
         self.assertFalse(wt_repos.exists())
 
     def test_untouched_repo_symlink_optimization(self) -> None:
-        """Verify untouched repository creates relative symlink preserving sibling layout."""
+        """Verify untouched repositories use isolated detached worktrees rather than live symlinks."""
         task_id = "TASK-SYM-01"
         attempt = 1
 
@@ -200,16 +200,17 @@ class TestTopologyPreservingWorktrees(unittest.TestCase):
             shared_wt = layout.worktrees["shared"]
 
             self.assertFalse(backend_wt.is_symlink)
-            self.assertTrue(shared_wt.is_symlink)
+            self.assertFalse(shared_wt.is_symlink)
+            self.assertNotEqual(shared_wt.worktree_path.resolve(), self.shared_dir.resolve())
 
-            # Sibling import still resolves cleanly through the symlink!
+            # Sibling import still resolves cleanly across isolated worktrees!
             res = subprocess.run(
                 ["python3", str(backend_wt.worktree_path / "app.py")],
                 cwd=str(backend_wt.worktree_path),
                 capture_output=True,
                 text=True,
             )
-            self.assertEqual(res.returncode, 0, f"Symlink sibling resolution failed: {res.stderr}")
+            self.assertEqual(res.returncode, 0, f"Worktree sibling resolution failed: {res.stderr}")
 
     def test_prune_abandoned_worktrees(self) -> None:
         """Verify crash recovery helper cleans abandoned worktrees."""

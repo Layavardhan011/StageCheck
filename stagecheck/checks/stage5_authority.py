@@ -7,7 +7,9 @@ from stagecheck.checks.base import AuditContext, Defect, StageResult
 from stagecheck.core.cooperative_review import (
     CommitDivergenceError,
     CommitUnauthorizedError,
+    ReviewGateError,
     assert_commit_authorization,
+    resolve_governed_repo_path,
     verify_committed_diff_fidelity,
 )
 from stagecheck.core.git import (
@@ -39,9 +41,8 @@ def run_stage5_authority(ctx: AuditContext) -> StageResult:
         )
 
     # 2. Verify Committed Diff Fidelity against Approved Review Snapshot (SEC-E1 & GAP-I2)
-    if approved_review and ctx.target_commits:
+    if approved_review and (ctx.touched_repos or ctx.target_commits):
         approved_diff_hashes = approved_review.get("approved_diff_hashes", {})
-        approved_snapshot_sha256 = approved_review.get("approved_snapshot_sha256", "0" * 64)
 
         try:
             verify_committed_diff_fidelity(
@@ -62,13 +63,23 @@ def run_stage5_authority(ctx: AuditContext) -> StageResult:
                 )
             )
 
-    # 3. Verify Remote Push URL Authority (FP-ORG / SR-08)
+    # 3. Verify Remote Push URL Authority (FP-ORG / SR-08) across all registered & touched repos
     approved_urls = get_approved_remote_urls(ctx.workspace_root)
-    repos_dir = Path(ctx.workspace_root) / "repos"
-    for repo_name in ctx.touched_repos:
-        repo_p = repos_dir / repo_name
-        if not repo_p.is_dir() and (Path(ctx.workspace_root) / ".git").is_dir():
-            repo_p = Path(ctx.workspace_root)
+    repos_to_audit = sorted(set(ctx.all_registered_repos) | set(ctx.touched_repos))
+    for repo_name in repos_to_audit:
+        try:
+            repo_p = resolve_governed_repo_path(Path(ctx.workspace_root), repo_name)
+        except ReviewGateError as err:
+            defects.append(
+                Defect(
+                    defect_id="authority.invalid_repository",
+                    message=str(err),
+                    stage=stage_id,
+                    severity="CRITICAL",
+                    blocking=True,
+                )
+            )
+            continue
         if (repo_p / ".git").exists():
             push_urls = get_repo_remote_push_urls(repo_p)
             for u in push_urls:

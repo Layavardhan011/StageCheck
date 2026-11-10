@@ -52,11 +52,18 @@ def _load_optional_json(path: Path) -> Dict[str, Any]:
         return {}
 
 
-def _match_disposition(defect: Defect, dispositions: List[Dict[str, Any]]) -> bool:
-    """Check if a defect is waived by an approved human disposition."""
+def _match_disposition(
+    defect: Defect,
+    dispositions: List[Dict[str, Any]],
+    task_id: str,
+) -> bool:
+    """Check if a defect is waived by an approved human disposition for the active task."""
     for disp in dispositions:
+        if disp.get("status") != "APPROVED":
+            continue
+        if disp.get("task_id") != task_id:
+            continue
         if disp.get("defect_id") == defect.defect_id:
-            # If disposition specifies repo, it must match
             disp_repo = disp.get("repo")
             if disp_repo and defect.repo and disp_repo != defect.repo:
                 continue
@@ -203,6 +210,16 @@ class AuditOrchestrator:
             stage_results.append(res)
             all_defects.extend(res.defects)
             all_errors.extend(res.errors)
+            if res.errors and not any(d.blocking for d in res.defects):
+                err_defect = Defect(
+                    defect_id=f"{res.stage_id}.stage_error",
+                    message=f"Stage '{res.stage_id}' reported errors: {'; '.join(res.errors)}",
+                    stage=res.stage_id,
+                    severity="HIGH",
+                    blocking=True,
+                )
+                res.defects.append(err_defect)
+                all_defects.append(err_defect)
 
         # Check multi-repository availability (zero partial pass)
         for repo_name in ctx.all_registered_repos:
@@ -252,9 +269,9 @@ class AuditOrchestrator:
                 )
             )
 
-        # Evaluate human dispositions / waivers
+        # Evaluate human dispositions / waivers (strictly scoped to task_id and status == 'APPROVED')
         for defect in all_defects:
-            if defect.blocking and _match_disposition(defect, ctx.dispositions):
+            if defect.blocking and _match_disposition(defect, ctx.dispositions, ctx.task_id):
                 defect.blocking = False
                 defect.severity = "WAIVED"
 
@@ -262,7 +279,7 @@ class AuditOrchestrator:
         blocking_count = sum(1 for d in all_defects if d.blocking)
         report_only_count = len(all_defects) - blocking_count
 
-        overall_passed = (blocking_count == 0)
+        overall_passed = (blocking_count == 0 and len(all_errors) == 0)
         overall_result = "CLEAR" if overall_passed else "BLOCKED"
         overall_status = "PASSED" if overall_passed else "FAILED"
 

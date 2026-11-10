@@ -13,10 +13,18 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-from stagecheck.core.agents_md import write_agents_contract
+from stagecheck.core.agents_md import verify_agents_contract, write_agents_contract
 from stagecheck.core.git import GitError, RepoBaseline, discover_multi_repositories, discover_repository
 from stagecheck.core.locking import LockCollisionError, acquire_bootstrap_lock
-from stagecheck.core.permissions import apply_at_rest_permissions, elevate_permissions_for_teardown
+from stagecheck.core.permissions import (
+    MODE_DIR_RW,
+    MODE_FILE_RW,
+    _is_active_task_state,
+    apply_at_rest_permissions,
+    assert_safe_teardown_preconditions,
+    controlled_write_transaction,
+)
+from stagecheck.core.state import load_active_state
 from stagecheck.core.scaffold import (
     ScaffoldingError,
     reconcile_controls,
@@ -106,8 +114,27 @@ def run_init(
             is_reconcile = controls_dir.is_dir()
 
             if is_reconcile:
-                elevate_permissions_for_teardown(workspace_root)
+                state_file = controls_dir / "ACTIVE_STATE.json"
+                if state_file.is_file():
+                    state_data = load_active_state(workspace_root)
+                    if (
+                        _is_active_task_state(state_data)
+                        or state_data.get("circuit_breaker_tripped")
+                        or state_data.get("phase") == "AWAITING_HUMAN_DISPOSITION"
+                    ):
+                        assert_safe_teardown_preconditions(
+                            workspace_root, force=False, abort_active=False, commit=False
+                        )
+                        raise ScaffoldingError(
+                            "Workspace initialization blocked: circuit breaker is tripped or task awaits disposition."
+                        )
+
                 if force:
+                    tasks_dir = workspace_root / "evidence" / "tasks"
+                    if tasks_dir.is_dir() and any(tasks_dir.rglob("seal.json")):
+                        assert_safe_teardown_preconditions(
+                            workspace_root, force=force, abort_active=False, commit=False
+                        )
                     print("Re-initializing existing workspace (--force). Preserving prior dispositions...")
                     disp_file = controls_dir / "DISPOSITIONS.json"
                     if disp_file.is_file():
@@ -116,7 +143,14 @@ def run_init(
                         except Exception:
                             pass
                 else:
+                    verify_agents_contract(workspace_root, strict=True)
                     print("Reconciling existing workspace (self-healing mode)...")
+
+                # Elevate only controls/ (never evidence/tasks/ sealed subtrees)
+                os.chmod(str(controls_dir), MODE_DIR_RW)
+                for item in controls_dir.iterdir():
+                    if item.is_file() and not item.name.endswith(".lock"):
+                        os.chmod(str(item), MODE_FILE_RW)
 
             # Step 2b: Interactive or flag-based agent selection (Spec 04)
             resolved_a1 = agent1
@@ -241,9 +275,15 @@ def run_init(
             # Step 6: Pre-scaffold evidence directory
             evidence_dir = workspace_root / "evidence"
             tasks_dir = evidence_dir / "tasks"
-            tasks_dir.mkdir(parents=True, exist_ok=True)
-            (evidence_dir / "sentinel.log").touch(mode=0o644, exist_ok=True)
-            (evidence_dir / "sentinel_daemon.log").touch(mode=0o644, exist_ok=True)
+            if evidence_dir.exists():
+                with controlled_write_transaction(evidence_dir):
+                    tasks_dir.mkdir(parents=True, exist_ok=True)
+                    (evidence_dir / "sentinel.log").touch(mode=0o644, exist_ok=True)
+                    (evidence_dir / "sentinel_daemon.log").touch(mode=0o644, exist_ok=True)
+            else:
+                tasks_dir.mkdir(parents=True, exist_ok=True)
+                (evidence_dir / "sentinel.log").touch(mode=0o644, exist_ok=True)
+                (evidence_dir / "sentinel_daemon.log").touch(mode=0o644, exist_ok=True)
 
             # Step 7: Create runtime lock file at workspace root (SR-06 / SEC-05) and controls/
             (workspace_root / ".stagecheck.lock").touch(mode=0o600, exist_ok=True)

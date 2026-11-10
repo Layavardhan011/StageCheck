@@ -89,7 +89,9 @@ def task_counts(agent,session,event,records):
     if repair:task=previous['response_task_id']
     else:
         if not isinstance(turn,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,50}',turn):raise ToolError('hook turn id refused')
-        task='resp-'+agent+'-'+session[:8]+'-'+turn
+        session_tag=digest(encode([agent,session]))[:16]
+        turn_tag=turn if len('resp-'+session_tag+'-'+turn)<=80 else digest(encode(turn))[:16]
+        task='resp-'+session_tag+'-'+turn_tag
     sent=sum(r['decision']=='sent_back' and r['response_task_id']==task for r in records)
     total=sum(r['decision']=='sent_back' for r in records);failed=0
     for record in records:
@@ -209,7 +211,7 @@ def hook(event,agent,root,contract,tool):
        'mode':config['mode'] if config else 'off','counts':{},'decision':'tool_error','answer_sha256':None,'answer_length':0,
        'claims_sha256':None,'claims_length':0,'claims_original_sha256':None,'claims_original_length':0,
        'verdict_sha256':None,'attempt_path':None,'disputed_ids':[],'reason_sent':None,'runtime_seconds':0,'finding_ids':[],'findings':[],'contract_sha256':digest(contract.read_bytes())}
-    output={};lock=None
+    output={};lock=None;task_lock=None
     try:
         lock=os.open(session_root/'.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600);fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         answer=event.get('last_assistant_message')
@@ -234,6 +236,7 @@ def hook(event,agent,root,contract,tool):
             if needs_claims(answer,root,Path.home()) and not lines:
                 missing=True;found=synthetic_findings([('report.unbacked_token',1)],'missing-claims')
             else:
+                task_lock=os.open(records_root/f'.{task}.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600);fcntl.flock(task_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
                 task_dir=root/'evidence/stagecheck'/task
                 history=history_read(task_dir);iteration=1+sum(x['verdict']['result']!='TOOL_ERROR' for x in history)
                 record['iteration']=iteration
@@ -268,6 +271,7 @@ def hook(event,agent,root,contract,tool):
         record['decision']='tool_error';record['tool_error']=type(exc).__name__+': '+str(exc) if isinstance(exc,ToolError) else type(exc).__name__;output={}
     finally:
         record['runtime_seconds']=time.monotonic()-started;create(attempt/'record.json',record)
+        if task_lock is not None:os.close(task_lock)
         if lock is not None:os.close(lock)
     return output
 

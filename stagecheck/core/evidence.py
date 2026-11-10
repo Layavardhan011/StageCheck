@@ -8,6 +8,7 @@ cryptographic task attempt seals (seal.json) binding multi-repository commit vec
 from __future__ import annotations
 
 import datetime
+import hmac
 import json
 import os
 import stat
@@ -15,7 +16,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
-from stagecheck.core.paths import find_workspace_root, resolve_task_dir
+from stagecheck.core.locking import acquire_runtime_lock
+from stagecheck.core.paths import find_workspace_root, resolve_task_dir, safe_resolve
 from stagecheck.core.permissions import controlled_write_transaction
 from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest, sha256_file
 
@@ -208,15 +210,20 @@ def create_task_seal(
         "checked_heads": dict(sorted(checked_heads.items())),
     }
 
-    # Write seal atomically
-    tmp_seal = seal_path.with_suffix(".tmp")
-    with open(tmp_seal, "w", encoding="utf-8") as f:
-        f.write(pretty_json_dumps(seal_data))
+    # Verify task_id/attempt symlink safety and write seal atomically (O_NOFOLLOW)
+    if seal_path.is_symlink():
+        raise EvidenceTamperError(f"Refusing to follow symlinked seal file '{seal_path}'.")
+    tmp_seal = seal_path.with_suffix(f".tmp.{os.getpid()}")
+    tmp_fd = os.open(tmp_seal, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    try:
+        os.write(tmp_fd, pretty_json_dumps(seal_data).encode("utf-8"))
+    finally:
+        os.close(tmp_fd)
     os.replace(tmp_seal, seal_path)
 
     # Also update Phase-3 copy if Phase-3 directory exists
     p3_dir = attempt_dir / "Phase-3"
-    if p3_dir.is_dir():
+    if p3_dir.is_dir() and not p3_dir.is_symlink():
         p3_is_ro = not os.access(p3_dir, os.W_OK)
         if p3_is_ro:
             try:
@@ -224,8 +231,17 @@ def create_task_seal(
             except OSError:
                 pass
         try:
-            (p3_dir / "seal.json").write_text(pretty_json_dumps(seal_data), encoding="utf-8")
-            os.chmod(str(p3_dir / "seal.json"), stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+            p3_seal = p3_dir / "seal.json"
+            if p3_seal.is_symlink():
+                raise EvidenceTamperError(f"Refusing to follow symlinked Phase-3 seal '{p3_seal}'.")
+            if p3_seal.exists():
+                os.chmod(str(p3_seal), 0o644)
+            p3_fd = os.open(p3_seal, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+            try:
+                os.write(p3_fd, pretty_json_dumps(seal_data).encode("utf-8"))
+            finally:
+                os.close(p3_fd)
+            os.chmod(str(p3_seal), stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
         except OSError:
             pass
         finally:
@@ -238,8 +254,18 @@ def create_task_seal(
     # If final PASSED outcome, write master task seal at task root
     if outcome == "PASSED":
         master_seal = resolve_task_dir(workspace_root, task_id) / "seal.json"
-        with open(master_seal, "w", encoding="utf-8") as f:
-            f.write(pretty_json_dumps(seal_data))
+        if master_seal.is_symlink():
+            raise EvidenceTamperError(f"Refusing to follow symlinked master seal '{master_seal}'.")
+        if master_seal.exists():
+            try:
+                os.chmod(str(master_seal), 0o644)
+            except OSError:
+                pass
+        m_fd = os.open(master_seal, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+        try:
+            os.write(m_fd, pretty_json_dumps(seal_data).encode("utf-8"))
+        finally:
+            os.close(m_fd)
 
     # Update EVIDENCE_MANIFEST with the new seal and verdict files
     files_to_index = [seal_path]
@@ -279,8 +305,42 @@ def verify_seal_chain(
             violations.append(f"Broken seal chain: Attempt {att} seal.json unreadable: {err}")
             break
 
-        # Check prior link
-        recorded_prior = seal_data.get("prior_seal_sha256", "0" * 64)
+        if not isinstance(seal_data, dict):
+            violations.append(f"Broken seal chain: Attempt {att} seal.json must be a JSON object.")
+            break
+
+        if "merkle_root_sha256" in seal_data:
+            from stagecheck.core.sealing import verify_attempt_merkle_seal
+            if seal_data.get("task_id") != task_id:
+                violations.append(
+                    f"Attempt {att} seal task_id mismatch: '{seal_data.get('task_id')}' != '{task_id}'."
+                )
+            if seal_data.get("attempt_index") != att:
+                violations.append(
+                    f"Attempt {att} seal attempt_index mismatch: '{seal_data.get('attempt_index')}' != {att}."
+                )
+            ok, seal_violations = verify_attempt_merkle_seal(seal_path.parent, workspace_root)
+            if not ok:
+                violations.extend(seal_violations)
+            prior_expected_hash = sha256_file(seal_path)
+            continue
+
+        # Validate metadata fields explicitly (fail closed)
+        if seal_data.get("task_id") != task_id:
+            violations.append(f"Attempt {att} seal task_id mismatch: '{seal_data.get('task_id')}' != '{task_id}'.")
+        if seal_data.get("attempt") != att:
+            violations.append(f"Attempt {att} seal attempt mismatch: '{seal_data.get('attempt')}' != {att}.")
+        outcome = seal_data.get("outcome")
+        if outcome not in ("PASSED", "FAILED"):
+            violations.append(f"Attempt {att} seal invalid outcome: '{outcome}'.")
+
+        # Require explicit prior_seal_sha256 (no silent default)
+        if "prior_seal_sha256" not in seal_data or not isinstance(seal_data.get("prior_seal_sha256"), str):
+            violations.append(f"Attempt {att} seal missing required prior_seal_sha256 field.")
+            recorded_prior = ""
+        else:
+            recorded_prior = seal_data["prior_seal_sha256"]
+
         if att == 1:
             if recorded_prior != "0" * 64:
                 violations.append(f"Attempt 1 seal must have zeroed prior_seal_sha256, got: '{recorded_prior}'")
@@ -289,6 +349,44 @@ def verify_seal_chain(
                 violations.append(
                     f"Cryptographic chain broken at attempt {att}: recorded prior "
                     f"({recorded_prior[:12]}) does not match attempt {att-1} actual hash ({prior_expected_hash[:12]})."
+                )
+
+        # Verify verdict_sha256 against Phase-3/verdict.json if present
+        attempt_dir = seal_path.parent
+        verdict_path = attempt_dir / "Phase-3" / "verdict.json"
+        if not verdict_path.is_file():
+            verdict_path = attempt_dir / "verdict.json"
+        recorded_verdict_sha = seal_data.get("verdict_sha256", "")
+        if verdict_path.is_file():
+            actual_verdict_sha = sha256_file(verdict_path)
+            if not isinstance(recorded_verdict_sha, str) or not hmac.compare_digest(
+                recorded_verdict_sha, actual_verdict_sha
+            ):
+                violations.append(f"Attempt {att} seal verdict_sha256 mismatch against verdict.json.")
+
+        # Recompute and verify payload_sha256 over canonical payload fields
+        checked_heads = seal_data.get("checked_heads")
+        if not isinstance(checked_heads, dict):
+            violations.append(f"Attempt {att} seal missing checked_heads dictionary.")
+        else:
+            expected_payload = sha256_digest(
+                canonical_json_dumps(
+                    {
+                        "task_id": seal_data.get("task_id"),
+                        "attempt": seal_data.get("attempt"),
+                        "outcome": outcome,
+                        "verdict_sha256": recorded_verdict_sha,
+                        "prior_seal_sha256": recorded_prior,
+                        "checked_heads": dict(sorted(checked_heads.items())),
+                    }
+                ).encode("utf-8")
+            )
+            recorded_payload_sha = seal_data.get("payload_sha256")
+            if not isinstance(recorded_payload_sha, str) or not hmac.compare_digest(
+                recorded_payload_sha, expected_payload
+            ):
+                violations.append(
+                    f"Attempt {att} seal payload_sha256 mismatch: recorded '{recorded_payload_sha}', computed '{expected_payload}'."
                 )
 
         # Update prior_expected_hash for next iteration
