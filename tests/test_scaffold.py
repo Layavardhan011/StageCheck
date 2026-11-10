@@ -152,6 +152,40 @@ class TestAtomicScaffolding(unittest.TestCase):
         self.assertTrue((controls_dir / "ACTIVE_STATE.json").is_file())
         self.assertTrue((controls_dir / "DISPOSITIONS.json").is_file())
 
+    def test_reconcile_controls_repeated_idempotency_and_missing_creation(self) -> None:
+        """Verify repeated reconciliation creates missing controls deterministically without modifying existing ones (Spec 05)."""
+        controls_dir = self.workspace / "controls"
+        controls_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. First run creates all 8 controls
+        paths1 = reconcile_controls(self.workspace, baselines=self.baselines)
+        self.assertEqual(len(paths1), 8)
+
+        # Record modification times and hashes
+        from stagecheck.core.utils import sha256_file
+        hashes_first = {name: sha256_file(path) for name, path in paths1.items()}
+
+        # 2. Delete one file (simulating missing control file)
+        (controls_dir / "QUALIFICATION_ROOT.json").unlink()
+        self.assertFalse((controls_dir / "QUALIFICATION_ROOT.json").exists())
+
+        # 3. Modify an existing file with user customization
+        (controls_dir / "FAILURE_PREVENTION.md").write_text("# Custom Developer Invariants", encoding="utf-8")
+
+        # 4. Re-reconcile
+        paths2 = reconcile_controls(self.workspace, baselines=self.baselines)
+        self.assertEqual(len(paths2), 8)
+
+        # Missing control recreated
+        self.assertTrue((controls_dir / "QUALIFICATION_ROOT.json").is_file())
+        # Custom user invariant preserved
+        self.assertEqual(
+            (controls_dir / "FAILURE_PREVENTION.md").read_text(encoding="utf-8"),
+            "# Custom Developer Invariants",
+        )
+        # Other unmodified controls remain untouched
+        self.assertEqual(sha256_file(controls_dir / "ACTIVE_STATE.json"), hashes_first["ACTIVE_STATE.json"])
+
 
 if __name__ == "__main__":
     unittest.main()
