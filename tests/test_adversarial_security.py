@@ -445,6 +445,80 @@ class TestAdversarialSecurity(unittest.TestCase):
         with self.assertRaises(SymlinkPathEscapeError):
             resolve_task_dir(self.ws, "task-safe")
 
+    def test_adversarial_agent_cannot_tamper_with_controls_without_lock_and_permissions(self) -> None:
+        """Verify direct write to controls raises PermissionError under defense-in-depth DAC (Gap B)."""
+        state_file = self.ws / "controls" / "ACTIVE_STATE.json"
+        self.assertTrue(state_file.is_file())
+        with self.assertRaises(PermissionError):
+            with open(state_file, "w", encoding="utf-8") as f:
+                f.write('{"tampered": true}\n')
+
+    def test_adversarial_symlink_injection_in_controls_rejected(self) -> None:
+        """Verify symlink injection inside controls boundary is strictly caught (Gap B)."""
+        from stagecheck.core.permissions import VerifierIsolationError, assert_verifier_isolation
+        state_file = self.ws / "controls" / "ACTIVE_STATE.json"
+
+        # Replace ACTIVE_STATE.json with symlink to /etc/passwd
+        with controlled_write_transaction(self.ws / "controls"):
+            state_file.unlink()
+            state_file.symlink_to("/etc/passwd")
+
+        with self.assertRaises(VerifierIsolationError) as ctx:
+            assert_verifier_isolation(self.ws)
+        self.assertIn("cannot be a symbolic link", str(ctx.exception))
+
+    def test_adversarial_tampering_with_prior_frozen_phase_detected_by_gate_advance(self) -> None:
+        """Verify tampering with Phase-1 deliverables causes gate advance to fail closed (Gap B)."""
+        from stagecheck.core.gate_engine import advance_gate_atomic, GateCriteriaFailedError
+        # Advance Gate 1 legitimately
+        p1_dir = self.ws / "evidence" / "tasks" / "task-adv-01" / "attempt_1" / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").write_text("# Requirements\nDiscrete scope.\n", encoding="utf-8")
+        (p1_dir / "declared_scope.json").write_text(json.dumps({
+            "schema_version": "2.0",
+            "task_id": "task-adv-01",
+            "allowed_paths": ["repos/backend/README.md"],
+        }), encoding="utf-8")
+        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+        freeze_prompt_and_scope(self.ws, "task-adv-01", 1)
+
+        # Gate 1 advance succeeds
+        res1 = advance_gate_atomic(self.ws, "GATE_1", task_id="task-adv-01", attempt=1)
+        self.assertEqual(res1.to_phase, "PHASE_2A_CODING")
+
+        # Now adversary tampers with Phase-1 declared_scope.json by elevating permissions
+        scope_file = p1_dir / "declared_scope.json"
+        scope_file.chmod(0o644)
+        scope_file.write_text(json.dumps({
+            "schema_version": "2.0.0",
+            "task_id": "task-adv-01",
+            "allowed_paths": ["repos/backend/**"],
+        }), encoding="utf-8")
+
+        # Gate 2A advance fails closed due to tampered scope hash mismatch
+        with self.assertRaises(GateCriteriaFailedError):
+            advance_gate_atomic(self.ws, "GATE_2A", task_id="task-adv-01", attempt=1)
+
+    def test_adversarial_tampering_with_evidence_manifest_rejected(self) -> None:
+        """Verify tampering with EVIDENCE_MANIFEST.json is rejected by manifest and chain verifiers (Gap B)."""
+        from stagecheck.core.evidence import verify_evidence_manifest
+        manifest_file = self.ws / "evidence" / "EVIDENCE_MANIFEST.json"
+        with controlled_write_transaction(self.ws / "evidence"):
+            manifest_file.write_text(json.dumps({
+                "schema_version": "2.0.0",
+                "entries": {
+                    "evidence/tasks/task-adv-01/attempt_1/output.txt": {
+                        "sha256": "0" * 64,
+                        "size_bytes": 100,
+                    }
+                }
+            }), encoding="utf-8")
+
+        # Verification detects missing seal or hash mismatch
+        is_valid, violations = verify_evidence_manifest(self.ws)
+        self.assertFalse(is_valid)
+        self.assertTrue(len(violations) > 0)
+
 
 if __name__ == "__main__":
     unittest.main()

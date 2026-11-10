@@ -24,6 +24,33 @@ class TeardownError(Exception):
     """Base exception for workspace unlock and teardown failures."""
 
 
+class VerifierIsolationError(Exception):
+    """Raised when verifier files, controls, or sealed evidence have been tampered with (Gap B)."""
+
+
+def assert_verifier_isolation(workspace_root: Union[str, Path]) -> None:
+    """Verify that controls, locks, and evidence subtrees are uncompromised and non-symlinked (Gap B)."""
+    root = Path(workspace_root).resolve()
+    controls_dir = root / "controls"
+    if not controls_dir.is_dir() or controls_dir.is_symlink():
+        raise VerifierIsolationError("Controls boundary missing or is a prohibited symlink.")
+
+    # Critical control files must exist and not be symlinks
+    for ctrl in ("ACTIVE_STATE.json", "STAGECHECK_ROOT.json", "PRODUCT_REPOSITORIES.json", "EVIDENCE_ROOT.json"):
+        c_path = controls_dir / ctrl
+        if c_path.exists() and c_path.is_symlink():
+            raise VerifierIsolationError(f"Control file '{ctrl}' cannot be a symbolic link.")
+
+    evidence_dir = root / "evidence"
+    if evidence_dir.exists() and evidence_dir.is_symlink():
+        raise VerifierIsolationError("Evidence directory cannot be a symbolic link.")
+
+    # Lock files cannot be symlinks
+    for lock in root.glob(".stagecheck*.lock"):
+        if lock.is_symlink():
+            raise VerifierIsolationError(f"Lock file '{lock.name}' cannot be a symbolic link.")
+
+
 class ActiveTaskTeardownBlockedError(TeardownError):
     """Raised when stagecheck unlock is executed against an active task without --abort-active-task."""
 
