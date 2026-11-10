@@ -230,7 +230,9 @@ def scaffold_task_plan(
                 }
             ],
         }
-        plan_file.write_text(deterministic_json_dumps(initial_plan), encoding="utf-8")
+        tmp_plan = specs_dir / ".TASK_PLAN.json.tmp"
+        tmp_plan.write_text(deterministic_json_dumps(initial_plan), encoding="utf-8")
+        os.replace(str(tmp_plan), str(plan_file))
 
     return plan_file
 
@@ -239,18 +241,24 @@ def reconcile_specs_directory(
     workspace_root: Path,
     target_repos: Optional[List[str]] = None,
     project_name: str = "stagecheck-workspace",
+    strict_integrity: bool = True,
 ) -> Dict[str, Path]:
-    """Ensure all required files exist in specs/ without destroying existing files (Spec 05 / FR-08).
+    """Ensure all required files exist in specs/ without destroying existing files (Spec 05 / FR-08 / Gap D).
 
     1. Checks specs/TASK_PLAN.json -> creates default if missing, preserves if present.
     2. Checks specs/ARCHITECTURE.md -> creates default template if missing, preserves if present.
-    3. Checks specs/START_MANIFEST.md -> calculates SHA-256 of all specs files and generates manifest if missing.
+    3. Checks specs/START_MANIFEST.md:
+       - If missing: generates START_MANIFEST.md atomically.
+       - If present: verifies integrity. If tampered or missing baseline files detected, raises
+         SpecManifestVerificationError so reconciliation never hides an integrity violation.
     """
     root = Path(workspace_root).resolve()
     specs_dir = root / "specs"
     specs_dir.mkdir(parents=True, exist_ok=True)
 
     reconciled_paths: Dict[str, Path] = {}
+    manifest_file = specs_dir / "START_MANIFEST.md"
+    manifest_existed_initially = manifest_file.is_file()
 
     # 1. Ensure TASK_PLAN.json
     plan_file = specs_dir / "TASK_PLAN.json"
@@ -266,15 +274,32 @@ def reconcile_specs_directory(
             "## 1. System Overview\nDocument core system modules and execution boundaries.\n\n"
             "## 2. Protocol Invariants\nDefine non-negotiable blockchain and security invariants.\n"
         )
-        arch_file.write_text(arch_content, encoding="utf-8")
+        tmp_arch = specs_dir / ".ARCHITECTURE.md.tmp"
+        tmp_arch.write_text(arch_content, encoding="utf-8")
+        os.replace(str(tmp_arch), str(arch_file))
     reconciled_paths["ARCHITECTURE.md"] = arch_file
 
-    # 3. Ensure START_MANIFEST.md (Always hashes current files in specs/)
-    manifest_file = specs_dir / "START_MANIFEST.md"
-    if not manifest_file.exists():
+    # 3. Handle START_MANIFEST.md
+    if not manifest_existed_initially:
         generate_start_manifest(root, project_name=project_name)
-    reconciled_paths["START_MANIFEST.md"] = manifest_file
+    else:
+        # If manifest already existed, verify it to ensure reconciliation does not hide integrity violations
+        from stagecheck.core.start_manifest import SpecManifestVerificationError, verify_spec_manifest
+        result = verify_spec_manifest(root, strict=False)
+        if not result["valid"] and strict_integrity:
+            msg_parts = []
+            if result.get("tampered"):
+                msg_parts.append(f"Tampered spec files: {[t['file'] for t in result['tampered']]}")
+            if result.get("missing"):
+                msg_parts.append(f"Missing spec files: {result['missing']}")
+            if result.get("unregistered"):
+                msg_parts.append(f"Unregistered spec additions: {result['unregistered']}")
+            raise SpecManifestVerificationError(
+                f"Specification manifest integrity violation during reconciliation: {'; '.join(msg_parts)}",
+                details=result,
+            )
 
+    reconciled_paths["START_MANIFEST.md"] = manifest_file
     return reconciled_paths
 
 

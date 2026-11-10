@@ -172,6 +172,67 @@ class TestStartManifest(unittest.TestCase):
         ret_val_verified = main(["verify-manifest", "--workspace", str(self.workspace)])
         self.assertEqual(ret_val_verified, 0)
 
+    def test_reconcile_creates_missing_file_when_manifest_absent(self) -> None:
+        """Verify reconciliation generates missing specs files and manifest when absent (Gap D)."""
+        from stagecheck.core.scaffold import reconcile_specs_directory
+        # Clean workspace specs
+        shutil.rmtree(self.specs_dir)
+        paths = reconcile_specs_directory(self.workspace)
+        self.assertTrue((self.specs_dir / "TASK_PLAN.json").is_file())
+        self.assertTrue((self.specs_dir / "ARCHITECTURE.md").is_file())
+        self.assertTrue((self.specs_dir / "START_MANIFEST.md").is_file())
+        self.assertIn("START_MANIFEST.md", paths)
+
+    def test_reconcile_preserves_user_content_without_overwriting(self) -> None:
+        """Verify reconciliation does not overwrite user-authored content (Gap D)."""
+        from stagecheck.core.scaffold import reconcile_specs_directory
+        custom_arch = "# My Custom Product Architecture\nAuthor: Laya\n"
+        (self.specs_dir / "ARCHITECTURE.md").write_text(custom_arch, encoding="utf-8")
+        reconcile_specs_directory(self.workspace)
+        self.assertEqual((self.specs_dir / "ARCHITECTURE.md").read_text(encoding="utf-8"), custom_arch)
+
+    def test_reconcile_fails_closed_when_file_content_changes(self) -> None:
+        """Verify reconciliation detects tampered files and does NOT hide integrity violations (Gap D)."""
+        from stagecheck.core.scaffold import reconcile_specs_directory
+        generate_start_manifest(self.workspace)
+        # Tamper ARCHITECTURE.md
+        (self.specs_dir / "ARCHITECTURE.md").write_text("# Secret Tampering\n", encoding="utf-8")
+        with self.assertRaises(SpecManifestVerificationError) as ctx:
+            reconcile_specs_directory(self.workspace, strict_integrity=True)
+        self.assertIn("Tampered spec files", str(ctx.exception))
+        # Ensure user content is preserved, NOT silently overwritten
+        self.assertEqual((self.specs_dir / "ARCHITECTURE.md").read_text(encoding="utf-8"), "# Secret Tampering\n")
+
+    def test_reconcile_fails_closed_when_file_is_removed(self) -> None:
+        """Verify reconciliation detects missing registered baseline files (Gap D)."""
+        from stagecheck.core.scaffold import reconcile_specs_directory
+        generate_start_manifest(self.workspace)
+        # Delete registered file
+        (self.specs_dir / "TASK_PLAN.json").unlink()
+        with self.assertRaises(SpecManifestVerificationError) as ctx:
+            reconcile_specs_directory(self.workspace, strict_integrity=True)
+        self.assertTrue("Missing spec files" in str(ctx.exception) or "Tampered spec files" in str(ctx.exception))
+
+    def test_reconcile_fails_closed_when_unregistered_file_added(self) -> None:
+        """Verify reconciliation detects unapproved specification file additions (Gap D)."""
+        from stagecheck.core.scaffold import reconcile_specs_directory
+        generate_start_manifest(self.workspace)
+        # Add rogue file
+        (self.specs_dir / "UNAUTHORIZED_SPEC.md").write_text("# Backdoor Spec\n", encoding="utf-8")
+        with self.assertRaises(SpecManifestVerificationError) as ctx:
+            reconcile_specs_directory(self.workspace, strict_integrity=True)
+        self.assertIn("Unregistered spec additions", str(ctx.exception))
+
+    def test_reconciliation_is_deterministic_and_idempotent(self) -> None:
+        """Verify repeated reconciliation is idempotent and leaves unchanged files untouched (Gap D)."""
+        from stagecheck.core.scaffold import reconcile_specs_directory
+        paths1 = reconcile_specs_directory(self.workspace)
+        mtime1 = (self.specs_dir / "START_MANIFEST.md").stat().st_mtime_ns
+        paths2 = reconcile_specs_directory(self.workspace)
+        mtime2 = (self.specs_dir / "START_MANIFEST.md").stat().st_mtime_ns
+        self.assertEqual(paths1.keys(), paths2.keys())
+        self.assertEqual(mtime1, mtime2)
+
 
 if __name__ == "__main__":
     unittest.main()

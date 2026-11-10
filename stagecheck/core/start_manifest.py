@@ -117,7 +117,9 @@ def generate_start_manifest(
     ])
 
     manifest_content = "".join(manifest_lines)
-    manifest_file.write_text(manifest_content, encoding="utf-8")
+    tmp_manifest = specs_dir / f".{START_MANIFEST_FILENAME}.tmp"
+    tmp_manifest.write_text(manifest_content, encoding="utf-8")
+    os.replace(str(tmp_manifest), str(manifest_file))
     return manifest_file
 
 
