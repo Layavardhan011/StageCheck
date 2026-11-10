@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -225,6 +226,28 @@ class TestTurnProtocol(unittest.TestCase):
         state_after = load_active_state(self.workspace)
         self.assertIn("watchdog", state_after)
         self.assertIn("last_active_timestamp", state_after["watchdog"])
+
+    def test_concurrent_turn_rate_limit(self) -> None:
+        """Verify concurrent callers accurately hit the 3-call rate limit without file corruption (SC-SEC-04)."""
+        def _invoke(_: int) -> bool:
+            allowed, _ = check_and_record_turn_rate_limit(
+                self.workspace,
+                max_calls=3,
+                window_seconds=5.0,
+            )
+            return allowed
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            results = list(pool.map(_invoke, range(10)))
+
+        self.assertEqual(sum(1 for r in results if r), 3)
+        self.assertEqual(sum(1 for r in results if not r), 7)
+
+        tracker_file = self.workspace / ".stagecheck_turn_tracker.json"
+        self.assertTrue(tracker_file.is_file())
+        recorded = json.loads(tracker_file.read_text(encoding="utf-8"))
+        self.assertIsInstance(recorded, list)
+        self.assertEqual(len(recorded), 3)
 
 
 if __name__ == "__main__":

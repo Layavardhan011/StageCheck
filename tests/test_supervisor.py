@@ -31,6 +31,7 @@ from pathlib import Path
 from stagecheck.cli.init_cmd import run_init
 from stagecheck.cli.main import main
 from stagecheck.cli.supervisor_cmd import run_supervisor_cmd
+from stagecheck.core.locking import acquire_runtime_lock
 from stagecheck.core.permissions import elevate_permissions_for_teardown
 from stagecheck.core.prompt_gate import freeze_prompt_and_scope
 from stagecheck.core.state import load_active_state, save_active_state
@@ -278,6 +279,30 @@ class TestWatchdogLifecycle(unittest.TestCase):
         # Delta should reflect ~200s elapsed
         self.assertGreaterEqual(report["watchdog"]["delta_turn_seconds"], 190.0)
         self.assertLessEqual(report["watchdog"]["delta_turn_seconds"], 220.0)
+
+    def test_watchdog_defers_when_runtime_lock_held(self) -> None:
+        """Verify evaluate_watchdog defers state mutation if .stagecheck.lock is held (SC-SEC-02)."""
+        state = load_active_state(self.ws)
+        state["phase"] = "PHASE_2A_CODING"
+        state["attempt_index"] = 1
+
+        now_utc = datetime.datetime(2026, 11, 6, 12, 0, 0, tzinfo=datetime.timezone.utc)
+        t_stale = (now_utc - datetime.timedelta(seconds=650)).isoformat()
+        state.setdefault("watchdog", {})["last_active_timestamp"] = t_stale
+        save_active_state(self.ws, state)
+        self.sentinel_log.write_text(f"[{t_stale}] [Tier 1] [MODIFIED] repos/core/app.py\n", encoding="utf-8")
+
+        # While runtime lock is held by an active CLI transaction, watchdog must defer
+        with acquire_runtime_lock(self.ws):
+            tripped, msg, _ = evaluate_watchdog(self.ws, timeout_seconds=600.0, now_utc=now_utc)
+            self.assertFalse(tripped)
+            self.assertIn("deferred", msg.lower())
+            self.assertEqual(load_active_state(self.ws)["phase"], "PHASE_2A_CODING")
+
+        # Once lock is released, watchdog can transition cleanly
+        tripped_after, _, _ = evaluate_watchdog(self.ws, timeout_seconds=600.0, now_utc=now_utc)
+        self.assertTrue(tripped_after)
+        self.assertEqual(load_active_state(self.ws)["phase"], "AWAITING_HUMAN_DISPOSITION")
 
 
 class TestSupervisorCLI(unittest.TestCase):

@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from stagecheck.cli.main import main
 from stagecheck.core.dispositions import (
+    DispositionError,
     NonInteractiveDispositionBlockedError,
     add_disposition,
     load_dispositions,
@@ -196,6 +197,25 @@ class TestDispositions(unittest.TestCase):
             "--workspace", str(self.workspace_root),
         ])
         self.assertEqual(exit_resume, 0)
+
+    def test_disposition_rejects_path_traversal_task_id(self):
+        """Verify add_disposition and resume_after_disposition reject path traversal in task_id (SC-SEC-01)."""
+        malicious_ids = ["../../etc", "../escaped", "task/sub", "task\\sub", "task..id", ""]
+        for bad_id in malicious_ids:
+            with self.subTest(task_id=bad_id):
+                with self.assertRaises(DispositionError):
+                    add_disposition(
+                        workspace_root=self.workspace_root,
+                        task_id=bad_id,
+                        defect_id="D-01",
+                        rationale="Attempt traversal",
+                        require_tty=False,
+                        confirmed=True,
+                    )
+                with self.assertRaises(DispositionError):
+                    resume_after_disposition(self.workspace_root, bad_id)
+
+        self.assertFalse((self.workspace_root / "escaped").exists())
 
 
 if __name__ == "__main__":

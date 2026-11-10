@@ -32,6 +32,7 @@ from stagecheck.core.gate_engine import (
     evaluate_gate_3_criteria,
     evaluate_gate_4_criteria,
 )
+from stagecheck.core.locking import LockCollisionError, acquire_runtime_lock
 from stagecheck.core.prompt_gate import freeze_prompt_and_scope
 from stagecheck.core.rubric_engine import run_rubric_evaluation
 from stagecheck.core.state import load_active_state, save_active_state
@@ -157,10 +158,23 @@ def evaluate_watchdog(
             f"WATCHDOG_INACTIVITY_TIMEOUT: {int(timeout_seconds / 60)} minutes elapsed with "
             f"zero filesystem and turn activity in phase {phase}"
         )
-        state["phase"] = "AWAITING_HUMAN_DISPOSITION"
-        state["halt_reason"] = halt_msg
-        state.setdefault("watchdog", {})["tripped_at"] = now.isoformat()
-        save_active_state(root, state)
+        # Serialize state transition through runtime lock to prevent clobbering active CLI transactions
+        try:
+            with acquire_runtime_lock(root):
+                fresh_state = load_active_state(root)
+                fresh_phase = fresh_state.get("phase", "IDLE")
+                if fresh_phase not in active_agent_phases:
+                    return False, f"Watchdog suspended in phase '{fresh_phase}'.", {"active": False, "phase": fresh_phase}
+                fresh_state["phase"] = "AWAITING_HUMAN_DISPOSITION"
+                fresh_state["halt_reason"] = halt_msg
+                fresh_state.setdefault("watchdog", {})["tripped_at"] = now.isoformat()
+                save_active_state(root, fresh_state)
+        except LockCollisionError:
+            return (
+                False,
+                "Watchdog timeout transition deferred: runtime lock is held by an active operation.",
+                meta,
+            )
 
         try:
             from stagecheck.core.sentinel import send_desktop_notification

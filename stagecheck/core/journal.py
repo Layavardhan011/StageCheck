@@ -14,15 +14,16 @@ Guarantees:
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 from stagecheck.core.permissions import elevate_permissions_for_teardown
 
@@ -67,8 +68,9 @@ class TransactionJournal:
         self.journal_dir = self.workspace_root / ".stagecheck_journal"
         self.journal_file = self.journal_dir / f"{self.txn_id}.active.json"
 
-        self.pre_images: Dict[str, Optional[str]] = {}  # rel_path -> text or None if didn't exist
+        self.pre_images: Dict[str, Optional[str]] = {}  # rel_path -> text/base64 or None if didn't exist
         self.pre_modes: Dict[str, int] = {}             # rel_path -> file mode
+        self.pre_encodings: Dict[str, str] = {}         # rel_path -> "utf-8" or "base64"
         self.staged_paths: List[str] = []
         self.is_committed: bool = False
         self.is_rolled_back: bool = False
@@ -91,6 +93,7 @@ class TransactionJournal:
             "status": "INITIALIZED",
             "pre_images": {},
             "pre_modes": {},
+            "pre_encodings": {},
             "staged_paths": [],
         }
         self.journal_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -107,13 +110,21 @@ class TransactionJournal:
             return  # Already recorded initial state for this file
 
         if p.is_file():
-            content = p.read_text(encoding="utf-8")
+            raw_bytes = p.read_bytes()
             mode = p.stat().st_mode & 0o777
+            try:
+                content = raw_bytes.decode("utf-8")
+                encoding = "utf-8"
+            except UnicodeDecodeError:
+                content = base64.b64encode(raw_bytes).decode("ascii")
+                encoding = "base64"
             self.pre_images[rel_path] = content
             self.pre_modes[rel_path] = mode
+            self.pre_encodings[rel_path] = encoding
         else:
             self.pre_images[rel_path] = None
             self.pre_modes[rel_path] = 0o644
+            self.pre_encodings[rel_path] = "utf-8"
 
         self._flush_journal()
 
@@ -140,6 +151,7 @@ class TransactionJournal:
             "status": "IN_PROGRESS",
             "pre_images": self.pre_images,
             "pre_modes": self.pre_modes,
+            "pre_encodings": self.pre_encodings,
             "staged_paths": self.staged_paths,
         }
         temp_journal = self.journal_file.with_suffix(".tmp")
@@ -159,47 +171,12 @@ class TransactionJournal:
         if self.is_committed:
             raise JournalError("Cannot rollback a transaction that has already been committed.")
 
-        restored: List[str] = []
-        removed: List[str] = []
-
-        # Iterate in reverse order of mutation
-        for rel_path, content in reversed(list(self.pre_images.items())):
-            full_path = self.workspace_root / rel_path
-            mode = self.pre_modes.get(rel_path, 0o644)
-
-            # Ensure parent directories are writable for rollback
-            curr = full_path.parent
-            while curr != self.workspace_root and curr != curr.parent:
-                if curr.exists():
-                    try:
-                        os.chmod(curr, 0o755)
-                    except OSError:
-                        pass
-                curr = curr.parent
-
-            if content is None:
-                # File did not exist prior to transaction -> remove it
-                if full_path.exists() or os.path.islink(full_path):
-                    try:
-                        os.chmod(full_path, 0o644)
-                    except OSError:
-                        pass
-                    full_path.unlink(missing_ok=True)
-                    removed.append(rel_path)
-            else:
-                # File existed -> restore original content and mode
-                full_path.parent.mkdir(parents=True, exist_ok=True)
-                if full_path.exists():
-                    try:
-                        os.chmod(full_path, 0o644)
-                    except OSError:
-                        pass
-                full_path.write_text(content, encoding="utf-8")
-                try:
-                    os.chmod(full_path, mode)
-                except OSError:
-                    pass
-                restored.append(rel_path)
+        restored, removed = _restore_pre_images(
+            self.workspace_root,
+            self.pre_images,
+            self.pre_modes,
+            self.pre_encodings,
+        )
 
         # Unlink journal active file
         if self.journal_file.exists():
@@ -214,6 +191,53 @@ class TransactionJournal:
             status="ROLLED_BACK",
             message=f"Transaction '{self.txn_id}' rolled back ({len(restored)} restored, {len(removed)} removed).",
         )
+
+
+def _restore_pre_images(
+    workspace_root: Path,
+    pre_images: Dict[str, Optional[str]],
+    pre_modes: Dict[str, int],
+    pre_encodings: Dict[str, str],
+) -> Tuple[List[str], List[str]]:
+    """Restore recorded file pre-images (UTF-8 or Base64) and unlink newly created files."""
+    restored: List[str] = []
+    removed: List[str] = []
+
+    for rel_path, content in reversed(list(pre_images.items())):
+        full_path = workspace_root / rel_path
+        mode = pre_modes.get(rel_path, 0o644)
+        encoding = pre_encodings.get(rel_path, "utf-8")
+
+        # Ensure parent directories are writable for rollback
+        curr = full_path.parent
+        while curr != workspace_root and curr != curr.parent:
+            if curr.exists():
+                with suppress(OSError):
+                    os.chmod(curr, 0o755)
+            curr = curr.parent
+
+        if content is None:
+            # File did not exist prior to transaction -> remove it
+            if full_path.exists() or os.path.islink(full_path):
+                with suppress(OSError):
+                    os.chmod(full_path, 0o644)
+                full_path.unlink(missing_ok=True)
+                removed.append(rel_path)
+        else:
+            # File existed -> restore original content and mode
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            if full_path.exists():
+                with suppress(OSError):
+                    os.chmod(full_path, 0o644)
+            if encoding == "base64":
+                full_path.write_bytes(base64.b64decode(content.encode("ascii")))
+            else:
+                full_path.write_text(content, encoding="utf-8")
+            with suppress(OSError):
+                os.chmod(full_path, mode)
+            restored.append(rel_path)
+
+    return restored, removed
 
 
 @contextmanager
@@ -272,45 +296,9 @@ def recover_interrupted_transactions(
         operation = data.get("operation", "UNKNOWN")
         pre_images = data.get("pre_images", {})
         pre_modes = data.get("pre_modes", {})
+        pre_encodings = data.get("pre_encodings", {})
 
-        restored: List[str] = []
-        removed: List[str] = []
-
-        for rel_path, content in reversed(list(pre_images.items())):
-            full_path = ws / rel_path
-            mode = pre_modes.get(rel_path, 0o644)
-
-            # Ensure parents writable
-            curr = full_path.parent
-            while curr != ws and curr != curr.parent:
-                if curr.exists():
-                    try:
-                        os.chmod(curr, 0o755)
-                    except OSError:
-                        pass
-                curr = curr.parent
-
-            if content is None:
-                if full_path.exists() or os.path.islink(full_path):
-                    try:
-                        os.chmod(full_path, 0o644)
-                    except OSError:
-                        pass
-                    full_path.unlink(missing_ok=True)
-                    removed.append(rel_path)
-            else:
-                full_path.parent.mkdir(parents=True, exist_ok=True)
-                if full_path.exists():
-                    try:
-                        os.chmod(full_path, 0o644)
-                    except OSError:
-                        pass
-                full_path.write_text(content, encoding="utf-8")
-                try:
-                    os.chmod(full_path, mode)
-                except OSError:
-                    pass
-                restored.append(rel_path)
+        restored, removed = _restore_pre_images(ws, pre_images, pre_modes, pre_encodings)
 
         item.unlink(missing_ok=True)
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -20,9 +21,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from stagecheck.core.agents_md import write_agents_contract
 from stagecheck.core.evidence import update_evidence_manifest
 from stagecheck.core.locking import acquire_runtime_lock
-from stagecheck.core.paths import find_workspace_root
+from stagecheck.core.paths import StageCheckPathError, find_workspace_root, safe_resolve
 from stagecheck.core.permissions import controlled_write_transaction
 from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_file
+
+
+_TASK_ID_REGEX = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 class DispositionError(Exception):
@@ -35,6 +39,25 @@ class NonInteractiveDispositionBlockedError(DispositionError):
 
 class UnauthorizedDispositionError(DispositionError):
     """Raised when disposition authorization is rejected."""
+
+
+def _validate_task_id(task_id: str) -> None:
+    """Validate task identifier against strict path-safe slug rules."""
+    if not isinstance(task_id, str) or not _TASK_ID_REGEX.match(task_id):
+        raise DispositionError(
+            f"Security policy violation [INVALID_TASK_ID]: task_id '{task_id}' is invalid. "
+            "Task IDs must consist strictly of alphanumeric characters, dashes, and underscores."
+        )
+
+
+def _resolve_task_evidence_dir(workspace_root: Path, task_id: str) -> Path:
+    """Validate task_id and safely resolve its directory inside evidence/tasks/."""
+    _validate_task_id(task_id)
+    tasks_root = (workspace_root / "evidence" / "tasks").resolve()
+    try:
+        return safe_resolve(task_id, tasks_root)
+    except StageCheckPathError as err:
+        raise DispositionError(f"Security policy violation [PATH_CONTAINMENT]: {err}") from err
 
 
 def get_dispositions_path(workspace_root: Path) -> Path:
@@ -76,6 +99,9 @@ def add_disposition(
     5. Updates EVIDENCE_MANIFEST.json with the new disposition digest.
     6. Appends idempotent DISPOSITION_ADDED record to TASK_<ID>_ISSUE_HISTORY.md.
     """
+    # 0. Strict Task ID Slug Validation (Defense Against Path Traversal)
+    _validate_task_id(task_id)
+
     # 1. Non-TTY / Interactive Enforcement (SEC-03)
     if require_tty and not confirmed:
         if not sys.stdin.isatty():
@@ -132,7 +158,7 @@ def add_disposition(
     update_evidence_manifest(workspace_root, [disp_path, workspace_root / "AGENTS.md"])
 
     # 5. Append audit event to TASK_<ID>_ISSUE_HISTORY.md
-    task_dir = workspace_root / "evidence" / "tasks" / task_id
+    task_dir = _resolve_task_evidence_dir(workspace_root, task_id)
     evidence_dir = workspace_root / "evidence"
     is_ev_ro = evidence_dir.is_dir() and not os.access(evidence_dir, os.W_OK)
     if is_ev_ro:
@@ -192,6 +218,7 @@ def resume_after_disposition(
     - If all blocking defects are dispositioned: transitions to PHASE_3_VERIFICATION.
     - If unresolved blocking defects remain: transitions to PHASE_1_REPAIR.
     """
+    _validate_task_id(task_id)
     state_file = workspace_root / "controls" / "ACTIVE_STATE.json"
     if not state_file.is_file():
         raise DispositionError("ACTIVE_STATE.json not found in controls directory.")
@@ -212,17 +239,15 @@ def resume_after_disposition(
             else:
                 # Load latest verdict to evaluate remaining defects
                 attempt = state.get("attempt_index", 1)
+                task_dir = _resolve_task_evidence_dir(workspace_root, task_id)
                 verdict_file = (
-                    workspace_root
-                    / "evidence"
-                    / "tasks"
-                    / task_id
+                    task_dir
                     / f"attempt_{attempt}"
                     / "Phase-3"
                     / "verdict.json"
                 )
                 if not verdict_file.is_file():
-                    verdict_file = workspace_root / "evidence" / "tasks" / task_id / "verdict.json"
+                    verdict_file = task_dir / "verdict.json"
 
                 dispositions_doc = load_dispositions(workspace_root)
                 disp_ids = {

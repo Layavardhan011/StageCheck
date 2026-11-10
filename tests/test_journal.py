@@ -222,6 +222,34 @@ class TestWriteAheadJournal(unittest.TestCase):
         self.assertFalse(target_file.exists())
         self.assertFalse(active_log.exists())
 
+    def test_journal_binary_file_roundtrip(self) -> None:
+        """Verify TransactionJournal handles binary pre-images without UnicodeDecodeError (SC-SEC-03)."""
+        binary_file = self.ws / "evidence" / "tasks" / "task-01" / "artifact.bin"
+        binary_file.parent.mkdir(parents=True, exist_ok=True)
+        original_bytes = bytes(range(256))
+        binary_file.write_bytes(original_bytes)
+
+        # 1. Immediate exception rollback restores exact binary payload
+        with self.assertRaises(RuntimeError):
+            with write_ahead_transaction(self.ws, operation="TEST_BINARY_ROLLBACK", task_id="task-01", attempt_index=1) as txn:
+                txn.record_pre_image(binary_file)
+                binary_file.write_bytes(b"\x00\x01CORRUPTED")
+                txn.record_staged_write(binary_file)
+                raise RuntimeError("Simulated mid-write failure")
+
+        self.assertEqual(binary_file.read_bytes(), original_bytes)
+
+        # 2. Startup crash recovery restores exact binary payload from persisted active journal
+        txn2 = TransactionJournal(self.ws, operation="TEST_BINARY_CRASH", task_id="task-01", attempt_index=1)
+        txn2.start()
+        txn2.record_pre_image(binary_file)
+        binary_file.write_bytes(b"OVERWRITTEN")
+        txn2.record_staged_write(binary_file)
+
+        records = recover_interrupted_transactions(self.ws, verbose=False)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(binary_file.read_bytes(), original_bytes)
+
 
 if __name__ == "__main__":
     unittest.main()

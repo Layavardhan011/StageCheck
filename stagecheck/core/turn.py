@@ -10,9 +10,11 @@ Provides:
 from __future__ import annotations
 
 import datetime
+import fcntl
 import json
 import os
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -61,32 +63,47 @@ def check_and_record_turn_rate_limit(
         return True, 0.0
 
     tracker_file = workspace_root / ".stagecheck_turn_tracker.json"
-    now = time.time()
-    timestamps: List[float] = []
+    lock_file = workspace_root / ".stagecheck_turn_tracker.lock"
 
-    if tracker_file.is_file():
-        try:
-            raw = json.loads(tracker_file.read_text(encoding="utf-8"))
-            if isinstance(raw, list):
-                timestamps = [float(ts) for ts in raw]
-        except Exception:
-            timestamps = []
-
-    # Filter timestamps within window
-    recent = [ts for ts in timestamps if (now - ts) < window_seconds]
-
-    if len(recent) >= max_calls:
-        oldest = min(recent)
-        retry_after = max(1.0, window_seconds - (now - oldest))
-        return False, retry_after
-
-    recent.append(now)
+    # Synchronize read-modify-write across concurrent agent processes and threads
+    fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        tracker_file.write_text(json.dumps(recent), encoding="utf-8")
-    except Exception:
-        pass
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        now = time.time()
+        timestamps: List[float] = []
 
-    return True, 0.0
+        if tracker_file.is_file():
+            try:
+                raw = json.loads(tracker_file.read_text(encoding="utf-8"))
+                if isinstance(raw, list):
+                    timestamps = [float(ts) for ts in raw]
+            except Exception:
+                timestamps = []
+
+        # Filter timestamps within window
+        recent = [ts for ts in timestamps if (now - ts) < window_seconds]
+
+        if len(recent) >= max_calls:
+            oldest = min(recent)
+            retry_after = max(1.0, window_seconds - (now - oldest))
+            return False, retry_after
+
+        recent.append(now)
+        tmp_file = tracker_file.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
+        try:
+            tmp_file.write_text(json.dumps(recent), encoding="utf-8")
+            os.replace(tmp_file, tracker_file)
+        except Exception:
+            if tmp_file.exists():
+                tmp_file.unlink(missing_ok=True)
+
+        return True, 0.0
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
 
 
 def compute_turn_status(
