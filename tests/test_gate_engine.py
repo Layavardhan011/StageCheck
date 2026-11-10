@@ -14,10 +14,13 @@ import unittest
 from pathlib import Path
 
 from stagecheck.core.gate_engine import (
+    GateAdvanceResult,
     GateCheckReport,
+    GateCriteriaFailedError,
     GateId,
     InvalidTransitionError,
     LifecyclePhase,
+    advance_gate_atomic,
     check_gate_preconditions,
     normalize_gate_id,
     validate_gate_transition_allowed,
@@ -220,6 +223,67 @@ class TestGateEngine(unittest.TestCase):
             state["phase"] = phase.value
             # Must validate without raising SchemaValidationError
             validate_active_state(state)
+
+    def test_invalid_gate_transitions_rejected_by_advance_atomic(self) -> None:
+        """Verify advance_gate_atomic fails closed when attempting out-of-order gate transitions (Spec 01)."""
+        # Attempting Gate-2A, Gate-2B, Gate-3, or Gate-4 while in PHASE_1_PLANNING must fail closed
+        for invalid_gate in ("Gate-2A", "Gate-2B", "Gate-3", "Gate-4"):
+            with self.subTest(gate=invalid_gate):
+                with self.assertRaises(GateCriteriaFailedError) as ctx:
+                    advance_gate_atomic(self.workspace, invalid_gate, self.task_id, self.attempt)
+                self.assertTrue(
+                    any("transition" in r.lower() or "allowed" in r.lower() for r in ctx.exception.failure_reasons),
+                    f"Expected transition failure reason, got {ctx.exception.failure_reasons}",
+                )
+
+    def test_prerequisite_gate_receipt_tampering_or_absence_fails_closed(self) -> None:
+        """Verify advancing a later gate fails if prerequisite gate receipts are missing or tampered."""
+        # Set state to PHASE_2B_COMMITTING with cleared_gates pointing to fake/tampered hash
+        state = load_active_state(self.workspace)
+        state["phase"] = "PHASE_2B_COMMITTING"
+        state["cleared_gates"] = {"GATE_1": "a" * 64, "GATE_2A": "b" * 64}
+        save_active_state(self.workspace, state)
+
+        # Gate-2B should fail closed because actual prerequisite receipts do not exist or mismatch
+        with self.assertRaises(GateCriteriaFailedError):
+            advance_gate_atomic(self.workspace, "Gate-2B", self.task_id, self.attempt)
+
+    def test_gate_advance_receipt_cryptographic_binding_and_repeat_calls(self) -> None:
+        """Verify gate advancement creates cryptographic receipts and prevents repeated advancement."""
+        p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").write_text("# Feature prompt\nImplement logic.\n", encoding="utf-8")
+        (p1_dir / "declared_scope.json").write_text(json.dumps({
+            "schema_version": "2.0",
+            "task_id": self.task_id,
+            "allowed_paths": ["repos/core/main.py"],
+        }), encoding="utf-8")
+        (p1_dir / "prompt_verified.json").write_text(json.dumps({
+            "schema_version": "2.0",
+            "task_id": self.task_id,
+            "attempt": self.attempt,
+            "status": "VERIFIED",
+            "prompt_sha256": sha256_file(p1_dir / "prompt.md"),
+            "scope_sha256": sha256_file(p1_dir / "declared_scope.json"),
+        }), encoding="utf-8")
+
+        # 1. Advance Gate-1 successfully
+        res = advance_gate_atomic(self.workspace, "Gate-1", self.task_id, self.attempt)
+        self.assertEqual(res.gate_id, "GATE_1")
+        self.assertEqual(res.to_phase, "PHASE_2A_CODING")
+        self.assertTrue(res.receipt_path.is_file())
+        self.assertEqual(sha256_file(res.receipt_path), res.receipt_sha256)
+
+        # Receipt should contain deliverables with digests
+        receipt_data = json.loads(res.receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(receipt_data["task_id"], self.task_id)
+        self.assertEqual(receipt_data["attempt"], self.attempt)
+        self.assertEqual(receipt_data["gate_id"], "GATE_1")
+        self.assertIn("deliverables", receipt_data)
+
+        # 2. Repeated advance of Gate-1 from now-advanced PHASE_2A_CODING phase fails closed
+        with self.assertRaises(GateCriteriaFailedError):
+            advance_gate_atomic(self.workspace, "Gate-1", self.task_id, self.attempt)
 
 
 if __name__ == "__main__":
