@@ -249,6 +249,40 @@ class TestTurnProtocol(unittest.TestCase):
         self.assertIsInstance(recorded, list)
         self.assertEqual(len(recorded), 3)
 
+    def test_turn_mutual_exclusion_and_collision_prevention(self) -> None:
+        """Verify turn protocol enforces strict single-agent exclusivity across all phases (Spec 04)."""
+        # Phase 1: Only AGENT_1 is authorized to draft prompt
+        status = compute_turn_status(self.workspace)
+        self.assertEqual(status.active_turn, "AGENT_1")
+        self.assertIn("agent 1", status.instructions_for_active_agent.lower())
+
+        # When prompt is drafted: Turn switches exclusively to STAGECHECK verifier
+        p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").write_text("# Feature\n", encoding="utf-8")
+        (p1_dir / "declared_scope.json").write_text(
+            json.dumps({"schema_version": "2.0", "task_id": self.task_id, "allowed_paths": ["repos/service/app.py"]}),
+            encoding="utf-8",
+        )
+        status_verifying = compute_turn_status(self.workspace)
+        self.assertEqual(status_verifying.active_turn, "STAGECHECK")
+        self.assertNotEqual(status_verifying.active_turn, "AGENT_1")
+        self.assertNotEqual(status_verifying.active_turn, "AGENT_2")
+
+        # When verified: Still STAGECHECK turn until Gate-1 advance is completed
+        (p1_dir / "prompt_verified.json").write_text(
+            json.dumps({"task_id": self.task_id, "status": "VERIFIED"}),
+            encoding="utf-8",
+        )
+        status_gate1 = compute_turn_status(self.workspace)
+        self.assertEqual(status_gate1.active_turn, "STAGECHECK")
+
+        # After Gate-1: Turn transitions exclusively to AGENT_2 (implementer)
+        advance_gate_atomic(self.workspace, "Gate-1", task_id=self.task_id, attempt=self.attempt)
+        status_p2a = compute_turn_status(self.workspace)
+        self.assertEqual(status_p2a.active_turn, "AGENT_2")
+        self.assertNotEqual(status_p2a.active_turn, "AGENT_1")
+
 
 if __name__ == "__main__":
     unittest.main()
