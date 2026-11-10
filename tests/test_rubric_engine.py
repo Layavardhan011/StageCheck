@@ -191,6 +191,114 @@ class TestRubricEngine(unittest.TestCase):
         self.assertIn("rubric_summary", rev_data)
         self.assertEqual(rev_data["rubric_summary"]["total_evaluated"], 270)
 
+    def test_rule_with_no_evaluator_cannot_pass_by_default(self) -> None:
+        """Verify an unsupported or unmapped rule returns NOT_EVALUATED and cannot pass by default (Gap A)."""
+        from stagecheck.core.rubric_engine import RubricRule, evaluate_rubric_rule
+        unsupported_rule = RubricRule(
+            rule_id="UNKNOWN_DOMAIN-001",
+            domain="NON_EXISTENT_DOMAIN",
+            title="Bogus Rule",
+            question="Does this pass?",
+            category="AUTOMATED",
+        )
+        res = evaluate_rubric_rule(unsupported_rule, self.workspace, self.repo_dir)
+        self.assertEqual(res.status, "NOT_EVALUATED")
+        self.assertEqual(res.evaluator, "unsupported_fallback")
+        self.assertNotEqual(res.status, "PASS")
+
+        # Also verify that validate_rubric_evaluation_payload rejects any pass from unsupported_fallback
+        from stagecheck.core.rubric_engine import RubricEvaluationError
+        with self.assertRaises(RubricEvaluationError):
+            validate_rubric_evaluation_payload([
+                {
+                    "rule_id": "UNKNOWN_DOMAIN-001",
+                    "status": "PASS",
+                    "evaluator": "unsupported_fallback",
+                }
+            ])
+
+    def test_missing_evidence_cannot_result_in_unjustified_pass(self) -> None:
+        """Verify evidence-dependent rules fail safely when evidence is missing (Gap A)."""
+        from stagecheck.core.rubric_engine import RubricRule, evaluate_rubric_rule
+        evidence_rule = RubricRule(
+            rule_id="CLAIM_SUPPORT-001",
+            domain="CLAIM_SUPPORT",
+            title="Verifiable Evidence Entailment",
+            question="Is evidence present?",
+            category="EVIDENCE",
+            primary_witness="Phase-2B/claims.json",
+        )
+        # Context indicates missing evidence artifact
+        ctx = {"missing_evidence": ["CLAIM_SUPPORT-001"]}
+        res = evaluate_rubric_rule(evidence_rule, self.workspace, self.repo_dir, context=ctx)
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.evaluator, "phase_evidence_validator")
+        self.assertIn("Missing required evidence", res.message)
+
+    def test_rule_specific_failure_is_reported_correctly(self) -> None:
+        """Verify domain-specific evaluators report failures with witnesses and messages (Gap A)."""
+        from stagecheck.core.rubric_engine import RubricRule, evaluate_rubric_rule
+        # Test UPSTREAM_REUSE failure with unpinned dependencies
+        upstream_rule = RubricRule(
+            rule_id="UPSTREAM_REUSE-001",
+            domain="UPSTREAM_REUSE",
+            title="Discrete Version Pinning",
+            question="Are dependencies pinned?",
+            category="AUTOMATED",
+        )
+        ctx = {"unpinned_dependencies": ["fastapi>=0.0.0"]}
+        res = evaluate_rubric_rule(upstream_rule, self.workspace, self.repo_dir, context=ctx)
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.evaluator, "upstream_reuse_dependency_analyzer")
+        self.assertEqual(res.witness, "fastapi>=0.0.0")
+        self.assertIn("Unpinned wildcard dependency detected", res.message)
+
+    def test_valid_rule_specific_pass_is_reported_correctly(self) -> None:
+        """Verify passing rules report their explicit evaluator and witness metadata (Gap A)."""
+        from stagecheck.core.rubric_engine import RubricRule, evaluate_rubric_rule
+        blast_rule = RubricRule(
+            rule_id="BLAST_RADIUS-001",
+            domain="BLAST_RADIUS",
+            title="Scope Containment Verification",
+            question="Are changes within scope?",
+            category="AUTOMATED",
+        )
+        res = evaluate_rubric_rule(blast_rule, self.workspace, self.repo_dir, context={})
+        self.assertEqual(res.status, "PASS")
+        self.assertEqual(res.evaluator, "blast_radius_containment")
+        self.assertEqual(res.witness, "scope_containment_verified")
+
+    def test_evaluation_errors_handled_safely(self) -> None:
+        """Verify evaluation exceptions fail closed with FAIL status rather than crashing or passing (Gap A)."""
+        from stagecheck.core.rubric_engine import RubricRule, evaluate_rubric_rule
+        # Simulate rule evaluation fault with faulty predicate
+        faulty_rule = RubricRule(
+            rule_id="TEST_FAULT-001",
+            domain="FAILURE_CLASS",
+            title="Fault Rule",
+            question="Will it fail safely?",
+            category="AUTOMATED",
+            exemption_predicate="FAULTY_PREDICATE",
+        )
+        # Register temporary faulty predicate
+        from stagecheck.core.rubric_engine import EXEMPTION_PREDICATES
+        EXEMPTION_PREDICATES["FAULTY_PREDICATE"] = lambda ws, r: (_ for _ in ()).throw(RuntimeError("Simulated fault"))
+        try:
+            res = evaluate_rubric_rule(faulty_rule, self.workspace, self.repo_dir)
+            self.assertEqual(res.status, "FAIL")
+            self.assertIn("Evaluation execution failure", res.message)
+        finally:
+            del EXEMPTION_PREDICATES["FAULTY_PREDICATE"]
+
+    def test_rubric_coverage_is_measurable(self) -> None:
+        """Verify catalog maps 100% of 270 rules across the 9 formal domain evaluators (Gap A)."""
+        from stagecheck.core.rubric_engine import EVALUATOR_MAP, load_270_rule_catalog
+        catalog = load_270_rule_catalog()
+        self.assertEqual(len(catalog), 270)
+        for rule in catalog:
+            self.assertIn(rule.domain, EVALUATOR_MAP, f"Rule '{rule.rule_id}' must belong to an evaluated domain.")
+            self.assertTrue(EVALUATOR_MAP[rule.domain], f"Domain '{rule.domain}' must have a non-empty evaluator.")
+
 
 if __name__ == "__main__":
     unittest.main()

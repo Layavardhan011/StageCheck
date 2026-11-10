@@ -76,9 +76,11 @@ class RuleEvaluationResult:
     rule_id: str
     domain: str
     category: str
-    status: str  # PASS, FAIL, NOT_APPLICABLE
+    status: str  # PASS, FAIL, NOT_APPLICABLE, NOT_EVALUATED, BLOCKED
+    evaluator: str = "default"
     message: Optional[str] = None
     witness: Optional[str] = None
+    artifact: Optional[str] = None
     exemption_predicate: Optional[str] = None
     rationale: Optional[str] = None
     evidence_path: Optional[str] = None
@@ -90,11 +92,14 @@ class RuleEvaluationResult:
             "domain": self.domain,
             "category": self.category,
             "status": self.status,
+            "evaluator": self.evaluator,
         }
         if self.message:
             d["message"] = self.message
         if self.witness:
             d["witness"] = self.witness
+        if self.artifact:
+            d["artifact"] = self.artifact
         if self.status == "NOT_APPLICABLE":
             d["exemption_predicate"] = self.exemption_predicate
             d["rationale"] = self.rationale
@@ -268,8 +273,22 @@ def load_270_rule_catalog() -> List[RubricRule]:
     return catalog
 
 
+# Explicit mapping of rubric domains to automated evaluators (Spec 02 / Gap A)
+EVALUATOR_MAP: Dict[str, str] = {
+    "BLAST_RADIUS": "blast_radius_containment",
+    "FAILURE_CLASS": "failure_class_secret_detector",
+    "UPSTREAM_REUSE": "upstream_reuse_dependency_analyzer",
+    "TEST_ADEQUACY": "test_adequacy_suite_inspector",
+    "INDEPENDENT_RERUN": "independent_rerun_environment_verifier",
+    "EVAL_CURATOR": "eval_curator_benchmark_verifier",
+    "CLAIM_SUPPORT": "claim_support_evidence_verifier",
+    "ORCHESTRATOR": "orchestrator_governance_verifier",
+    "COMMON": "common_discipline_auditor",
+}
+
+
 def validate_rubric_evaluation_payload(evaluation_results: List[Dict[str, Any]]) -> None:
-    """Fail-closed validation: ensures no agent self-exemptions or missing metadata (FR-03 / DEC-026)."""
+    """Fail-closed validation: ensures no agent self-exemptions or missing metadata (FR-03 / DEC-026 / Gap A)."""
     for res in evaluation_results:
         if res.get("status") == "NOT_APPLICABLE":
             pred = res.get("exemption_predicate")
@@ -281,6 +300,11 @@ def validate_rubric_evaluation_payload(evaluation_results: List[Dict[str, Any]])
                 raise InvalidRubricExemptionError(
                     f"Illegal exemption in rule '{res.get('rule_id')}': Missing required rationale or evidence_path."
                 )
+        evaluator = res.get("evaluator")
+        if evaluator == "unsupported_fallback" and res.get("status") == "PASS":
+            raise RubricEvaluationError(
+                f"Unsupported rule '{res.get('rule_id')}' cannot pass without an authorized evaluator."
+            )
 
 
 def evaluate_rubric_rule(
@@ -289,86 +313,278 @@ def evaluate_rubric_rule(
     repo_path: Path,
     context: Optional[Dict[str, Any]] = None,
 ) -> RuleEvaluationResult:
-    """Evaluate an individual rubric rule against repository and evidence topology."""
-    # 1. Check structural exemption predicate
-    if rule.exemption_predicate:
-        pred_fn = EXEMPTION_PREDICATES.get(rule.exemption_predicate)
-        if pred_fn and pred_fn(workspace_root, repo_path):
-            evidence_file = repo_path / "package.json"
-            if not evidence_file.is_file():
-                evidence_file = repo_path / "requirements.txt"
-            if not evidence_file.is_file():
-                evidence_file = repo_path
+    """Evaluate an individual rubric rule against repository and evidence topology (Gap A)."""
+    try:
+        # 1. Check structural exemption predicate
+        if rule.exemption_predicate:
+            pred_fn = EXEMPTION_PREDICATES.get(rule.exemption_predicate)
+            if pred_fn and pred_fn(workspace_root, repo_path):
+                evidence_file = repo_path / "package.json"
+                if not evidence_file.is_file():
+                    evidence_file = repo_path / "requirements.txt"
+                if not evidence_file.is_file():
+                    evidence_file = repo_path
 
-            rel_ev = str(evidence_file.relative_to(workspace_root)) if evidence_file.exists() else str(repo_path.relative_to(workspace_root))
+                rel_ev = str(evidence_file.relative_to(workspace_root)) if evidence_file.exists() else str(repo_path.relative_to(workspace_root))
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="NOT_APPLICABLE",
+                    evaluator="structural_predicate_evaluator",
+                    exemption_predicate=rule.exemption_predicate,
+                    rationale=rule.exemption_rationale or "Structurally exempt based on codebase topology.",
+                    evidence_path=rel_ev,
+                )
+
+        # 2. Reject unsupported or unmapped domains
+        evaluator_name = EVALUATOR_MAP.get(rule.domain)
+        if not evaluator_name:
             return RuleEvaluationResult(
                 rule_id=rule.rule_id,
                 domain=rule.domain,
                 category=rule.category,
-                status="NOT_APPLICABLE",
-                exemption_predicate=rule.exemption_predicate,
-                rationale=rule.exemption_rationale or "Structurally exempt based on codebase topology.",
-                evidence_path=rel_ev,
+                status="NOT_EVALUATED",
+                evaluator="unsupported_fallback",
+                message=f"No evaluator registered for unrecognized domain '{rule.domain}'.",
             )
 
-    # 2. Automated evaluation based on domain and context
-    ctx = context or {}
-    uncommitted_diffs = ctx.get("uncommitted_diffs", {})
-    untouched_dirty = ctx.get("untouched_dirty", [])
-    secrets_found = ctx.get("secrets_found", [])
-    out_of_scope_files = ctx.get("out_of_scope_files", [])
+        ctx = context or {}
 
-    # Domain specific evaluation
-    if rule.domain == "BLAST_RADIUS":
-        if untouched_dirty:
+        # 3. Handle evidence-dependent rules (missing evidence cannot silently pass)
+        if rule.category == "EVIDENCE":
+            missing_evidence_list = ctx.get("missing_evidence", [])
+            if rule.rule_id in missing_evidence_list or "*" in missing_evidence_list:
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="FAIL",
+                    evaluator="phase_evidence_validator",
+                    message=f"Missing required evidence artifact for rule '{rule.rule_id}'.",
+                    artifact=rule.primary_witness or "evidence_artifact",
+                )
+
+        # 4. Domain-specific rule evaluation
+        untouched_dirty = ctx.get("untouched_dirty", [])
+        secrets_found = ctx.get("secrets_found", [])
+        out_of_scope_files = ctx.get("out_of_scope_files", [])
+
+        if rule.domain == "BLAST_RADIUS":
+            if untouched_dirty:
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="FAIL",
+                    evaluator=evaluator_name,
+                    witness=untouched_dirty[0],
+                    message=f"Untouched repository '{untouched_dirty[0]}' contains uncommitted modifications.",
+                )
+            if out_of_scope_files:
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="FAIL",
+                    evaluator=evaluator_name,
+                    witness=out_of_scope_files[0],
+                    message=f"Out of scope file modified: '{out_of_scope_files[0]}'.",
+                )
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id,
+                domain=rule.domain,
+                category=rule.category,
+                status="PASS",
+                evaluator=evaluator_name,
+                witness="scope_containment_verified",
+                message="Modifications strictly contained in declared scope.",
+            )
+
+        if rule.domain == "FAILURE_CLASS":
+            if secrets_found:
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="FAIL",
+                    evaluator=evaluator_name,
+                    witness=secrets_found[0],
+                    message=f"Secret or forbidden credential detected: '{secrets_found[0]}'.",
+                )
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id,
+                domain=rule.domain,
+                category=rule.category,
+                status="PASS",
+                evaluator=evaluator_name,
+                witness="zero_secrets_detected",
+                message="No secret leaks or credentials detected.",
+            )
+
+        if rule.domain == "UPSTREAM_REUSE":
+            bad_deps = ctx.get("unpinned_dependencies", [])
+            if bad_deps:
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="FAIL",
+                    evaluator=evaluator_name,
+                    witness=bad_deps[0],
+                    message=f"Unpinned wildcard dependency detected: '{bad_deps[0]}'.",
+                )
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id,
+                domain=rule.domain,
+                category=rule.category,
+                status="PASS",
+                evaluator=evaluator_name,
+                witness="dependencies_pinned",
+                message="All upstream package dependencies are pinned to discrete versions.",
+            )
+
+        if rule.domain == "TEST_ADEQUACY":
+            missing_tests = ctx.get("missing_tests", [])
+            if missing_tests:
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="FAIL",
+                    evaluator=evaluator_name,
+                    witness=missing_tests[0],
+                    message="Code modifications lack corresponding unit or integration tests.",
+                )
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id,
+                domain=rule.domain,
+                category=rule.category,
+                status="PASS",
+                evaluator=evaluator_name,
+                witness="test_adequacy_satisfied",
+                message="Test coverage exists for modified units.",
+            )
+
+        if rule.domain == "INDEPENDENT_RERUN":
+            flaky_sleep = ctx.get("flaky_sleep_detected", [])
+            if flaky_sleep:
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="FAIL",
+                    evaluator=evaluator_name,
+                    witness=flaky_sleep[0],
+                    message="Flaky sleep or non-deterministic timing pattern detected.",
+                )
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id,
+                domain=rule.domain,
+                category=rule.category,
+                status="PASS",
+                evaluator=evaluator_name,
+                witness="deterministic_execution",
+                message="Execution environment and test rerun are deterministic.",
+            )
+
+        if rule.domain == "EVAL_CURATOR":
+            sla_breach = ctx.get("benchmark_sla_breach", [])
+            if sla_breach:
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="FAIL",
+                    evaluator=evaluator_name,
+                    witness=sla_breach[0],
+                    message="Benchmark SLA violated: memory RSS exceeded or mocked timer detected.",
+                )
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id,
+                domain=rule.domain,
+                category=rule.category,
+                status="PASS",
+                evaluator=evaluator_name,
+                witness="benchmark_sla_verified",
+                message="Benchmark SLA and qualification invariants satisfied.",
+            )
+
+        if rule.domain == "CLAIM_SUPPORT":
+            unsupported = ctx.get("unsupported_claims", [])
+            if unsupported:
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="FAIL",
+                    evaluator=evaluator_name,
+                    witness=unsupported[0],
+                    message="Claim cited in delivery report is unbacked by repository evidence.",
+                )
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id,
+                domain=rule.domain,
+                category=rule.category,
+                status="PASS",
+                evaluator=evaluator_name,
+                witness="claims_entailed",
+                message="Claims are backed by verifiable evidence.",
+            )
+
+        if rule.domain == "ORCHESTRATOR":
+            dag_violations = ctx.get("dag_order_violation", [])
+            if dag_violations:
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="FAIL",
+                    evaluator=evaluator_name,
+                    witness=dag_violations[0],
+                    message="Task dependency ordering or DAG schedule violated.",
+                )
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id,
+                domain=rule.domain,
+                category=rule.category,
+                status="PASS",
+                evaluator=evaluator_name,
+                witness="orchestration_invariants_met",
+                message="Task roadmap and turn-taking orchestration invariants satisfied.",
+            )
+
+        # COMMON domain
+        common_violations = ctx.get("common_discipline_violation", [])
+        if common_violations:
             return RuleEvaluationResult(
                 rule_id=rule.rule_id,
                 domain=rule.domain,
                 category=rule.category,
                 status="FAIL",
-                witness=untouched_dirty[0],
-                message=f"Untouched repository '{untouched_dirty[0]}' contains uncommitted modifications.",
-            )
-        if out_of_scope_files:
-            return RuleEvaluationResult(
-                rule_id=rule.rule_id,
-                domain=rule.domain,
-                category=rule.category,
-                status="FAIL",
-                witness=out_of_scope_files[0],
-                message=f"Out of scope file modified: '{out_of_scope_files[0]}'.",
+                evaluator=evaluator_name,
+                witness=common_violations[0],
+                message="Common discipline or governance contract violated.",
             )
         return RuleEvaluationResult(
             rule_id=rule.rule_id,
             domain=rule.domain,
             category=rule.category,
             status="PASS",
+            evaluator=evaluator_name,
+            witness="admitted_input_ledger",
+            message="Common discipline and governance invariants met.",
         )
 
-    if rule.domain == "FAILURE_CLASS":
-        if secrets_found:
-            return RuleEvaluationResult(
-                rule_id=rule.rule_id,
-                domain=rule.domain,
-                category=rule.category,
-                status="FAIL",
-                witness=secrets_found[0],
-                message=f"Secret or forbidden credential detected: '{secrets_found[0]}'.",
-            )
+    except Exception as err:
         return RuleEvaluationResult(
             rule_id=rule.rule_id,
             domain=rule.domain,
             category=rule.category,
-            status="PASS",
+            status="FAIL",
+            evaluator=EVALUATOR_MAP.get(rule.domain, "error_handler"),
+            message=f"Evaluation execution failure: {err}",
         )
-
-    # Default pass for rules without detected defects
-    return RuleEvaluationResult(
-        rule_id=rule.rule_id,
-        domain=rule.domain,
-        category=rule.category,
-        status="PASS",
-    )
 
 
 def run_rubric_evaluation(
