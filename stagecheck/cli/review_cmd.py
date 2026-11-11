@@ -314,6 +314,26 @@ def run_approve_review(
             if r_path.is_dir():
                 inspect_untracked_files(r_path)
 
+        # GAP-02: Enforce complete, fresh, duplicate-free 270-rule PASS before approving review
+        from stagecheck.core.rubric_engine import verify_complete_rubric_evaluation
+
+        rubric_ok, rubric_reasons, _ = verify_complete_rubric_evaluation(
+            workspace_root=workspace_root,
+            rubric_path=phase2a_dir / "rubric_evaluation.json",
+            task_id=task,
+            attempt=attempt,
+            cycle=cycle,
+            require_fresh_context=True,
+        )
+        if not rubric_ok:
+            print(
+                "ERROR: [approve.incomplete_or_failed_rubric] Complete 270-rule rubric evaluation must PASS before approval:",
+                file=sys.stderr,
+            )
+            for reason in rubric_reasons:
+                print(f"  ├── {reason}", file=sys.stderr)
+            return 1
+
         print(f"Approving Phase 2A review for Task '{task}' (Attempt {attempt}, Cycle {cycle})...")
         review_path = record_pre_commit_review(
             workspace_root=workspace_root,

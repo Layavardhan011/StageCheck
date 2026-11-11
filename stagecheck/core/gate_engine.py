@@ -431,6 +431,37 @@ def evaluate_gate_2a_criteria(
                 message=str(err),
             ))
 
+    # 3. Phase-2A/rubric_evaluation.json must be COMPLETE, fresh, 270/270, PASS (GAP-02)
+    from stagecheck.core.rubric_engine import verify_complete_rubric_evaluation
+
+    rubric_file = p2a_dir / "rubric_evaluation.json"
+    rubric_ok, rubric_reasons, _ = verify_complete_rubric_evaluation(
+        workspace_root=workspace_root,
+        rubric_path=rubric_file,
+        task_id=task_id,
+        attempt=attempt,
+        require_fresh_context=True,
+    )
+    if rubric_ok:
+        deliverables.append({
+            "path": str(rubric_file.relative_to(workspace_root)),
+            "sha256": sha256_file(rubric_file),
+            "status": "VALID",
+        })
+        criteria.append(GateCriterion(
+            criterion_id="gate2a.rubric_complete",
+            description="Complete 270-rule pre-commit rubric evaluation passed",
+            status="MET",
+            message="Phase-2A/rubric_evaluation.json verified COMPLETE (270/270, fresh context, verdict=PASS).",
+        ))
+    else:
+        criteria.append(GateCriterion(
+            criterion_id="gate2a.rubric_complete",
+            description="Complete 270-rule pre-commit rubric evaluation passed",
+            status="FAILED",
+            message="; ".join(rubric_reasons),
+        ))
+
     return criteria, deliverables
 
 
@@ -757,6 +788,32 @@ def evaluate_gate_3_criteria(
                 status="FAILED",
                 message=str(err),
             ))
+
+    # 2. Enforce COMPLETE, fresh, duplicate-free 270-rule rubric evaluation in Phase-3 (GAP-02)
+    from stagecheck.core.rubric_engine import verify_complete_rubric_evaluation
+
+    p3_rubric_file = p3_dir / "rubric_evaluation.json"
+    rubric_ok, rubric_reasons, _ = verify_complete_rubric_evaluation(
+        workspace_root=workspace_root,
+        rubric_path=p3_rubric_file,
+        task_id=task_id,
+        attempt=attempt,
+        require_fresh_context=True,
+    )
+    if rubric_ok:
+        criteria.append(GateCriterion(
+            criterion_id="gate3.rubric_complete",
+            description="Complete 270-rule Phase 3 rubric evaluation passed",
+            status="MET",
+            message="Phase-3/rubric_evaluation.json verified COMPLETE (270/270, fresh context, verdict=PASS).",
+        ))
+    else:
+        criteria.append(GateCriterion(
+            criterion_id="gate3.rubric_complete",
+            description="Complete 270-rule Phase 3 rubric evaluation passed",
+            status="FAILED",
+            message="; ".join(rubric_reasons),
+        ))
 
     # Also capture other Phase 3 audit artifacts as deliverables if present
     for art_name in ["test_execution.json", "scanner_report.json", "rubric_evaluation.json"]:
@@ -1311,6 +1368,9 @@ def advance_gate_atomic(
             elif gate_id == GateId.GATE_3:
                 freeze_phase_directory(attempt_dir / "Phase-3")
             elif gate_id == GateId.GATE_4:
+                from stagecheck.core.dispositions import mark_waivers_finalized
+
+                mark_waivers_finalized(root, resolved_task_id, resolved_attempt)
                 freeze_phase_directory(attempt_dir)
 
             return GateAdvanceResult(
@@ -1431,6 +1491,10 @@ def handle_audit_verdict(
 
     if not is_failed:
         return {"action": "AUDIT_PASSED", "attempt": attempt}
+
+    from stagecheck.core.dispositions import mark_waivers_finalized
+
+    mark_waivers_finalized(root, task_id, attempt)
 
     if attempt >= MAX_DEFAULT_ATTEMPTS:
         eval_tripped = CircuitBreakerEvaluation(

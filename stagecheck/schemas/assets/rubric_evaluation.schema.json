@@ -35,6 +35,32 @@
       "type": "string",
       "enum": ["PASS", "FAIL"]
     },
+    "evaluation_completeness": {
+      "type": "string",
+      "enum": ["COMPLETE", "PARTIAL"]
+    },
+    "expected_rule_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "evaluated_rule_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "missing_rules": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "duplicate_rules": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "target_domain": {
+      "type": ["string", "null"]
+    },
+    "context_digest": {
+      "type": ["string", "null"]
+    },
     "counts": {
       "type": "object",
       "required": ["total_rules", "passed", "failed", "not_applicable"],

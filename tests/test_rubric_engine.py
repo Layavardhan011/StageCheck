@@ -221,26 +221,35 @@ class TestRubricEngine(unittest.TestCase):
         )
 
         # 4. Human waivers (all 10 HUMAN_WAIVER rules) + AGENTS contract digest update
+        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from stagecheck.core.rubric_engine import build_agent_reviews_artifact
+
+        waiver_evidence = self.workspace / "evidence" / "waiver_evidence.txt"
+        waiver_evidence.parent.mkdir(parents=True, exist_ok=True)
+        waiver_evidence.write_text("Approved human waiver supporting evidence.\n", encoding="utf-8")
+
         catalog = load_270_rule_catalog()
         waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        w_entry = build_waiver_entry(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            defect_id=waiver_ids[0],
+            rationale="Explicit operator authorization for test workspace",
+            authorized_by="owner@stagecheck.local",
+            attempt=self.attempt,
+            evidence_path="evidence/waiver_evidence.txt",
+            rule_id=waiver_ids[0],
+            waived_rules=waiver_ids,
+        )
         disp_doc = {
             "schema_version": "2.0",
-            "dispositions": [
-                {
-                    "disposition_id": "DISP-RUBRIC-001",
-                    "task_id": self.task_id,
-                    "rule_id": waiver_ids[0],
-                    "waived_rules": waiver_ids,
-                    "authorized_by": "human-operator",
-                    "rationale": "Explicit operator authorization for test workspace",
-                    "status": "APPROVED",
-                }
-            ],
+            "dispositions": [w_entry],
         }
         with controlled_write_transaction(self.workspace / "controls"):
             (self.workspace / "controls" / "DISPOSITIONS.json").write_text(
                 canonical_json_dumps(disp_doc), encoding="utf-8"
             )
+        record_waiver_in_replay_ledger(self.workspace, w_entry)
         write_agents_contract(self.workspace)
 
         from stagecheck.core.utils import load_json_file
@@ -272,8 +281,16 @@ class TestRubricEngine(unittest.TestCase):
             for r in catalog
             if r.category == "AGENT_ASSISTED"
         }
+        reviews_artifact = build_agent_reviews_artifact(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            reviews=agent_reviews,
+            reviewer="agent1",
+            reviewer_role="prompt_and_audit",
+        )
         (p2a_dir / "agent_reviews.json").write_text(
-            canonical_json_dumps({"task_id": self.task_id, "attempt": self.attempt, "agent_assisted_reviews": agent_reviews}),
+            canonical_json_dumps(reviews_artifact),
             encoding="utf-8",
         )
 
@@ -694,27 +711,37 @@ class TestRubricEngine(unittest.TestCase):
             )
         payload_wrong, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
         waiver_wrong = [e for e in payload_wrong["evaluations"] if e["category"] == "HUMAN_WAIVER"]
-        self.assertTrue(all(e["status"] == "BLOCKED" for e in waiver_wrong))
+        self.assertTrue(all(e["status"] in ("BLOCKED", "FAIL") for e in waiver_wrong))
 
-        # Approved disposition scoped to active task -> PASS
+        # Approved disposition scoped to active task with valid provenance -> PASS
+        from stagecheck.core.agents_md import write_agents_contract
+        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+
+        waiver_evidence = self.workspace / "evidence" / "waiver_active.txt"
+        waiver_evidence.parent.mkdir(parents=True, exist_ok=True)
+        waiver_evidence.write_text("Approved waiver evidence artifact.\n", encoding="utf-8")
+        waiver_ids = [f"COMMON-{i:03d}" for i in range(1, 11)]
+        w_active = build_waiver_entry(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            defect_id="COMMON-001",
+            rationale="Operator approved waiver with verified provenance",
+            authorized_by="owner@stagecheck.local",
+            attempt=self.attempt,
+            evidence_path="evidence/waiver_active.txt",
+            rule_id="COMMON-001",
+            waived_rules=waiver_ids,
+        )
         with controlled_write_transaction(self.workspace / "controls"):
             (self.workspace / "controls" / "DISPOSITIONS.json").write_text(
                 canonical_json_dumps({
                     "schema_version": "2.0",
-                    "dispositions": [
-                        {
-                            "disposition_id": "DISP-ACTIVE",
-                            "task_id": self.task_id,
-                            "rule_id": "COMMON-001",
-                            "waived_rules": [f"COMMON-{i:03d}" for i in range(1, 11)],
-                            "authorized_by": "human-operator",
-                            "rationale": "Operator approved",
-                            "status": "APPROVED",
-                        }
-                    ],
+                    "dispositions": [w_active],
                 }),
                 encoding="utf-8",
             )
+        record_waiver_in_replay_ledger(self.workspace, w_active)
+        write_agents_contract(self.workspace)
         payload_ok, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
         waiver_ok = [e for e in payload_ok["evaluations"] if e["category"] == "HUMAN_WAIVER"]
         self.assertTrue(all(e["status"] == "PASS" for e in waiver_ok))
@@ -731,15 +758,37 @@ class TestRubricEngine(unittest.TestCase):
         self.assertTrue(all(e["status"] == "NOT_EVALUATED" for e in aa_missing))
 
         # Record a FAIL review for one rule and PASS for another
+        from stagecheck.core.rubric_engine import build_agent_reviews_artifact
+
         p2a_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
         p2a_dir.mkdir(parents=True, exist_ok=True)
+        (p2a_dir / "pre_commit_status.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "cycle": 1,
+                "status": "AWAITING_REVIEW",
+                "touched_repositories": ["backend"],
+                "summary": "Pre-commit ready for semantic review",
+            }),
+            encoding="utf-8",
+        )
         aa_rule_ids = [r.rule_id for r in load_270_rule_catalog() if r.category == "AGENT_ASSISTED"]
         reviews = {
             aa_rule_ids[0]: {"status": "FAIL", "rationale": "Semantic flaw detected in module."},
             aa_rule_ids[1]: {"status": "PASS", "rationale": "Reviewed and verified clean."},
         }
+        reviews_artifact = build_agent_reviews_artifact(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            reviews=reviews,
+            reviewer="agent1",
+            reviewer_role="prompt_and_audit",
+        )
         (p2a_dir / "agent_reviews.json").write_text(
-            canonical_json_dumps({"agent_assisted_reviews": reviews}), encoding="utf-8"
+            canonical_json_dumps(reviews_artifact), encoding="utf-8"
         )
         payload_mixed, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
         by_id = {e["rule_id"]: e for e in payload_mixed["evaluations"]}
@@ -829,6 +878,152 @@ class TestRubricEngine(unittest.TestCase):
         rev = json.loads((p2a_dir / "pre_commit_review.json").read_text(encoding="utf-8"))
         self.assertEqual(rev["status"], "REVISION_REQUIRED")
         self.assertEqual(len(rev["new_issues_found"]), 2)
+
+    def test_gap02_complete_vs_partial_classification_duplicates_and_stale_rejection(self) -> None:
+        """Verify GAP-02 COMPLETE/PARTIAL classification, duplicate rejection, binding, and staleness checks."""
+        import datetime
+        from stagecheck.core.rubric_engine import (
+            DuplicateRuleEvaluationError,
+            RuleEvaluationResult,
+            aggregate_rubric_results,
+            validate_rubric_evaluation_payload,
+            verify_complete_rubric_evaluation,
+        )
+        from stagecheck.core.utils import canonical_json_dumps
+
+        self._seed_full_compliant_workspace()
+
+        # 1. Partial domain evaluation explicitly classified PARTIAL with missing_rules and FAIL verdict
+        partial_payload, _ = run_rubric_evaluation(
+            self.workspace,
+            self.task_id,
+            self.attempt,
+            target_domain="COMMON",
+        )
+        self.assertEqual(partial_payload["evaluation_completeness"], "PARTIAL")
+        self.assertEqual(partial_payload["expected_rule_count"], 270)
+        self.assertEqual(partial_payload["evaluated_rule_count"], 30)
+        self.assertEqual(len(partial_payload["missing_rules"]), 240)
+        self.assertEqual(partial_payload["duplicate_rules"], [])
+        self.assertEqual(partial_payload["target_domain"], "COMMON")
+        self.assertEqual(partial_payload["overall_verdict"], "FAIL")
+
+        # 2. Full evaluation classifies COMPLETE with 270/270 rules and PASS verdict
+        full_payload, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
+        self.assertEqual(full_payload["evaluation_completeness"], "COMPLETE")
+        self.assertEqual(full_payload["expected_rule_count"], 270)
+        self.assertEqual(full_payload["evaluated_rule_count"], 270)
+        self.assertEqual(full_payload["missing_rules"], [])
+        self.assertEqual(full_payload["duplicate_rules"], [])
+        self.assertEqual(full_payload["overall_verdict"], "PASS")
+
+        p2a_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
+        rubric_file = p2a_dir / "rubric_evaluation.json"
+        rubric_file.write_text(canonical_json_dumps(full_payload), encoding="utf-8")
+
+        ok_fresh, reasons_fresh, _ = verify_complete_rubric_evaluation(
+            self.workspace, rubric_file, self.task_id, self.attempt, cycle=1
+        )
+        self.assertTrue(ok_fresh, f"Expected fresh COMPLETE verification to pass: {reasons_fresh}")
+
+        # 3. Duplicate rule rejection
+        dup_item = RuleEvaluationResult(
+            rule_id="COMMON-001", domain="COMMON", category="HUMAN_WAIVER", status="PASS", message="ok"
+        )
+        with self.assertRaises(DuplicateRuleEvaluationError):
+            validate_rubric_evaluation_payload([dup_item, dup_item])
+        with self.assertRaises(DuplicateRuleEvaluationError):
+            aggregate_rubric_results([dup_item, dup_item])
+
+        tampered_dup = dict(full_payload)
+        tampered_dup["evaluations"] = list(full_payload["evaluations"][:-1]) + [dict(full_payload["evaluations"][0])]
+        rubric_file.write_text(canonical_json_dumps(tampered_dup), encoding="utf-8")
+        ok_dup, dup_reasons, _ = verify_complete_rubric_evaluation(
+            self.workspace, rubric_file, self.task_id, self.attempt, cycle=1
+        )
+        self.assertFalse(ok_dup)
+        self.assertTrue(any("duplicate" in r.lower() for r in dup_reasons))
+
+        # 4. Task / attempt / cycle binding mismatch rejection
+        rubric_file.write_text(canonical_json_dumps(full_payload), encoding="utf-8")
+        ok_task, _, _ = verify_complete_rubric_evaluation(self.workspace, rubric_file, "wrong-task", self.attempt)
+        ok_att, _, _ = verify_complete_rubric_evaluation(self.workspace, rubric_file, self.task_id, self.attempt + 1)
+        ok_cyc, _, _ = verify_complete_rubric_evaluation(self.workspace, rubric_file, self.task_id, self.attempt, cycle=9)
+        self.assertFalse(ok_task)
+        self.assertFalse(ok_att)
+        self.assertFalse(ok_cyc)
+
+        # 5. Stale age rejection
+        stale_age = dict(full_payload)
+        stale_age["evaluated_at"] = (
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=48)
+        ).isoformat().replace("+00:00", "Z")
+        rubric_file.write_text(canonical_json_dumps(stale_age), encoding="utf-8")
+        ok_old, old_reasons, _ = verify_complete_rubric_evaluation(
+            self.workspace, rubric_file, self.task_id, self.attempt, max_age_seconds=3600
+        )
+        self.assertFalse(ok_old)
+        self.assertTrue(any("stale" in r.lower() or "expired" in r.lower() for r in old_reasons))
+
+        # 6. Stale context_digest rejection after modifying repository source
+        rubric_file.write_text(canonical_json_dumps(full_payload), encoding="utf-8")
+        (self.repo_dir / "service.py").write_text("def add(a, b):\n    return a + b + 1\n", encoding="utf-8")
+        ok_dirty, dirty_reasons, _ = verify_complete_rubric_evaluation(
+            self.workspace, rubric_file, self.task_id, self.attempt, require_fresh_context=True
+        )
+        self.assertFalse(ok_dirty)
+        self.assertTrue(any("context_digest" in r or "stale" in r.lower() for r in dirty_reasons))
+
+    def test_gap02_gates_reject_partial_rubric_evaluations(self) -> None:
+        """Verify approve-review, Gate-2A, and Gate-3 reject partial 30-rule rubric payloads."""
+        from stagecheck.core.gate_engine import GateId, advance_gate_atomic, check_gate_preconditions
+        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+        from stagecheck.core.utils import canonical_json_dumps
+
+        self._seed_full_compliant_workspace()
+        state = load_active_state(self.workspace)
+        state["phase"] = "PHASE_1_PLANNING"
+        state["cleared_gates"] = {}
+        save_active_state(self.workspace, state)
+        freeze_prompt_and_scope(self.workspace, self.task_id, self.attempt)
+        advance_gate_atomic(self.workspace, GateId.GATE_1, self.task_id, self.attempt)
+
+        # Write a partial (COMMON-only) rubric payload marked artificially PASS to test fail-closed gates
+        partial_payload, _ = run_rubric_evaluation(
+            self.workspace, self.task_id, self.attempt, target_domain="COMMON"
+        )
+        spoofed_partial = dict(partial_payload)
+        spoofed_partial["overall_verdict"] = "PASS"
+
+        p2a_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
+        (p2a_dir / "rubric_evaluation.json").write_text(
+            canonical_json_dumps(spoofed_partial), encoding="utf-8"
+        )
+
+        # 1. approve-review must reject partial rubric_evaluation.json
+        rc_appr = main([
+            "approve-review",
+            "--task", self.task_id,
+            "--attempt", str(self.attempt),
+            "--workspace", str(self.workspace),
+        ])
+        self.assertEqual(rc_appr, 1)
+
+        # 2. Gate-2A must reject partial rubric_evaluation.json even with fake pre_commit_review.json APPROVED
+        (p2a_dir / "pre_commit_review.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "cycle": 1,
+                "status": "APPROVED",
+                "summary": "Spoofed",
+            }),
+            encoding="utf-8",
+        )
+        rep2a = check_gate_preconditions(self.workspace, GateId.GATE_2A, self.task_id, self.attempt)
+        self.assertFalse(rep2a.passed)
+        self.assertTrue(any("PARTIAL" in r or "270" in r for r in rep2a.failure_reasons))
 
 
 if __name__ == "__main__":

@@ -56,17 +56,29 @@ def _match_disposition(
     defect: Defect,
     dispositions: List[Dict[str, Any]],
     task_id: str,
+    workspace_root: Optional[Path] = None,
+    attempt: Optional[int] = None,
 ) -> bool:
-    """Check if a defect is waived by an approved human disposition for the active task."""
+    """Check if a defect is waived by a provenance-verified human disposition for (task_id, attempt)."""
+    if workspace_root is None or attempt is None:
+        return False
+    from stagecheck.core.dispositions import validate_waiver_provenance
+
     for disp in dispositions:
-        if disp.get("status") != "APPROVED":
+        if not isinstance(disp, dict):
             continue
-        if disp.get("task_id") != task_id:
+        disp_repo = disp.get("repo")
+        if disp_repo and defect.repo and disp_repo != defect.repo:
             continue
-        if disp.get("defect_id") == defect.defect_id:
-            disp_repo = disp.get("repo")
-            if disp_repo and defect.repo and disp_repo != defect.repo:
-                continue
+        ok, _ = validate_waiver_provenance(
+            workspace_root=workspace_root,
+            entry=disp,
+            task_id=task_id,
+            attempt=attempt,
+            required_rule_id=defect.defect_id,
+            all_entries=dispositions,
+        )
+        if ok:
             return True
     return False
 
@@ -262,6 +274,19 @@ class AuditOrchestrator:
                 attempt=ctx.attempt,
                 context=audit_rubric_ctx,
             )
+            if rubric_payload.get("evaluation_completeness") != "COMPLETE" or rubric_payload.get("evaluated_rule_count") != 270:
+                all_defects.append(
+                    Defect(
+                        defect_id="rubric.incomplete_evaluation",
+                        message=(
+                            f"Phase 3 audit rubric is '{rubric_payload.get('evaluation_completeness')}' "
+                            f"({rubric_payload.get('evaluated_rule_count')}/{rubric_payload.get('expected_rule_count', 270)})."
+                        ),
+                        stage="rubric",
+                        severity="CRITICAL",
+                        blocking=True,
+                    )
+                )
             if rubric_payload.get("overall_verdict") != "PASS":
                 added_rubric_defect = False
                 for eval_item in rubric_payload.get("evaluations", []):
@@ -301,9 +326,15 @@ class AuditOrchestrator:
                 )
             )
 
-        # Evaluate human dispositions / waivers (strictly scoped to task_id and status == 'APPROVED')
+        # Evaluate human dispositions / waivers (strictly validated for GAP-03 provenance)
         for defect in all_defects:
-            if defect.blocking and _match_disposition(defect, ctx.dispositions, ctx.task_id):
+            if defect.blocking and _match_disposition(
+                defect,
+                ctx.dispositions,
+                ctx.task_id,
+                workspace_root=self.workspace_root,
+                attempt=ctx.attempt,
+            ):
                 defect.blocking = False
                 defect.severity = "WAIVED"
 

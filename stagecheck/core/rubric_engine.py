@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import datetime
+import hashlib
 import importlib.resources
 import json
 import os
@@ -24,6 +25,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
+from stagecheck.core.dispositions import parse_owner_grants, validate_waiver_provenance
+from stagecheck.core.paths import StageCheckPathError, safe_resolve
 from stagecheck.core.state import load_active_state
 from stagecheck.core.utils import canonical_json_dumps, load_json_file, sha256_file, validate_schema
 from stagecheck.schemas import get_schema_path
@@ -39,6 +42,33 @@ class InvalidRubricExemptionError(Exception):
 
 class RubricEvaluationError(Exception):
     """Raised when rubric evaluation encounters an unrecoverable failure."""
+
+
+class DuplicateRuleEvaluationError(RubricEvaluationError):
+    """Raised when duplicate rule IDs appear in rubric evaluations."""
+
+
+class IncompleteRubricEvaluationError(RubricEvaluationError):
+    """Raised when a partial rubric evaluation is presented for a complete-audit gate."""
+
+
+class StaleRubricEvaluationError(RubricEvaluationError):
+    """Raised when a rubric evaluation predates subsequent workspace, repo, or control changes."""
+
+
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+_GENERIC_REVIEWER_NAMES = frozenset({
+    "generic",
+    "generic_evaluator",
+    "auto",
+    "automated",
+    "fallback",
+    "default",
+    "unknown",
+    "system",
+    "placeholder",
+    "rubric_engine",
+})
 
 
 _BLOCKCHAIN_MARKERS = ("multiversx", "mx-chain", "elrond", "dharitri", "drwa")
@@ -350,24 +380,631 @@ EVALUATOR_MAP: Dict[str, str] = {
 }
 
 
-def validate_rubric_evaluation_payload(evaluation_results: List[Dict[str, Any]]) -> None:
-    """Fail-closed validation: ensures no agent self-exemptions or missing metadata (FR-03 / DEC-026 / Gap A)."""
-    for res in evaluation_results:
+def validate_rubric_evaluation_payload(evaluation_results: List[Union[RuleEvaluationResult, Dict[str, Any]]]) -> None:
+    """Fail-closed validation: ensures no agent self-exemptions, duplicate rules, or missing metadata (FR-03 / GAP-01 / GAP-02)."""
+    seen_ids: Set[str] = set()
+    duplicates: List[str] = []
+    for raw_res in evaluation_results:
+        res = raw_res.to_dict() if isinstance(raw_res, RuleEvaluationResult) else raw_res
+        if not isinstance(res, dict):
+            raise RubricEvaluationError(f"Malformed rubric evaluation entry of type {type(raw_res).__name__}.")
+        rid = res.get("rule_id")
+        if isinstance(rid, str) and rid:
+            if rid in seen_ids and rid not in duplicates:
+                duplicates.append(rid)
+            seen_ids.add(rid)
         if res.get("status") == "NOT_APPLICABLE":
             pred = res.get("exemption_predicate")
             if not pred or pred not in EXEMPTION_PREDICATES:
                 raise InvalidRubricExemptionError(
-                    f"Illegal exemption in rule '{res.get('rule_id')}': Unknown or missing predicate '{pred}'."
+                    f"Illegal exemption in rule '{rid}': Unknown or missing predicate '{pred}'."
                 )
             if not res.get("rationale") or not res.get("evidence_path"):
                 raise InvalidRubricExemptionError(
-                    f"Illegal exemption in rule '{res.get('rule_id')}': Missing required rationale or evidence_path."
+                    f"Illegal exemption in rule '{rid}': Missing required rationale or evidence_path."
                 )
         evaluator = res.get("evaluator")
         if evaluator == "unsupported_fallback" and res.get("status") == "PASS":
             raise RubricEvaluationError(
-                f"Unsupported rule '{res.get('rule_id')}' cannot pass without an authorized evaluator."
+                f"Unsupported rule '{rid}' cannot pass without an authorized evaluator."
             )
+    if duplicates:
+        raise DuplicateRuleEvaluationError(
+            f"Duplicate rubric rule evaluation(s) rejected: {', '.join(sorted(duplicates))}"
+        )
+
+
+def _parse_utc_iso_strict(raw: Any) -> Optional[datetime.datetime]:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    val = raw.strip()
+    if val.endswith("Z"):
+        val = val[:-1] + "+00:00"
+    try:
+        dt = datetime.datetime.fromisoformat(val)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.astimezone(datetime.timezone.utc)
+
+
+def compute_uncommitted_state_digest(
+    workspace_root: Union[str, Path],
+    repo_dirs: Optional[List[Path]] = None,
+    repo_heads: Optional[Dict[str, str]] = None,
+    uncommitted_diffs: Optional[Dict[str, str]] = None,
+) -> Tuple[Dict[str, str], str]:
+    """Compute per-repo HEAD map and deterministic SHA-256 over uncommitted working-tree state."""
+    from stagecheck.core.git import run_safe_git
+
+    root = Path(workspace_root).resolve()
+    if repo_dirs is None:
+        r_base = root / "repos"
+        repo_dirs = [d for d in sorted(r_base.iterdir()) if d.is_dir() and not d.name.startswith(".")] if r_base.is_dir() else []
+
+    heads: Dict[str, str] = dict(repo_heads) if repo_heads is not None else {}
+    porcelain_map: Dict[str, str] = dict(uncommitted_diffs) if uncommitted_diffs is not None else {}
+    dirty_file_hashes: Dict[str, str] = {}
+
+    for r_dir in repo_dirs:
+        if not (r_dir / ".git").exists():
+            continue
+        if repo_heads is None:
+            head_res = run_safe_git(r_dir, ["rev-parse", "HEAD"])
+            if head_res.returncode == 0:
+                heads[r_dir.name] = head_res.stdout.strip()
+        if uncommitted_diffs is None:
+            st_res = run_safe_git(r_dir, ["status", "--porcelain=v1", "--untracked-files=all"])
+            if st_res.returncode == 0 and st_res.stdout.rstrip("\r\n"):
+                porcelain_map[r_dir.name] = st_res.stdout.rstrip("\r\n")
+
+        raw_porcelain = porcelain_map.get(r_dir.name, "")
+        if raw_porcelain:
+            for line in raw_porcelain.splitlines():
+                raw_line = line.rstrip("\r\n")
+                if not raw_line or len(raw_line) <= 3:
+                    continue
+                rel_p = raw_line[3:].strip()
+                if " -> " in rel_p:
+                    rel_p = rel_p.split(" -> ")[1].strip()
+                fpath = r_dir / rel_p
+                key = f"{r_dir.name}/{rel_p}"
+                if fpath.is_symlink():
+                    dirty_file_hashes[key] = f"symlink:{os.readlink(fpath)}"
+                elif fpath.is_file():
+                    dirty_file_hashes[key] = sha256_file(fpath)
+                else:
+                    dirty_file_hashes[key] = "deleted_or_missing"
+
+    snapshot_payload = {
+        "heads": {k: heads[k] for k in sorted(heads)},
+        "porcelain": {k: porcelain_map[k] for k in sorted(porcelain_map)},
+        "dirty_files": {k: dirty_file_hashes[k] for k in sorted(dirty_file_hashes)},
+    }
+    digest = hashlib.sha256(canonical_json_dumps(snapshot_payload).encode("utf-8")).hexdigest()
+    return heads, digest
+
+
+def compute_agent_review_digest(review_doc: Dict[str, Any]) -> str:
+    """Compute canonical SHA-256 digest over an agent review document excluding review_digest."""
+    clean = {k: v for k, v in review_doc.items() if k != "review_digest"}
+    return hashlib.sha256(canonical_json_dumps(clean).encode("utf-8")).hexdigest()
+
+
+def build_agent_reviews_artifact(
+    workspace_root: Union[str, Path],
+    task_id: str,
+    attempt: int,
+    reviews: Dict[str, Any],
+    reviewer: str,
+    reviewer_role: str = "prompt_and_audit",
+    producer: Optional[str] = None,
+    reviewed_at: Optional[str] = None,
+    head_commits: Optional[Dict[str, str]] = None,
+    diff_snapshot_sha256: Optional[str] = None,
+    artifact_sha256: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Construct a complete, integrity-bound Phase-2A/agent_reviews.json document (GAP-04)."""
+    root = Path(workspace_root).resolve()
+    computed_heads, computed_diff_sha = compute_uncommitted_state_digest(root)
+    heads = dict(head_commits) if head_commits is not None else computed_heads
+    diff_sha = diff_snapshot_sha256 or computed_diff_sha
+
+    p2a_dir = resolve_task_attempt_dir(root, task_id, int(attempt)) / "Phase-2A"
+    status_file = p2a_dir / "pre_commit_status.json"
+    if artifact_sha256:
+        art_sha = artifact_sha256
+    elif status_file.is_file() and not status_file.is_symlink():
+        art_sha = sha256_file(status_file)
+    else:
+        art_sha = hashlib.sha256(canonical_json_dumps({"task_id": task_id, "attempt": int(attempt)}).encode("utf-8")).hexdigest()
+
+    doc: Dict[str, Any] = {
+        "schema_version": "2.0",
+        "task_id": task_id,
+        "attempt": int(attempt),
+        "reviewer": reviewer,
+        "reviewer_role": reviewer_role,
+        "producer": producer,
+        "reviewed_at": reviewed_at or datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "head_commits": heads,
+        "diff_snapshot_sha256": diff_sha,
+        "artifact_sha256": art_sha,
+        "agent_assisted_reviews": reviews,
+    }
+    doc["review_digest"] = compute_agent_review_digest(doc)
+    return doc
+
+
+def _extract_registered_agents(active_state: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not isinstance(active_state, dict):
+        return []
+    reg = active_state.get("registered_agents")
+    if reg is None and isinstance(active_state.get("protected"), dict):
+        reg = active_state["protected"].get("registered_agents")
+    if isinstance(reg, list):
+        return [a for a in reg if isinstance(a, dict)]
+    if isinstance(reg, dict):
+        out: List[Dict[str, Any]] = []
+        for k, v in reg.items():
+            if isinstance(v, dict):
+                item = dict(v)
+                item.setdefault("name", k)
+                out.append(item)
+        return out
+    return []
+
+
+def _verify_clean_post_approval_commit(
+    ws: Path,
+    p2a_dir: Path,
+    task_id: str,
+    attempt: int,
+    active_state: Optional[Dict[str, Any]],
+    doc_heads: Dict[str, str],
+    repo_heads: Dict[str, str],
+    diff_snapshot_sha256: str,
+    pre_commit_review: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, str]:
+    """Allow frozen Phase-2A agent reviews during Phase-2B/3/4 ONLY if commits match pre_commit_review cleanly."""
+    if not isinstance(active_state, dict):
+        return False, "Missing ACTIVE_STATE.json for post-approval review binding."
+    phase = active_state.get("phase")
+    cleared = active_state.get("cleared_gates") or {}
+    if phase not in ("PHASE_2B_COMMITTING", "PHASE_3_AUDIT", "GATE_4_SEALING") or not any(
+        g in cleared for g in ("GATE_2A", "GATE_2B")
+    ):
+        return False, "Agent review head_commits/diff_snapshot_sha256 do not match current workspace state (stale review)."
+
+    # Require completely clean working tree across all repos once Gate 2A has cleared
+    clean_payload = {
+        "heads": {k: repo_heads[k] for k in sorted(repo_heads)},
+        "porcelain": {},
+        "dirty_files": {},
+    }
+    clean_sha = hashlib.sha256(canonical_json_dumps(clean_payload).encode("utf-8")).hexdigest()
+    if diff_snapshot_sha256 != clean_sha:
+        return False, "Uncommitted working-tree changes present after Phase-2A review (stale review)."
+
+    rev_doc = pre_commit_review
+    if rev_doc is None:
+        rev_path = p2a_dir / "pre_commit_review.json"
+        if rev_path.is_symlink() or not rev_path.is_file():
+            return False, "Missing Phase-2A/pre_commit_review.json to verify post-approval commit fidelity."
+        try:
+            rev_doc = load_json_file(rev_path)
+        except Exception:
+            return False, "Unreadable Phase-2A/pre_commit_review.json."
+
+    if (
+        not isinstance(rev_doc, dict)
+        or rev_doc.get("status") != "APPROVED"
+        or rev_doc.get("task_id") != task_id
+        or rev_doc.get("attempt") != int(attempt)
+    ):
+        return False, "Phase-2A/pre_commit_review.json is not APPROVED for active task/attempt."
+
+    base_commits = rev_doc.get("base_commits") or {}
+    approved_hashes = rev_doc.get("approved_diff_hashes") or {}
+    if not isinstance(base_commits, dict) or not isinstance(approved_hashes, dict):
+        return False, "Approved pre_commit_review.json lacks base_commits/approved_diff_hashes."
+
+    from stagecheck.core.cooperative_review import validate_commit_sha
+    from stagecheck.core.git import run_safe_git_bytes
+
+    for r_name, cur_head in repo_heads.items():
+        reviewed_head = doc_heads.get(r_name)
+        if not reviewed_head:
+            return False, f"Agent review lacks baseline commit for repository '{r_name}'."
+        if base_commits.get(r_name) and base_commits[r_name] != reviewed_head:
+            return False, f"Agent review head_commits for '{r_name}' differs from approved base_commits."
+        if cur_head != reviewed_head:
+            expected_diff_hash = approved_hashes.get(r_name)
+            repo_path = ws / "repos" / r_name
+            if not expected_diff_hash or not repo_path.is_dir():
+                return False, f"No approved diff hash covers post-review commit in '{r_name}' (stale review)."
+            try:
+                validate_commit_sha(reviewed_head, r_name)
+                validate_commit_sha(cur_head, r_name)
+                res = run_safe_git_bytes(
+                    repo_path,
+                    ["diff", "--binary", "--end-of-options", f"{reviewed_head}..{cur_head}", "--"],
+                    check=True,
+                )
+            except Exception:
+                return False, f"Unable to verify committed diff fidelity against reviewed commit in '{r_name}'."
+            if hashlib.sha256(res.stdout).hexdigest() != expected_diff_hash:
+                return False, f"Repository '{r_name}' HEAD commit diverged from Phase-2A approved diff (stale review)."
+
+    return True, "OK"
+
+
+def validate_agent_review_provenance(
+    workspace_root: Path,
+    src_doc: Dict[str, Any],
+    src_rel_path: str,
+    task_id: str,
+    attempt: int,
+    active_state: Optional[Dict[str, Any]],
+    pre_commit_status: Optional[Dict[str, Any]],
+    repo_heads: Dict[str, str],
+    diff_snapshot_sha256: str,
+    entry: Optional[Dict[str, Any]] = None,
+    max_age_seconds: int = 86400,
+    now_utc: Optional[datetime.datetime] = None,
+    pre_commit_review: Optional[Dict[str, Any]] = None,
+    _commit_match_cache: Optional[Dict[str, Tuple[bool, str]]] = None,
+) -> Tuple[bool, str, str]:
+    """Validate all 9 GAP-04 agent-assisted review provenance requirements.
+
+    Returns:
+        Tuple of (is_valid, failure_status ['NOT_EVALUATED'|'FAIL'], message).
+    """
+    if not isinstance(src_doc, dict):
+        return False, "NOT_EVALUATED", f"Review source '{src_rel_path}' is missing or malformed."
+
+    ws = workspace_root.resolve()
+    now = now_utc or datetime.datetime.now(datetime.timezone.utc)
+    p2a_dir = resolve_task_attempt_dir(ws, task_id, int(attempt)) / "Phase-2A"
+
+    # 1. Source file must exist safely on disk (no symlinks / no generic substitution)
+    src_file = p2a_dir / Path(src_rel_path).name
+    if src_file.is_symlink() or not src_file.is_file():
+        return False, "FAIL", f"Review artifact '{src_rel_path}' is missing or is a prohibited symlink."
+
+    # 2. Task & attempt binding
+    doc_task = src_doc.get("task_id")
+    doc_att = src_doc.get("attempt")
+    if doc_task != task_id:
+        return False, "FAIL", f"Agent review task_id '{doc_task}' does not match '{task_id}'."
+    if isinstance(doc_att, bool) or not isinstance(doc_att, int) or doc_att != int(attempt):
+        return False, "FAIL", f"Agent review attempt '{doc_att}' does not match '{attempt}'."
+
+    if isinstance(entry, dict):
+        if entry.get("task_id") is not None and entry.get("task_id") != task_id:
+            return False, "FAIL", f"Rule review entry task_id '{entry.get('task_id')}' mismatches '{task_id}'."
+        if entry.get("attempt") is not None and entry.get("attempt") != int(attempt):
+            return False, "FAIL", f"Rule review entry attempt '{entry.get('attempt')}' mismatches '{attempt}'."
+
+    # 3. Reviewer identity & generic evaluator rejection
+    reviewer = (entry.get("reviewer") if isinstance(entry, dict) else None) or src_doc.get("reviewer") or src_doc.get("reviewed_by")
+    if not isinstance(reviewer, str) or len(reviewer.strip()) < 2:
+        return False, "NOT_EVALUATED", "Agent review missing reviewer identity."
+    reviewer_clean = reviewer.strip()
+    reviewer_lower = reviewer_clean.lower()
+    if reviewer_lower in _GENERIC_REVIEWER_NAMES:
+        return False, "FAIL", f"Generic evaluator '{reviewer_clean}' cannot substitute for authorized agent review."
+
+    reviewer_role = (entry.get("reviewer_role") if isinstance(entry, dict) else None) or src_doc.get("reviewer_role")
+    if not isinstance(reviewer_role, str) or not reviewer_role.strip():
+        return False, "NOT_EVALUATED", "Agent review missing reviewer_role."
+    role_clean = reviewer_role.strip()
+
+    # 4. Authorization against ACTIVE_STATE.json registered_agents
+    agents = _extract_registered_agents(active_state)
+    if not agents:
+        return False, "FAIL", "ACTIVE_STATE.json lacks registered_agents to authorize reviewer identity."
+
+    enabled_agents = [a for a in agents if a.get("enabled", True) and isinstance(a.get("name"), str)]
+    auditors = {a["name"].strip().lower(): a for a in enabled_agents if a.get("role") == "prompt_and_audit"}
+    coders = {a["name"].strip().lower(): a for a in enabled_agents if a.get("role") == "code_implementation"}
+    dual_agents = {a["name"].strip().lower(): a for a in enabled_agents if a.get("role") == "dual_role"}
+    single_mode = bool(active_state.get("single_agent_mode")) if isinstance(active_state, dict) else False
+
+    if not single_mode:
+        if role_clean != "prompt_and_audit":
+            return False, "FAIL", f"Reviewer role '{role_clean}' is unauthorized in dual-agent mode (must be 'prompt_and_audit')."
+        if reviewer_lower not in auditors:
+            return False, "FAIL", f"Reviewer '{reviewer_clean}' is not an enabled 'prompt_and_audit' agent in ACTIVE_STATE.json."
+    else:
+        if role_clean not in ("dual_role", "prompt_and_audit"):
+            return False, "FAIL", f"Reviewer role '{role_clean}' is unauthorized in single-agent mode."
+        allowed_pool = set(dual_agents) | set(auditors)
+        if reviewer_lower not in allowed_pool:
+            return False, "FAIL", f"Reviewer '{reviewer_clean}' is not authorized in ACTIVE_STATE.json."
+
+    # 5. Reviewer independence (dual-agent mode prohibits self-review by coder/producer)
+    producer = (
+        (pre_commit_status.get("submitted_by") or pre_commit_status.get("author") or pre_commit_status.get("producer"))
+        if isinstance(pre_commit_status, dict)
+        else None
+    ) or src_doc.get("producer")
+    if not single_mode:
+        if reviewer_lower in coders:
+            return False, "FAIL", f"Reviewer independence violated: '{reviewer_clean}' holds 'code_implementation' role."
+        if isinstance(producer, str) and producer.strip() and reviewer_lower == producer.strip().lower():
+            return False, "FAIL", f"Reviewer independence violated: reviewer '{reviewer_clean}' matches producer '{producer}'."
+
+    # 6. Artifact integrity (review_digest + artifact_sha256 + safe evidence_path)
+    review_digest = src_doc.get("review_digest")
+    if not isinstance(review_digest, str) or not _SHA256_HEX_RE.match(review_digest):
+        return False, "FAIL", "Agent review missing valid 64-hex review_digest."
+    if compute_agent_review_digest(src_doc) != review_digest:
+        return False, "FAIL", "Agent review review_digest mismatch (tampering detected)."
+
+    status_file = p2a_dir / "pre_commit_status.json"
+    art_sha = src_doc.get("artifact_sha256")
+    if status_file.is_file() and not status_file.is_symlink():
+        if not isinstance(art_sha, str) or not _SHA256_HEX_RE.match(art_sha):
+            return False, "FAIL", "Agent review missing artifact_sha256 binding Phase-2A/pre_commit_status.json."
+        if sha256_file(status_file) != art_sha:
+            return False, "FAIL", "Agent review artifact_sha256 does not match Phase-2A/pre_commit_status.json (stale or tampered)."
+
+    if isinstance(entry, dict) and entry.get("evidence_path"):
+        ev_rel = str(entry["evidence_path"])
+        try:
+            ev_target = safe_resolve(ev_rel, ws, allow_symlinks=False)
+            if not ev_target.is_file():
+                ev_target = safe_resolve(ev_rel, resolve_task_attempt_dir(ws, task_id, int(attempt)), allow_symlinks=False)
+        except StageCheckPathError as err:
+            return False, "FAIL", f"Unsafe agent review evidence_path '{ev_rel}': {err}"
+        if ev_target.is_symlink() or not ev_target.is_file():
+            return False, "FAIL", f"Agent review evidence artifact '{ev_rel}' does not exist."
+
+    # 7. Freshness (reviewed_at + head_commits + diff_snapshot_sha256)
+    rev_dt = _parse_utc_iso_strict((entry.get("reviewed_at") if isinstance(entry, dict) else None) or src_doc.get("reviewed_at"))
+    if rev_dt is None:
+        return False, "NOT_EVALUATED", "Agent review missing valid timezone-aware UTC reviewed_at timestamp."
+    if rev_dt > now + datetime.timedelta(seconds=60):
+        return False, "FAIL", "Agent review reviewed_at timestamp is in the future."
+    if (now - rev_dt).total_seconds() > max_age_seconds:
+        return False, "NOT_EVALUATED", f"Agent review expired (older than {max_age_seconds}s)."
+
+    doc_heads = src_doc.get("head_commits") or src_doc.get("base_commits")
+    doc_diff_sha = src_doc.get("diff_snapshot_sha256")
+    heads_match = isinstance(doc_heads, dict) and (not repo_heads or doc_heads == repo_heads)
+    diff_match = isinstance(doc_diff_sha, str) and doc_diff_sha == diff_snapshot_sha256
+    if not (heads_match and diff_match):
+        if not isinstance(doc_heads, dict) or not isinstance(doc_diff_sha, str):
+            return False, "NOT_EVALUATED", "Agent review lacks valid head_commits or diff_snapshot_sha256 binding."
+        cache_key = f"{src_rel_path}:{doc_diff_sha}"
+        if _commit_match_cache is not None and cache_key in _commit_match_cache:
+            post_ok, post_msg = _commit_match_cache[cache_key]
+        else:
+            post_ok, post_msg = _verify_clean_post_approval_commit(
+                ws=ws,
+                p2a_dir=p2a_dir,
+                task_id=task_id,
+                attempt=int(attempt),
+                active_state=active_state,
+                doc_heads=doc_heads,
+                repo_heads=repo_heads,
+                diff_snapshot_sha256=diff_snapshot_sha256,
+                pre_commit_review=pre_commit_review,
+            )
+            if _commit_match_cache is not None:
+                _commit_match_cache[cache_key] = (post_ok, post_msg)
+        if not post_ok:
+            return False, "NOT_EVALUATED", post_msg
+
+    return True, "PASS", "OK"
+
+
+def compute_rubric_context_digest(
+    workspace_root: Union[str, Path],
+    task_id: str,
+    attempt: int,
+    repo_dirs: Optional[List[Path]] = None,
+    repo_heads: Optional[Dict[str, str]] = None,
+    uncommitted_diffs: Optional[Dict[str, str]] = None,
+    diff_snapshot_sha256: Optional[str] = None,
+) -> str:
+    """Compute fast deterministic SHA-256 over audited governance, repo, and phase inputs (GAP-02)."""
+    root = Path(workspace_root).resolve()
+    attempt_dir = resolve_task_attempt_dir(root, task_id, int(attempt))
+    heads, snap_sha = compute_uncommitted_state_digest(
+        root,
+        repo_dirs=repo_dirs,
+        repo_heads=repo_heads,
+        uncommitted_diffs=uncommitted_diffs,
+    )
+    if diff_snapshot_sha256:
+        snap_sha = diff_snapshot_sha256
+
+    def _safe_sha(p: Path) -> Optional[str]:
+        if p.is_symlink():
+            return "SYMLINK"
+        if p.is_file():
+            return sha256_file(p)
+        return None
+
+    active_state, _ = _safe_load_json(root / "controls" / "ACTIVE_STATE.json")
+    active_bound: Optional[Dict[str, Any]] = None
+    if isinstance(active_state, dict):
+        active_bound = {
+            "task_id": active_state.get("task_id"),
+            "attempt_index": active_state.get("attempt_index"),
+            "single_agent_mode": active_state.get("single_agent_mode"),
+            "registered_agents": active_state.get("registered_agents"),
+            "protected": active_state.get("protected"),
+        }
+
+    digest_inputs = {
+        "task_id": task_id,
+        "attempt": int(attempt),
+        "active_bound": active_bound,
+        "dispositions_sha": _safe_sha(root / "controls" / "DISPOSITIONS.json"),
+        "owner_grants_sha": _safe_sha(root / "controls" / "OWNER_GRANTS.md"),
+        "prod_repos_sha": _safe_sha(root / "controls" / "PRODUCT_REPOSITORIES.json"),
+        "failure_prev_sha": _safe_sha(root / "controls" / "FAILURE_PREVENTION.md"),
+        "agents_md_sha": _safe_sha(root / "AGENTS.md"),
+        "start_manifest_sha": _safe_sha(root / "specs" / "START_MANIFEST.md"),
+        "prompt_md_sha": _safe_sha(attempt_dir / "Phase-1" / "prompt.md"),
+        "declared_scope_sha": _safe_sha(attempt_dir / "Phase-1" / "declared_scope.json"),
+        "prompt_verified_sha": _safe_sha(attempt_dir / "Phase-1" / "prompt_verified.json"),
+        "pre_commit_status_sha": _safe_sha(attempt_dir / "Phase-2A" / "pre_commit_status.json"),
+        "agent_reviews_sha": _safe_sha(attempt_dir / "Phase-2A" / "agent_reviews.json"),
+        "claims_sha": _safe_sha(attempt_dir / "Phase-2B" / "claims.json"),
+        "report_sha": _safe_sha(attempt_dir / "Phase-2B" / "report.md"),
+        "repo_heads": heads,
+        "diff_snapshot_sha256": snap_sha,
+    }
+    return hashlib.sha256(canonical_json_dumps(digest_inputs).encode("utf-8")).hexdigest()
+
+
+def analyze_rubric_completeness(
+    evaluations: List[Union[RuleEvaluationResult, Dict[str, Any]]],
+    target_domain: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Classify evaluation completeness against the immutable 270-rule matrix (GAP-02)."""
+    catalog = load_270_rule_catalog()
+    expected_ids = [r.rule_id for r in catalog]
+    expected_set = set(expected_ids)
+
+    seen_ids: Set[str] = set()
+    duplicate_rules: List[str] = []
+    for item in evaluations:
+        rid = item.rule_id if isinstance(item, RuleEvaluationResult) else item.get("rule_id")
+        if isinstance(rid, str) and rid:
+            if rid in seen_ids and rid not in duplicate_rules:
+                duplicate_rules.append(rid)
+            seen_ids.add(rid)
+
+    missing_rules = [rid for rid in expected_ids if rid not in seen_ids]
+    unexpected_rules = sorted(seen_ids - expected_set)
+
+    is_complete = (
+        target_domain is None
+        and len(evaluations) == len(expected_ids)
+        and len(seen_ids) == len(expected_ids)
+        and not missing_rules
+        and not duplicate_rules
+        and not unexpected_rules
+    )
+    return {
+        "evaluation_completeness": "COMPLETE" if is_complete else "PARTIAL",
+        "expected_rule_count": len(expected_ids),
+        "evaluated_rule_count": len(seen_ids),
+        "missing_rules": missing_rules,
+        "duplicate_rules": sorted(duplicate_rules),
+        "unexpected_rules": unexpected_rules,
+    }
+
+
+def verify_complete_rubric_evaluation(
+    workspace_root: Union[str, Path],
+    rubric_path: Union[str, Path],
+    task_id: str,
+    attempt: int,
+    cycle: Optional[int] = None,
+    max_age_seconds: int = 86400,
+    require_fresh_context: bool = True,
+) -> Tuple[bool, List[str], Optional[Dict[str, Any]]]:
+    """Authoritative GAP-02 verifier rejecting partial, missing, duplicate, unbound, or stale rubric evaluations."""
+    root = Path(workspace_root).resolve()
+    r_path = Path(rubric_path)
+    reasons: List[str] = []
+
+    if r_path.is_symlink():
+        return False, [f"Rubric evaluation file '{r_path.name}' is a prohibited symbolic link."], None
+    if not r_path.is_file():
+        return False, [f"Required complete rubric evaluation file missing at '{r_path}'."], None
+
+    try:
+        payload = load_json_file(r_path)
+    except Exception as err:
+        return False, [f"Malformed rubric_evaluation.json: {err}"], None
+
+    try:
+        validate_rubric_evaluation(payload)
+    except Exception as err:
+        reasons.append(f"Schema validation failed: {err}")
+
+    if payload.get("task_id") != task_id:
+        reasons.append(f"Task binding mismatch: expected '{task_id}', got '{payload.get('task_id')}'.")
+
+    p_att = payload.get("attempt")
+    if isinstance(p_att, bool) or not isinstance(p_att, int) or p_att != int(attempt):
+        reasons.append(f"Attempt binding mismatch: expected {attempt}, got {p_att!r}.")
+
+    if cycle is not None and payload.get("cycle") != int(cycle):
+        reasons.append(f"Cycle binding mismatch: expected {cycle}, got {payload.get('cycle')!r}.")
+
+    completeness = payload.get("evaluation_completeness")
+    if completeness != "COMPLETE":
+        reasons.append(f"Rubric evaluation completeness is '{completeness or 'MISSING'}'; 'COMPLETE' is required.")
+
+    if payload.get("target_domain") is not None:
+        reasons.append(f"Partial target_domain '{payload.get('target_domain')}' evaluation cannot pass a complete-audit gate.")
+
+    eval_items = payload.get("evaluations")
+    if not isinstance(eval_items, list):
+        reasons.append("Missing 'evaluations' array in rubric_evaluation.json.")
+        return False, reasons, payload
+
+    try:
+        validate_rubric_evaluation_payload(eval_items)
+    except Exception as err:
+        reasons.append(f"Payload integrity check failed: {err}")
+
+    analysis = analyze_rubric_completeness(eval_items, target_domain=payload.get("target_domain"))
+    if payload.get("expected_rule_count") != 270 or analysis["expected_rule_count"] != 270:
+        reasons.append(f"Expected 270 catalog rules, got expected_rule_count={payload.get('expected_rule_count')!r}.")
+    if payload.get("evaluated_rule_count") != 270 or analysis["evaluated_rule_count"] != 270 or len(eval_items) != 270:
+        reasons.append(
+            f"Expected 270 evaluated rules, got evaluated_rule_count={payload.get('evaluated_rule_count')!r} "
+            f"(unique={analysis['evaluated_rule_count']}, len={len(eval_items)})."
+        )
+    if analysis["missing_rules"] or payload.get("missing_rules"):
+        missing_count = len(analysis["missing_rules"] or payload.get("missing_rules") or [])
+        reasons.append(f"Missing {missing_count} required rubric rule(s): {(analysis['missing_rules'] or [])[:5]}")
+    if analysis["duplicate_rules"] or payload.get("duplicate_rules"):
+        dups = analysis["duplicate_rules"] or payload.get("duplicate_rules") or []
+        reasons.append(f"Duplicate rule evaluation(s) detected: {dups[:5]}")
+    if analysis["unexpected_rules"]:
+        reasons.append(f"Unexpected non-catalog rule IDs detected: {analysis['unexpected_rules'][:5]}")
+
+    eval_dt = _parse_utc_iso_strict(payload.get("evaluated_at"))
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if eval_dt is None:
+        reasons.append("Missing or invalid timezone-aware UTC 'evaluated_at' timestamp.")
+    else:
+        if eval_dt > now + datetime.timedelta(seconds=60):
+            reasons.append("Rubric 'evaluated_at' timestamp is unexpectedly in the future.")
+        if (now - eval_dt).total_seconds() > max_age_seconds:
+            reasons.append(f"Stale rubric evaluation (older than {max_age_seconds}s).")
+
+    if require_fresh_context:
+        recorded_digest = payload.get("context_digest")
+        current_digest = compute_rubric_context_digest(root, task_id=task_id, attempt=int(attempt))
+        if not isinstance(recorded_digest, str) or not _SHA256_HEX_RE.match(recorded_digest):
+            reasons.append("Missing valid 64-hex 'context_digest' binding audited state.")
+        elif recorded_digest != current_digest:
+            reasons.append("Stale rubric evaluation: workspace, repository, control, or evidence files changed after evaluation.")
+
+    if payload.get("overall_verdict") != "PASS":
+        reasons.append(f"Rubric overall_verdict is '{payload.get('overall_verdict')}', expected 'PASS'.")
+
+    non_passing = [
+        f"{item.get('rule_id')}:{item.get('status')}"
+        for item in eval_items
+        if item.get("status") not in ("PASS", "NOT_APPLICABLE")
+    ]
+    if non_passing:
+        reasons.append(f"{len(non_passing)} rule(s) did not pass: {non_passing[:5]}")
+
+    return len(reasons) == 0, reasons, payload
 
 
 def _safe_load_json(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -680,48 +1317,58 @@ def _collect_rubric_context(
         issue_history_doc, issue_history_err = None, "Missing artifact 'issue_history.json'"
     ev_manifest_doc, _ = _safe_load_json(root / "evidence" / "EVIDENCE_MANIFEST.json")
 
-    # Dispositions / Human Waivers for active task
+    # Dispositions / Human Waivers for active task & attempt (GAP-03 strict provenance)
     approved_waivers: Dict[str, Dict[str, Any]] = {}
+    waiver_rejection_reasons: Dict[str, str] = {}
     if isinstance(dispositions_doc, dict):
-        for entry in dispositions_doc.get("dispositions", []):
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("status") != "APPROVED" or entry.get("task_id") != task_id:
-                continue
-            if not entry.get("rationale") or not entry.get("authorized_by"):
-                continue
-            target_ids: List[str] = []
-            for key in ("rule_id", "defect_id"):
-                val = entry.get(key)
-                if isinstance(val, str) and val:
-                    target_ids.append(val)
-            waived_list = entry.get("waived_rules")
-            if isinstance(waived_list, list):
-                target_ids.extend(str(x) for x in waived_list if x)
-            for tid in target_ids:
-                approved_waivers[tid] = {
-                    "disposition_id": entry.get("disposition_id"),
-                    "authorized_by": entry.get("authorized_by"),
-                    "rationale": entry.get("rationale"),
-                    "evidence_path": "controls/DISPOSITIONS.json",
-                }
+        disp_entries = dispositions_doc.get("dispositions", [])
+        if isinstance(disp_entries, list):
+            for entry in disp_entries:
+                if not isinstance(entry, dict):
+                    continue
+                target_ids: List[str] = []
+                for key in ("rule_id", "defect_id"):
+                    val = entry.get(key)
+                    if isinstance(val, str) and val:
+                        target_ids.append(val)
+                waived_list = entry.get("waived_rules")
+                if isinstance(waived_list, list):
+                    target_ids.extend(str(x) for x in waived_list if x)
+                if "*" in target_ids:
+                    for tid in target_ids:
+                        if tid != "*":
+                            waiver_rejection_reasons[tid] = "Wildcard '*' waiver target is prohibited."
+                    continue
 
-    # Agent-assisted review records from pre_commit_review.json / agent_reviews.json
+                ok_w, reason_w = validate_waiver_provenance(
+                    workspace_root=root,
+                    entry=entry,
+                    task_id=task_id,
+                    attempt=int(attempt),
+                    all_entries=disp_entries,
+                )
+                if not ok_w:
+                    if entry.get("task_id") == task_id or not entry.get("task_id"):
+                        for tid in target_ids:
+                            waiver_rejection_reasons.setdefault(tid, reason_w)
+                    continue
+
+                for tid in target_ids:
+                    approved_waivers[tid] = {
+                        "_provenance_verified": True,
+                        "disposition_id": entry.get("disposition_id"),
+                        "authorized_by": entry.get("authorized_by"),
+                        "authorized_role": entry.get("authorized_role", "OWNER"),
+                        "attempt": entry.get("attempt") if entry.get("attempt") is not None else entry.get("attempt_index"),
+                        "rationale": entry.get("rationale"),
+                        "evidence_path": entry.get("evidence_path") or entry.get("evidence"),
+                        "nonce": entry.get("nonce"),
+                        "waiver_digest": entry.get("waiver_digest"),
+                    }
+
+    # Agent-assisted review records populated after git/diff inspection (see below)
     recorded_agent_reviews: Dict[str, Any] = {}
-    for src_doc, src_path in (
-        (pre_commit_review, "Phase-2A/pre_commit_review.json"),
-        (agent_reviews_doc, "Phase-2A/agent_reviews.json"),
-    ):
-        if isinstance(src_doc, dict):
-            mapping = src_doc.get("agent_assisted_reviews") or src_doc.get("reviews")
-            if isinstance(mapping, dict):
-                for rid, rinfo in mapping.items():
-                    if isinstance(rinfo, dict):
-                        entry_copy = dict(rinfo)
-                        entry_copy.setdefault("evidence_path", src_path)
-                        recorded_agent_reviews[rid] = entry_copy
-                    else:
-                        recorded_agent_reviews[rid] = {"status": str(rinfo), "evidence_path": src_path}
+    agent_review_errors: Dict[str, Tuple[str, str]] = {}
 
     # Touched repos
     touched_repo_names: Optional[Set[str]] = None
@@ -837,10 +1484,67 @@ def _collect_rubric_context(
         if scanner_report_doc.get("status") == "FAILED" and not secrets_found:
             secrets_found.append("Phase-3/scanner_report.json status FAILED")
 
+    _, diff_snapshot_sha256 = compute_uncommitted_state_digest(
+        root,
+        repo_dirs=repo_dirs,
+        repo_heads=repo_heads,
+        uncommitted_diffs=uncommitted_diffs,
+    )
+
+    # Validate Agent-Assisted review provenance against GAP-04 requirements
+    commit_match_cache: Dict[str, Tuple[bool, str]] = {}
+    for src_doc, src_path in (
+        (pre_commit_review, "Phase-2A/pre_commit_review.json"),
+        (agent_reviews_doc, "Phase-2A/agent_reviews.json"),
+    ):
+        if isinstance(src_doc, dict):
+            mapping = src_doc.get("agent_assisted_reviews") or src_doc.get("reviews")
+            if isinstance(mapping, dict):
+                for rid, rinfo in mapping.items():
+                    if isinstance(rinfo, dict):
+                        entry_copy = dict(rinfo)
+                        entry_copy.setdefault("evidence_path", src_path)
+                    else:
+                        entry_copy = {"status": str(rinfo), "evidence_path": src_path}
+
+                    ok_rev, fail_status, fail_msg = validate_agent_review_provenance(
+                        workspace_root=root,
+                        src_doc=src_doc,
+                        src_rel_path=src_path,
+                        task_id=task_id,
+                        attempt=int(attempt),
+                        active_state=active_state,
+                        pre_commit_status=pre_commit_status,
+                        repo_heads=repo_heads,
+                        diff_snapshot_sha256=diff_snapshot_sha256,
+                        entry=entry_copy,
+                        pre_commit_review=pre_commit_review,
+                        _commit_match_cache=commit_match_cache,
+                    )
+                    if ok_rev:
+                        entry_copy["_provenance_verified"] = True
+                        recorded_agent_reviews[rid] = entry_copy
+                        agent_review_errors.pop(rid, None)
+                    else:
+                        agent_review_errors[rid] = (fail_status, fail_msg)
+
+    context_digest = compute_rubric_context_digest(
+        root,
+        task_id=task_id,
+        attempt=int(attempt),
+        repo_dirs=repo_dirs,
+        repo_heads=repo_heads,
+        uncommitted_diffs=uncommitted_diffs,
+        diff_snapshot_sha256=diff_snapshot_sha256,
+    )
+
     ctx: Dict[str, Any] = {
         "_collected": True,
+        "workspace_root": str(root),
         "task_id": task_id,
         "attempt": attempt,
+        "context_digest": context_digest,
+        "diff_snapshot_sha256": diff_snapshot_sha256,
         "repo_dirs": repo_dirs,
         "active_state": active_state,
         "active_state_err": active_state_err,
@@ -869,7 +1573,9 @@ def _collect_rubric_context(
         "issue_history_err": issue_history_err,
         "ev_manifest_doc": ev_manifest_doc,
         "human_waivers": approved_waivers,
+        "waiver_rejection_reasons": waiver_rejection_reasons,
         "agent_reviews": recorded_agent_reviews,
+        "agent_review_errors": agent_review_errors,
         "uncommitted_diffs": uncommitted_diffs,
         "untouched_dirty": untouched_dirty,
         "out_of_scope_files": out_of_scope_files,
@@ -903,8 +1609,9 @@ def _collect_rubric_context(
 
 
 def _evaluate_human_waiver(rule: RubricRule, ctx: Dict[str, Any]) -> RuleEvaluationResult:
-    """Strictly validate human disposition authorization from controls/DISPOSITIONS.json or explicit context."""
-    task_id = ctx.get("task_id", "task-default")
+    """Strictly validate human disposition provenance from controls/DISPOSITIONS.json (GAP-03)."""
+    task_id = str(ctx.get("task_id", "task-default"))
+    attempt = int(ctx.get("attempt", 1) or 1)
     if rule.rule_id in ctx.get("failed_human_waivers", []):
         return RuleEvaluationResult(
             rule_id=rule.rule_id,
@@ -915,11 +1622,60 @@ def _evaluate_human_waiver(rule: RubricRule, ctx: Dict[str, Any]) -> RuleEvaluat
             witness="controls/DISPOSITIONS.json",
             message=f"Human disposition explicitly rejected for '{rule.rule_id}'.",
         )
+
     waivers = ctx.get("human_waivers", {})
-    if isinstance(waivers, dict) and (rule.rule_id in waivers or "*" in waivers):
-        waiver_info = waivers.get(rule.rule_id) or waivers.get("*") or {}
+    if isinstance(waivers, dict) and "*" in waivers:
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id,
+            domain=rule.domain,
+            category=rule.category,
+            status="FAIL",
+            evaluator="human_waiver_evaluator",
+            witness="controls/DISPOSITIONS.json",
+            message="Wildcard '*' human waiver is strictly prohibited.",
+        )
+
+    if isinstance(waivers, dict) and rule.rule_id in waivers:
+        waiver_info = waivers.get(rule.rule_id)
         if not isinstance(waiver_info, dict):
-            waiver_info = {}
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id,
+                domain=rule.domain,
+                category=rule.category,
+                status="FAIL",
+                evaluator="human_waiver_evaluator",
+                witness="controls/DISPOSITIONS.json",
+                message=f"Malformed human waiver entry for '{rule.rule_id}'.",
+            )
+        if waiver_info.get("_provenance_verified") is not True:
+            ws_str = ctx.get("workspace_root")
+            if not ws_str:
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="FAIL",
+                    evaluator="human_waiver_evaluator",
+                    witness="controls/DISPOSITIONS.json",
+                    message=f"Unverified human waiver provenance for '{rule.rule_id}' (missing workspace provenance check).",
+                )
+            ok_w, reason_w = validate_waiver_provenance(
+                workspace_root=Path(ws_str),
+                entry=waiver_info,
+                task_id=task_id,
+                attempt=attempt,
+                required_rule_id=rule.rule_id,
+            )
+            if not ok_w:
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="FAIL",
+                    evaluator="human_waiver_evaluator",
+                    witness="controls/DISPOSITIONS.json",
+                    message=f"Human waiver provenance invalid for '{rule.rule_id}': {reason_w}",
+                )
         return RuleEvaluationResult(
             rule_id=rule.rule_id,
             domain=rule.domain,
@@ -927,8 +1683,21 @@ def _evaluate_human_waiver(rule: RubricRule, ctx: Dict[str, Any]) -> RuleEvaluat
             status="PASS",
             evaluator="human_waiver_evaluator",
             witness=waiver_info.get("evidence_path", "controls/DISPOSITIONS.json"),
-            message=f"Human waiver authorized: {waiver_info.get('rationale', 'Approved by operator')}.",
+            message=f"Human waiver authorized by {waiver_info.get('authorized_by')}: {waiver_info.get('rationale', '')}.",
         )
+
+    rej_reasons = ctx.get("waiver_rejection_reasons", {})
+    if isinstance(rej_reasons, dict) and rule.rule_id in rej_reasons:
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id,
+            domain=rule.domain,
+            category=rule.category,
+            status="FAIL",
+            evaluator="human_waiver_evaluator",
+            witness="controls/DISPOSITIONS.json",
+            message=f"Human disposition rejected for '{rule.rule_id}': {rej_reasons[rule.rule_id]}",
+        )
+
     return RuleEvaluationResult(
         rule_id=rule.rule_id,
         domain=rule.domain,
@@ -938,13 +1707,13 @@ def _evaluate_human_waiver(rule: RubricRule, ctx: Dict[str, Any]) -> RuleEvaluat
         witness="controls/DISPOSITIONS.json",
         message=(
             f"Human disposition required for '{rule.rule_id}' ({rule.title}) "
-            f"but no APPROVED waiver exists for task '{task_id}' in controls/DISPOSITIONS.json."
+            f"but no provenance-verified APPROVED waiver exists for task '{task_id}' attempt {attempt}."
         ),
     )
 
 
 def _evaluate_agent_assisted(rule: RubricRule, ctx: Dict[str, Any]) -> RuleEvaluationResult:
-    """Validate real recorded Agent-Assisted review entries; never auto-pass when missing."""
+    """Validate real provenance-verified Agent-Assisted review entries; never allow generic substitution (GAP-04)."""
     if rule.rule_id in ctx.get("missing_agent_reviews", []):
         return RuleEvaluationResult(
             rule_id=rule.rule_id,
@@ -952,12 +1721,36 @@ def _evaluate_agent_assisted(rule: RubricRule, ctx: Dict[str, Any]) -> RuleEvalu
             category=rule.category,
             status="NOT_EVALUATED",
             evaluator="agent_assisted_evaluator",
-            witness="Phase-2A/pre_commit_review.json",
+            witness="Phase-2A/agent_reviews.json",
             message=f"Agent-assisted review evidence missing for rule '{rule.rule_id}'.",
         )
 
     reviews = ctx.get("agent_reviews", {})
     entry = reviews.get(rule.rule_id) if isinstance(reviews, dict) else None
+
+    # Check illegal agent self-exemption first (even on unverified context entries)
+    if isinstance(entry, dict) and str(entry.get("status", "")).upper() == "NOT_APPLICABLE":
+        raise InvalidRubricExemptionError(
+            f"Illegal agent self-exemption attempted for '{rule.rule_id}': agents cannot mark AGENT_ASSISTED rules NOT_APPLICABLE."
+        )
+    elif isinstance(entry, str) and entry.upper() == "NOT_APPLICABLE":
+        raise InvalidRubricExemptionError(
+            f"Illegal agent self-exemption attempted for '{rule.rule_id}': agents cannot mark AGENT_ASSISTED rules NOT_APPLICABLE."
+        )
+
+    rev_errors = ctx.get("agent_review_errors", {})
+    if isinstance(rev_errors, dict) and rule.rule_id in rev_errors:
+        err_status, err_msg = rev_errors[rule.rule_id]
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id,
+            domain=rule.domain,
+            category=rule.category,
+            status=err_status,
+            evaluator="agent_assisted_evaluator",
+            witness="Phase-2A/agent_reviews.json",
+            message=f"Agent-assisted review provenance rejected for '{rule.rule_id}': {err_msg}",
+        )
+
     if not entry:
         return RuleEvaluationResult(
             rule_id=rule.rule_id,
@@ -965,23 +1758,39 @@ def _evaluate_agent_assisted(rule: RubricRule, ctx: Dict[str, Any]) -> RuleEvalu
             category=rule.category,
             status="NOT_EVALUATED",
             evaluator="agent_assisted_evaluator",
-            witness="Phase-2A/pre_commit_review.json",
+            witness="Phase-2A/agent_reviews.json",
             message=f"No recorded Agent 1 semantic review found for '{rule.rule_id}' ({rule.title}).",
         )
 
-    if isinstance(entry, dict):
-        r_status = str(entry.get("status", "")).upper()
-        rationale = str(entry.get("rationale") or entry.get("summary") or entry.get("message") or "").strip()
-        ev_path = str(entry.get("evidence_path") or entry.get("witness") or "Phase-2A/pre_commit_review.json")
-    else:
-        r_status = str(entry).upper()
-        rationale = "Recorded agent assessment"
-        ev_path = "Phase-2A/pre_commit_review.json"
-
-    if r_status == "NOT_APPLICABLE":
-        raise InvalidRubricExemptionError(
-            f"Illegal agent self-exemption attempted for '{rule.rule_id}': agents cannot mark AGENT_ASSISTED rules NOT_APPLICABLE."
+    if not isinstance(entry, dict):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id,
+            domain=rule.domain,
+            category=rule.category,
+            status="NOT_EVALUATED",
+            evaluator="agent_assisted_evaluator",
+            witness="Phase-2A/agent_reviews.json",
+            message=f"Agent-assisted review entry for '{rule.rule_id}' lacks structured provenance object.",
         )
+
+    if entry.get("_provenance_verified") is not True:
+        reviewer = str(entry.get("reviewer") or entry.get("reviewed_by") or "").strip()
+        reviewer_role = str(entry.get("reviewer_role") or "").strip()
+        if not reviewer or reviewer.lower() in _GENERIC_REVIEWER_NAMES or not reviewer_role:
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id,
+                domain=rule.domain,
+                category=rule.category,
+                status="FAIL" if reviewer.lower() in _GENERIC_REVIEWER_NAMES else "NOT_EVALUATED",
+                evaluator="agent_assisted_evaluator",
+                witness=str(entry.get("evidence_path") or "Phase-2A/agent_reviews.json"),
+                message=f"Agent-assisted review for '{rule.rule_id}' lacks verified reviewer identity/role provenance.",
+            )
+
+    r_status = str(entry.get("status", "")).upper()
+    rationale = str(entry.get("rationale") or entry.get("summary") or entry.get("message") or "").strip()
+    ev_path = str(entry.get("evidence_path") or entry.get("witness") or "Phase-2A/agent_reviews.json")
+
     if r_status in ("FAIL", "FAILED", "BLOCKING", "REVISION_REQUIRED", "REJECTED"):
         return RuleEvaluationResult(
             rule_id=rule.rule_id,
@@ -1846,6 +2655,19 @@ def aggregate_rubric_results(
     """
     eval_dicts = [e.to_dict() if isinstance(e, RuleEvaluationResult) else e for e in evaluations]
 
+    seen_ids: Set[str] = set()
+    duplicate_ids: List[str] = []
+    for item in eval_dicts:
+        rid = item.get("rule_id")
+        if isinstance(rid, str) and rid:
+            if rid in seen_ids and rid not in duplicate_ids:
+                duplicate_ids.append(rid)
+            seen_ids.add(rid)
+    if duplicate_ids:
+        raise DuplicateRuleEvaluationError(
+            f"Duplicate rubric rule evaluation(s) rejected during aggregation: {', '.join(sorted(duplicate_ids))}"
+        )
+
     total_rules = len(eval_dicts)
     passed = sum(1 for e in eval_dicts if e.get("status") == "PASS")
     failed = sum(1 for e in eval_dicts if e.get("status") == "FAIL")
@@ -1974,6 +2796,10 @@ def run_rubric_evaluation(
     validate_rubric_evaluation_payload(eval_dicts)
 
     overall_verdict, counts, domains_map = aggregate_rubric_results(evaluations)
+    completeness = analyze_rubric_completeness(eval_dicts, target_domain=target_domain)
+    if completeness["evaluation_completeness"] != "COMPLETE":
+        overall_verdict = "FAIL"
+
     elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
     payload: Dict[str, Any] = {
@@ -1984,6 +2810,13 @@ def run_rubric_evaluation(
         "cycle": resolved_cycle,
         "evaluated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "overall_verdict": overall_verdict,
+        "evaluation_completeness": completeness["evaluation_completeness"],
+        "expected_rule_count": completeness["expected_rule_count"],
+        "evaluated_rule_count": completeness["evaluated_rule_count"],
+        "missing_rules": completeness["missing_rules"],
+        "duplicate_rules": completeness["duplicate_rules"],
+        "target_domain": target_domain,
+        "context_digest": live_context.get("context_digest"),
         "counts": counts,
         "domains": domains_map,
         "evaluations": eval_dicts,
@@ -2014,8 +2847,11 @@ def update_rubric_artifacts(
     if review_file.is_file():
         try:
             rev_data = load_json_file(review_file)
+            is_complete = rubric_payload.get("evaluation_completeness") == "COMPLETE"
             rev_data["rubric_summary"] = {
                 "total_evaluated": rubric_payload["counts"]["total_rules"],
+                "expected_rule_count": rubric_payload.get("expected_rule_count", 270),
+                "evaluation_completeness": rubric_payload.get("evaluation_completeness", "PARTIAL"),
                 "passed": rubric_payload["counts"]["passed"],
                 "failed": rubric_payload["counts"]["failed"],
                 "not_applicable": rubric_payload["counts"]["not_applicable"],
@@ -2023,7 +2859,7 @@ def update_rubric_artifacts(
                 "blocked": rubric_payload["counts"].get("blocked", 0),
                 "evaluation_file": str(rubric_file.relative_to(root)),
             }
-            if rubric_payload["overall_verdict"] != "PASS":
+            if rubric_payload["overall_verdict"] != "PASS" or not is_complete:
                 rev_data["status"] = "REVISION_REQUIRED"
                 blocking_rules = [
                     e for e in rubric_payload["evaluations"] if e.get("status") in ("FAIL", "BLOCKED", "NOT_EVALUATED")
@@ -2034,6 +2870,16 @@ def update_rubric_artifacts(
                         "severity": "BLOCKING",
                         "location": f_rule.get("witness", "codebase"),
                         "description": f_rule.get("message", f"Rubric rule ended with status {f_rule.get('status')}."),
+                    })
+                if not is_complete:
+                    rev_data.setdefault("new_issues_found", []).append({
+                        "defect_id": "RUBRIC-INCOMPLETE",
+                        "severity": "BLOCKING",
+                        "location": str(rubric_file.relative_to(root)),
+                        "description": (
+                            f"Partial rubric evaluation ({rubric_payload.get('evaluated_rule_count')}/"
+                            f"{rubric_payload.get('expected_rule_count', 270)}) cannot authorize approval."
+                        ),
                     })
             review_file.write_text(canonical_json_dumps(rev_data), encoding="utf-8")
             updated_review = review_file
