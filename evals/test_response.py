@@ -399,7 +399,7 @@ class Hook(unittest.TestCase):
         state=Path('/proc')/str(pid)/'stat'
         try:state_text=state.read_text()
         except (FileNotFoundError,ProcessLookupError):pass  # Reaped before open or during read.
-        else:self.assertEqual(state_text.split()[2],'Z')
+        else:self.assertIn(state_text.split()[2],('Z','X'))
     def test_record_lock_and_identity_faults(self):
         self.submit(HEADS);folder=self.record_root/'codex'/self.event['session_id']
         fd=os.open(folder/'.lock',os.O_RDWR)
@@ -421,6 +421,22 @@ class Hook(unittest.TestCase):
                 return read(path,*args,**kwargs)
             def previously_present(path):return True if proc_stat(path) else exists(path)
             with self.subTest(error=error.__name__),patch.object(Path,'exists',previously_present),patch.object(Path,'read_text',disappearing):
+                self.test_real_timeout_kills_process_group()
+            self.assertEqual(len(observed),1)
+    def test_real_timeout_accepts_dead_child_state(self):
+        # Linux /proc/<pid>/stat may report EXIT_DEAD ('X') or EXIT_ZOMBIE ('Z') during process teardown.
+        read=Path.read_text
+        for proc_state in ('X','Z'):
+            observed=[]
+            def terminated_stat(path,*args,**kwargs):
+                if path.name=='stat' and path.parent.parent==Path('/proc'):
+                    try:real_state=read(path,*args,**kwargs)
+                    except (FileNotFoundError,ProcessLookupError):pass
+                    else:self.assertIn(real_state.split()[2],('Z','X'))
+                    observed.append((str(path),proc_state))
+                    return f'1 (fixture) {proc_state}\n'
+                return read(path,*args,**kwargs)
+            with self.subTest(state=proc_state),patch.object(Path,'read_text',terminated_stat):
                 self.test_real_timeout_kills_process_group()
             self.assertEqual(len(observed),1)
     def test_missing_prior_record_recovers_without_rewriting(self):
