@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from stagecheck.core.dispositions import DispositionError, add_disposition
+from stagecheck.core.dispositions import DispositionError, add_disposition, revoke_disposition
 from stagecheck.core.paths import find_workspace_root
 
 
@@ -19,19 +19,33 @@ def run_disposition_add(
     defect: str,
     rationale: str,
     action: str = "ACCEPT_AS_INTENTIONAL",
-    authorized_by: str = "human-operator",
+    authorized_by: str = "",
     yes: bool = False,
     workspace: Optional[str] = None,
+    attempt: Optional[int] = None,
+    evidence: Optional[str] = None,
+    expires_at: Optional[str] = None,
+    role: str = "OWNER",
 ) -> int:
     """Execute 'stagecheck disposition add'."""
     workspace_root = Path(workspace).resolve() if workspace else find_workspace_root()
 
+    if not authorized_by or not authorized_by.strip():
+        print(
+            "ERROR: [disposition.missing_identity] --authorized-by is required for human waiver provenance.",
+            file=sys.stderr,
+        )
+        return 1
+
     print("=" * 72)
     print(" [STAGECHECK] HUMAN DEFECT DISPOSITION & OVERRIDE HATCH")
     print(f" Task ID     : {task}")
+    if attempt is not None:
+        print(f" Attempt     : {attempt}")
     print(f" Defect Code : {defect}")
     print(f" Action      : {action}")
-    print(f" Authorized  : {authorized_by}")
+    print(f" Authorized  : {authorized_by} ({role})")
+    print(f" Evidence    : {evidence or '<missing>'}")
     print(f" Rationale   : {rationale}")
     print("=" * 72)
 
@@ -66,6 +80,10 @@ def run_disposition_add(
             authorized_by=authorized_by,
             require_tty=not yes,
             confirmed=True,
+            attempt=attempt,
+            evidence_path=evidence,
+            expires_at=expires_at,
+            authorized_role=role,
         )
         print(f"\nSUCCESS: Defect waiver recorded with ID '{entry['disposition_id']}'.")
         print(f"  File: {workspace_root}/controls/DISPOSITIONS.json")
@@ -78,14 +96,50 @@ def run_disposition_add(
         return 1
 
 
+def run_disposition_revoke(
+    task: str,
+    revoked_by: str,
+    reason: str,
+    disposition_id: Optional[str] = None,
+    defect: Optional[str] = None,
+    attempt: Optional[int] = None,
+    yes: bool = False,
+    workspace: Optional[str] = None,
+) -> int:
+    """Execute 'stagecheck disposition revoke'."""
+    workspace_root = Path(workspace).resolve() if workspace else find_workspace_root()
+    try:
+        entry = revoke_disposition(
+            workspace_root=workspace_root,
+            task_id=task,
+            revoked_by=revoked_by,
+            reason=reason,
+            disposition_id=disposition_id,
+            defect_id=defect,
+            attempt=attempt,
+            require_tty=not yes,
+            confirmed=yes,
+        )
+        print(f"SUCCESS: Revoked waiver '{entry.get('disposition_id')}' for task '{task}'.")
+        return 0
+    except DispositionError as err:
+        print(f"ERROR: [disposition.revoke_failed] {err}", file=sys.stderr)
+        return 1
+
+
 def run_disposition(
     task: str,
     action: str = "waive",
     defect: Optional[str] = None,
     rationale: Optional[str] = None,
-    authorized_by: str = "human-operator",
+    authorized_by: str = "",
     yes: bool = False,
     workspace: Optional[str] = None,
+    attempt: Optional[int] = None,
+    evidence: Optional[str] = None,
+    expires_at: Optional[str] = None,
+    role: str = "OWNER",
+    disposition_id: Optional[str] = None,
 ) -> int:
     """Execute 'stagecheck disposition' managing defect waivers, retries, and resumptions (DEC-028 / FR-06).
 
@@ -124,9 +178,25 @@ def run_disposition(
         return run_disposition_add(
             task=task,
             defect=defect,
-            rationale=rationale or "Defect waived by operator",
+            rationale=rationale or "",
             action="ACCEPT_AS_INTENTIONAL" if norm_action == "waive" else action,
             authorized_by=authorized_by,
+            yes=yes,
+            workspace=workspace,
+            attempt=attempt,
+            evidence=evidence,
+            expires_at=expires_at,
+            role=role,
+        )
+
+    if norm_action == "revoke":
+        return run_disposition_revoke(
+            task=task,
+            revoked_by=authorized_by,
+            reason=rationale or "Revoked by operator",
+            disposition_id=disposition_id,
+            defect=defect,
+            attempt=attempt,
             yes=yes,
             workspace=workspace,
         )

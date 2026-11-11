@@ -47,7 +47,7 @@ and security waivers. AI agents have strictly zero authority to modify this file
 * Direct remote push commands (git push) are strictly forbidden for AI agents.
 
 ## Privileged Operator Identities
-* Authorized owner: `owner@stagecheck.local`
+* Authorized owner: `owner@stagecheck.local` (roles: OWNER; permissions: WAIVER_APPROVE, WAIVER_REVOKE, GATE_OVERRIDE, CIRCUIT_BREAKER_RESET)
 """
 
 DEFAULT_FAILURE_PREVENTION_MD = """# Failure Prevention, Historical Defect Patterns & Anti-Regressions

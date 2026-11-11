@@ -84,10 +84,15 @@ def build_parser() -> argparse.ArgumentParser:
     # 9. disposition
     p_disp = subparsers.add_parser("disposition", help="Manage defect waivers and risk acceptances.")
     p_disp.add_argument("--task", help="Task identifier.")
-    p_disp.add_argument("--action", default="waive", choices=["waive", "retry", "resume", "abort", "ACCEPT_AS_INTENTIONAL", "WAIVE_TEMPORARY", "NOT_APPLICABLE"], help="Disposition action (default: waive).")
+    p_disp.add_argument("--action", default="waive", choices=["waive", "revoke", "retry", "resume", "abort", "ACCEPT_AS_INTENTIONAL", "WAIVE_TEMPORARY", "NOT_APPLICABLE"], help="Disposition action (default: waive).")
     p_disp.add_argument("--defect", help="Defect code.")
+    p_disp.add_argument("--disposition-id", help="Explicit disposition ID (used for revoke).")
     p_disp.add_argument("--rationale", help="Justification rationale.")
-    p_disp.add_argument("--authorized-by", default="human-operator", help="Authorized owner identity.")
+    p_disp.add_argument("--authorized-by", default="", help="Authorized human owner identity (must be granted in OWNER_GRANTS.md).")
+    p_disp.add_argument("--attempt", type=int, help="Target attempt index.")
+    p_disp.add_argument("--evidence", help="Relative workspace path to supporting waiver evidence file.")
+    p_disp.add_argument("--expires-at", help="UTC ISO-8601 expiration timestamp for the waiver.")
+    p_disp.add_argument("--role", default="OWNER", help="Authorized human role (default: OWNER).")
     p_disp.add_argument("--yes", "-y", action="store_true", help="Bypass interactive confirmation prompt.")
     p_disp.add_argument("--workspace", help="Explicit workspace root path.")
     disp_subs = p_disp.add_subparsers(dest="disposition_action")
@@ -96,9 +101,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_disp_add.add_argument("--defect", required=True, help="Defect code.")
     p_disp_add.add_argument("--rationale", required=True, help="Justification rationale.")
     p_disp_add.add_argument("--action", default="ACCEPT_AS_INTENTIONAL", choices=["ACCEPT_AS_INTENTIONAL", "WAIVE_TEMPORARY", "NOT_APPLICABLE"], help="Disposition action.")
-    p_disp_add.add_argument("--authorized-by", default="human-operator", help="Authorized owner identity.")
+    p_disp_add.add_argument("--authorized-by", default="", help="Authorized human owner identity.")
+    p_disp_add.add_argument("--attempt", type=int, help="Target attempt index.")
+    p_disp_add.add_argument("--evidence", help="Relative workspace path to supporting waiver evidence file.")
+    p_disp_add.add_argument("--expires-at", help="UTC ISO-8601 expiration timestamp for the waiver.")
+    p_disp_add.add_argument("--role", default="OWNER", help="Authorized human role (default: OWNER).")
     p_disp_add.add_argument("--yes", "-y", action="store_true", help="Bypass interactive confirmation prompt.")
     p_disp_add.add_argument("--workspace", help="Explicit workspace root path.")
+    p_disp_rev = disp_subs.add_parser("revoke", help="Revoke an active defect waiver.")
+    p_disp_rev.add_argument("--task", required=True, help="Task identifier.")
+    p_disp_rev.add_argument("--disposition-id", help="Explicit disposition ID to revoke.")
+    p_disp_rev.add_argument("--defect", help="Defect code to revoke.")
+    p_disp_rev.add_argument("--attempt", type=int, help="Target attempt index.")
+    p_disp_rev.add_argument("--authorized-by", required=True, help="Authorized human operator revoking the waiver.")
+    p_disp_rev.add_argument("--rationale", required=True, help="Revocation reason.")
+    p_disp_rev.add_argument("--yes", "-y", action="store_true", help="Bypass interactive confirmation prompt.")
+    p_disp_rev.add_argument("--workspace", help="Explicit workspace root path.")
 
     # 10. sentinel
     p_sentinel = subparsers.add_parser("sentinel", help="Manage background continuous sentinel daemon.")
@@ -310,7 +328,23 @@ def main(argv: Optional[List[str]] = None) -> int:
                 defect=args.defect,
                 rationale=args.rationale,
                 action=getattr(args, "action", "ACCEPT_AS_INTENTIONAL"),
-                authorized_by=getattr(args, "authorized_by", "human-operator"),
+                authorized_by=getattr(args, "authorized_by", ""),
+                yes=getattr(args, "yes", False),
+                workspace=getattr(args, "workspace", None),
+                attempt=getattr(args, "attempt", None),
+                evidence=getattr(args, "evidence", None),
+                expires_at=getattr(args, "expires_at", None),
+                role=getattr(args, "role", "OWNER"),
+            )
+        elif getattr(args, "disposition_action", None) == "revoke":
+            from stagecheck.cli.disposition_cmd import run_disposition_revoke
+            return run_disposition_revoke(
+                task=args.task,
+                revoked_by=args.authorized_by,
+                reason=args.rationale,
+                disposition_id=getattr(args, "disposition_id", None),
+                defect=getattr(args, "defect", None),
+                attempt=getattr(args, "attempt", None),
                 yes=getattr(args, "yes", False),
                 workspace=getattr(args, "workspace", None),
             )
@@ -321,9 +355,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 action=getattr(args, "action", "waive"),
                 defect=getattr(args, "defect", None),
                 rationale=getattr(args, "rationale", None),
-                authorized_by=getattr(args, "authorized_by", "human-operator"),
+                authorized_by=getattr(args, "authorized_by", ""),
                 yes=getattr(args, "yes", False),
                 workspace=getattr(args, "workspace", None),
+                attempt=getattr(args, "attempt", None),
+                evidence=getattr(args, "evidence", None),
+                expires_at=getattr(args, "expires_at", None),
+                role=getattr(args, "role", "OWNER"),
+                disposition_id=getattr(args, "disposition_id", None),
             )
         print("Usage: stagecheck disposition [--task <ID> --action <waive|retry|resume|abort> ...] or disposition add ...", file=sys.stderr)
         return 1

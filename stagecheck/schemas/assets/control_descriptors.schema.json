@@ -42,13 +42,38 @@
             "properties": {
               "disposition_id": {"type": "string"},
               "task_id": {"type": "string"},
+              "attempt": {"type": "integer", "minimum": 1},
+              "attempt_index": {"type": "integer", "minimum": 1},
               "defect_id": {"type": "string"},
+              "rule_id": {"type": "string"},
+              "waived_rules": {
+                "type": "array",
+                "items": {"type": "string"}
+              },
               "action": {"type": "string"},
-              "status": {"type": "string", "enum": ["APPROVED", "REVOKED", "REJECTED"]},
+              "status": {"type": "string", "enum": ["APPROVED", "REVOKED", "REJECTED", "EXPIRED"]},
               "repo": {"type": "string"},
               "rationale": {"type": "string"},
               "authorized_by": {"type": "string"},
+              "authorized_role": {"type": "string"},
+              "permissions": {
+                "type": "array",
+                "items": {"type": "string"}
+              },
+              "explicit_approval": {"type": "boolean"},
+              "evidence": {"type": "string"},
+              "evidence_path": {"type": "string"},
+              "evidence_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "authorized_at": {"type": "string"},
+              "expires_at": {"type": "string"},
+              "revoked_at": {"type": ["string", "null"]},
+              "revoked_by": {"type": ["string", "null"]},
+              "revocation_reason": {"type": ["string", "null"]},
+              "nonce": {"type": "string"},
+              "waiver_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "consumed_at": {"type": ["string", "null"]},
+              "consumed_task_id": {"type": ["string", "null"]},
+              "consumed_attempt": {"type": ["integer", "null"]},
               "timestamp": {"type": "string"}
             }
           }

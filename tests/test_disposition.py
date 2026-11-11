@@ -57,6 +57,11 @@ class TestDispositions(unittest.TestCase):
         os.chmod(state_file, 0o444)
         os.chmod(state_file.parent, 0o555)
 
+        self.evidence_rel = "evidence/waiver_support.txt"
+        evidence_file = self.workspace_root / self.evidence_rel
+        evidence_file.parent.mkdir(parents=True, exist_ok=True)
+        evidence_file.write_text("Verified supporting waiver evidence.\n", encoding="utf-8")
+
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
@@ -81,7 +86,8 @@ class TestDispositions(unittest.TestCase):
             defect_id="scope_paths.out_of_scope_modification",
             rationale="Intentional design upgrade for RFC-12",
             action="ACCEPT_AS_INTENTIONAL",
-            authorized_by="developer@company.com",
+            authorized_by="owner@stagecheck.local",
+            evidence_path=self.evidence_rel,
             require_tty=False,
             confirmed=True,
         )
@@ -114,6 +120,8 @@ class TestDispositions(unittest.TestCase):
                 task_id=self.task_id,
                 defect_id="rerun.timeout",
                 rationale="Expected long run",
+                authorized_by="owner@stagecheck.local",
+                evidence_path=self.evidence_rel,
                 require_tty=False,
                 confirmed=True,
             )
@@ -142,6 +150,8 @@ class TestDispositions(unittest.TestCase):
             task_id=self.task_id,
             defect_id="defect_1",
             rationale="Waived defect 1",
+            authorized_by="owner@stagecheck.local",
+            evidence_path=self.evidence_rel,
             require_tty=False,
             confirmed=True,
         )
@@ -155,6 +165,8 @@ class TestDispositions(unittest.TestCase):
             task_id=self.task_id,
             defect_id="defect_2",
             rationale="Waived defect 2",
+            authorized_by="owner@stagecheck.local",
+            evidence_path=self.evidence_rel,
             require_tty=False,
             confirmed=True,
         )
@@ -185,6 +197,8 @@ class TestDispositions(unittest.TestCase):
             "--task", self.task_id,
             "--defect", "secrets.leak_detected",
             "--rationale", "Test key for mock test suite only",
+            "--authorized-by", "owner@stagecheck.local",
+            "--evidence", self.evidence_rel,
             "--yes",
             "--workspace", str(self.workspace_root),
         ])

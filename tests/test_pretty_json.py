@@ -162,12 +162,17 @@ class TestPrettyJSONFormatting(unittest.TestCase):
         run_init(workspace=str(self.workspace), repos="core", agent1="claude", agent2="codex")
         elevate_permissions_for_teardown(self.workspace)
 
+        evidence_file = self.workspace / "evidence" / "waiver_proof.txt"
+        evidence_file.parent.mkdir(parents=True, exist_ok=True)
+        evidence_file.write_text("Waiver proof data\n", encoding="utf-8")
+
         add_disposition(
             workspace_root=self.workspace,
             task_id="task-init",
             defect_id="sec.gitleaks",
             rationale="Test waiver",
-            authorized_by="owner",
+            authorized_by="owner@stagecheck.local",
+            evidence_path="evidence/waiver_proof.txt",
             confirmed=True,
         )
         elevate_permissions_for_teardown(self.workspace)
