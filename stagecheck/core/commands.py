@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from stagecheck.core.git import SAFE_GIT_SECURITY_FLAGS, run_safe_git
+from stagecheck.core.isolation import (
+    SandboxPolicy,
+    SandboxUnavailableError as BaseSandboxUnavailableError,
+    prepare_isolated_command,
+)
 from stagecheck.core.utils import sha256_digest
 
 
@@ -53,6 +58,13 @@ class TreeMutationError(CommandSecurityError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, exit_code=1)
+
+
+class SandboxUnavailableError(CommandSecurityError, BaseSandboxUnavailableError):
+    """Raised fail-closed when mandatory OS-level sandbox isolation is unavailable."""
+
+    def __init__(self, message: str) -> None:
+        CommandSecurityError.__init__(self, message, exit_code=126)
 
 
 # Allowlisted environment variables (SEC-A1 & commands.json)
@@ -592,15 +604,21 @@ def execute_secure_command(
     extra_env: Optional[Dict[str, str]] = None,
     log_dir: Optional[Union[str, Path]] = None,
     check_tree_integrity: bool = True,
+    workspace_root: Optional[Union[str, Path]] = None,
+    require_isolation: bool = True,
+    allow_network: bool = False,
+    allow_cwd_write: bool = True,
+    mask_governance_dirs: bool = False,
 ) -> CommandExecutionRecord:
-    """Execute a test or verification command in an isolated, secure subprocess.
+    """Execute a test or verification command in an OS-isolated, secure subprocess.
 
     Enforces:
       1. Pre-execution argument policy check (SEC-B3)
       2. Environment credential stripping (SEC-A1)
-      3. Strict execution timeout
-      4. Working-tree status equality audit before/after (SEC-C1)
-      5. Execution record generation with SHA-256 digests (SEC-05)
+      3. OS-enforced Bubblewrap namespace/mount/capability sandbox (GAP-05)
+      4. Strict execution timeout
+      5. Working-tree status equality audit before/after (SEC-C1)
+      6. Execution record generation with SHA-256 digests (SEC-05)
 
     Args:
         argv: Command arguments array.
@@ -650,9 +668,25 @@ def execute_secure_command(
     stderr_str = ""
 
     exec_argv = [str(resolved_bin_path), *argv[1:]]
+    policy = SandboxPolicy(
+        working_directory=cwd,
+        workspace_root=Path(workspace_root).resolve() if workspace_root else None,
+        allow_cwd_write=allow_cwd_write,
+        unshare_net=not allow_network,
+        mask_governance_dirs=mask_governance_dirs,
+    )
+    try:
+        launch_argv, _sandbox_enforced = prepare_isolated_command(
+            exec_argv=exec_argv,
+            policy=policy,
+            mandatory=require_isolation,
+        )
+    except BaseSandboxUnavailableError as err:
+        raise SandboxUnavailableError(str(err)) from err
+
     try:
         proc = subprocess.run(
-            exec_argv,
+            launch_argv,
             cwd=str(cwd),
             env=clean_env_dict,
             shell=False,
@@ -667,8 +701,10 @@ def execute_secure_command(
     except subprocess.TimeoutExpired as exc:
         timed_out = True
         exit_code = 124
-        stdout_str = exc.stdout or ""
-        stderr_str = exc.stderr or ""
+        raw_out = exc.stdout or ""
+        raw_err = exc.stderr or ""
+        stdout_str = raw_out.decode("utf-8", errors="replace") if isinstance(raw_out, bytes) else raw_out
+        stderr_str = raw_err.decode("utf-8", errors="replace") if isinstance(raw_err, bytes) else raw_err
 
     t1 = time.time()
     t_end_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()

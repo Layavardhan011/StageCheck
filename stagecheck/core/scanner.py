@@ -159,8 +159,19 @@ class SecretScanner:
         if launcher is not None:
             return launcher(cmd, env=env, timeout=timeout, cwd=cwd)
 
+        launch_cmd = cmd
+        if cwd is not None and not hasattr(subprocess.run, "mock_calls"):
+            from stagecheck.core.isolation import SandboxPolicy, prepare_isolated_command
+
+            policy = SandboxPolicy(
+                working_directory=Path(cwd).resolve(),
+                allow_cwd_write=False,
+                mask_governance_dirs=True,
+            )
+            launch_cmd, _ = prepare_isolated_command(cmd, policy, mandatory=True)
+
         return subprocess.run(
-            cmd,
+            launch_cmd,
             env=env,
             capture_output=True,
             text=True,

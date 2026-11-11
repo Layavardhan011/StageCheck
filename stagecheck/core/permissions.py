@@ -14,9 +14,9 @@ from pathlib import Path
 from typing import Generator, List, Optional, Union
 
 
-MODE_DIR_RO = 0o555    # read + execute, no write (defense-in-depth)
+MODE_DIR_RO = 0o555    # read + execute, no write (cooperative at-rest defense-in-depth; same-UID OS isolation is in core.isolation)
 MODE_DIR_RW = 0o755    # read + write + execute (temporarily during transaction)
-MODE_FILE_RO = 0o444   # read-only files
+MODE_FILE_RO = 0o444   # read-only files (cooperative at-rest lock)
 MODE_FILE_RW = 0o644   # read + write files
 
 
@@ -25,7 +25,18 @@ class TeardownError(Exception):
 
 
 class VerifierIsolationError(Exception):
-    """Raised when verifier files, controls, or sealed evidence have been tampered with (Gap B)."""
+    """Raised when verifier files, controls, or sealed evidence are compromised or OS isolation is missing."""
+
+
+def assert_os_sandbox_boundary(unshare_net: bool = True) -> None:
+    """Verify kernel-level same-UID sandbox isolation (Bubblewrap namespaces) is operational."""
+    from stagecheck.core.isolation import probe_bwrap_sandbox
+
+    probe = probe_bwrap_sandbox(unshare_net=unshare_net)
+    if not probe.get("available"):
+        raise VerifierIsolationError(
+            f"OS-enforced same-UID sandbox boundary unavailable: {probe.get('reason')}"
+        )
 
 
 def assert_verifier_isolation(workspace_root: Union[str, Path]) -> None:
