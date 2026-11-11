@@ -6,10 +6,12 @@ both vendored source trees and packaged wheel installations.
 """
 import os
 import re
+import stat
 import sys
+import zipfile
 from importlib import resources
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # Prohibited personal or host-specific path patterns
 PROHIBITED_PATTERNS = [
@@ -135,3 +137,143 @@ def validate_environment_portability() -> Dict[str, Any]:
         "has_inotify": hasattr(os, "inotify_init"),
         "has_flock": hasattr(os, "O_EXCL"),
     }
+
+
+EXECUTABLE_REPO_PATHS: Tuple[str, ...] = (
+    "bin/ci_release_gate.sh",
+    "bin/stagecheck.sh",
+    "bin/stagecheck_supervisor.sh",
+    "tests/bin/gitleaks",
+)
+
+
+def verify_executable_permissions(
+    repo_root: Path,
+    rel_paths: Sequence[str] = EXECUTABLE_REPO_PATHS,
+) -> Dict[str, Any]:
+    """Verify required wrapper scripts and bundled binaries retain executable POSIX permissions (0o755)."""
+    root = Path(repo_root).resolve()
+    missing: List[str] = []
+    non_executable: List[str] = []
+    modes: Dict[str, str] = {}
+
+    for rel in rel_paths:
+        target = root / rel
+        if not target.is_file():
+            missing.append(rel)
+            continue
+        mode = stat.S_IMODE(target.stat().st_mode)
+        modes[rel] = oct(mode)
+        if not (mode & stat.S_IXUSR) or not (mode & stat.S_IXGRP) or not (mode & stat.S_IXOTH):
+            non_executable.append(rel)
+
+    return {
+        "ok": not missing and not non_executable,
+        "missing": missing,
+        "non_executable": non_executable,
+        "modes": modes,
+    }
+
+
+def restore_executable_permissions(
+    repo_root: Path,
+    rel_paths: Sequence[str] = EXECUTABLE_REPO_PATHS,
+    target_mode: int = 0o755,
+) -> Dict[str, Any]:
+    """Restore executable POSIX permissions on wrapper scripts and bundled binaries."""
+    root = Path(repo_root).resolve()
+    restored: List[str] = []
+    missing: List[str] = []
+    for rel in rel_paths:
+        target = root / rel
+        if not target.is_file():
+            missing.append(rel)
+            continue
+        os.chmod(target, target_mode)
+        restored.append(rel)
+    verification = verify_executable_permissions(root, rel_paths)
+    return {
+        "ok": verification["ok"],
+        "restored": restored,
+        "missing": missing,
+        "modes": verification["modes"],
+    }
+
+
+def create_source_zip_preserving_modes(
+    source_root: Path,
+    zip_path: Path,
+    rel_files: Optional[Sequence[str]] = None,
+) -> Path:
+    """Create a ZIP archive that preserves UNIX POSIX file modes in ZipInfo.external_attr."""
+    root = Path(source_root).resolve()
+    out_zip = Path(zip_path).resolve()
+    out_zip.parent.mkdir(parents=True, exist_ok=True)
+
+    candidates: List[str]
+    if rel_files is not None:
+        candidates = list(rel_files)
+    else:
+        candidates = []
+        for cur_root, dirs, files in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if d not in {".git", ".venv", "__pycache__", "dist", "build", ".pytest_cache"})
+            cur_path = Path(cur_root)
+            for fname in sorted(files):
+                fpath = cur_path / fname
+                candidates.append(str(fpath.relative_to(root).as_posix()))
+
+    with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for rel in candidates:
+            full = (root / rel).resolve()
+            full.relative_to(root)
+            if not full.is_file():
+                continue
+            st = full.lstat()
+            zinfo = zipfile.ZipInfo(rel)
+            zinfo.create_system = 3  # UNIX POSIX mode attributes
+            file_mode = stat.S_IMODE(st.st_mode)
+            zinfo.external_attr = (stat.S_IFREG | file_mode) << 16
+            zf.writestr(zinfo, full.read_bytes())
+
+    return out_zip
+
+
+def extract_zip_preserving_modes(
+    zip_path: Path,
+    dest_dir: Path,
+    required_executables: Sequence[str] = EXECUTABLE_REPO_PATHS,
+) -> List[Path]:
+    """Extract a ZIP archive safely and restore recorded POSIX executable modes."""
+    archive = Path(zip_path).resolve()
+    dest = Path(dest_dir).resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+    extracted: List[Path] = []
+    req_set = set(required_executables)
+
+    with zipfile.ZipFile(archive, "r") as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            target = (dest / info.filename).resolve()
+            target.relative_to(dest)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info, "r") as src, open(target, "wb") as dst:
+                dst.write(src.read())
+
+            posix_mode = (info.external_attr >> 16) & 0o777
+            if info.create_system == 3 and posix_mode:
+                os.chmod(target, posix_mode)
+            elif info.filename in req_set:
+                raise PermissionError(
+                    f"Archive entry '{info.filename}' lacks preserved POSIX executable permissions."
+                )
+            extracted.append(target)
+
+    for rel in req_set:
+        candidate = dest / rel
+        if candidate.is_file():
+            mode = stat.S_IMODE(candidate.stat().st_mode)
+            if not (mode & stat.S_IXUSR):
+                raise PermissionError(f"Extracted executable '{rel}' is missing owner execute bit ({oct(mode)}).")
+
+    return extracted
