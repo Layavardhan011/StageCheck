@@ -112,13 +112,74 @@ class TestEndToEndLifecycle(unittest.TestCase):
         repo_dir = self.ws / "repos/core-service"
         run_git(["switch", "-c", "task/task-101"], cwd=repo_dir)
         base_commit = run_git(["rev-parse", "HEAD"], cwd=repo_dir).stdout.strip()
-        (repo_dir / "service.py").write_text("def run_service():\n    return 'OK'\n")
-        (repo_dir / "test_service.py").write_text("def test_service():\n    assert True\n")
+        (repo_dir / "service.py").write_text(
+            "def run_service(val=None):\n"
+            "    if val is None:\n"
+            "        raise TypeError('val required')\n"
+            "    if isinstance(val, int) and val < 0:\n"
+            "        raise ValueError('negative disallowed')\n"
+            "    return 'OK'\n"
+        )
+        (repo_dir / "test_service.py").write_text(
+            "import unittest\n"
+            "from service import run_service\n\n\n"
+            "class TestService(unittest.TestCase):\n"
+            "    def test_positive(self):\n"
+            "        self.assertEqual(run_service(1), 'OK')\n\n"
+            "    def test_negative_boundary(self):\n"
+            "        with self.assertRaises(ValueError):\n"
+            "            run_service(-1)\n\n"
+            "    def test_malformed_input(self):\n"
+            "        with self.assertRaises(TypeError):\n"
+            "            run_service(None)\n\n"
+            "    def test_duplicate_replay_idempotent(self):\n"
+            "        self.assertEqual(run_service(2), run_service(2))\n"
+        )
         run_git(["add", "."], cwd=repo_dir)
+
+        from stagecheck.core.agents_md import write_agents_contract
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.rubric_engine import load_270_rule_catalog
+        from stagecheck.core.utils import canonical_json_dumps, sha256_file
+
+        catalog = load_270_rule_catalog()
+        waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        disp_doc = {
+            "schema_version": "2.0",
+            "dispositions": [
+                {
+                    "disposition_id": "DISP-E2E-101",
+                    "task_id": "task-101",
+                    "rule_id": waiver_ids[0],
+                    "waived_rules": waiver_ids,
+                    "authorized_by": "human-operator",
+                    "rationale": "Authorized for E2E lifecycle verification",
+                    "status": "APPROVED",
+                }
+            ],
+        }
+        with controlled_write_transaction(self.ws / "controls"):
+            (self.ws / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps(disp_doc), encoding="utf-8"
+            )
+        write_agents_contract(self.ws)
 
         # 6. Prepare Phase 2A pre-commit review status and approve review
         phase2a_dir = self.ws / "evidence/tasks/task-101/attempt_1/Phase-2A"
         phase2a_dir.mkdir(parents=True, exist_ok=True)
+        agent_reviews = {
+            r.rule_id: {
+                "status": "PASS",
+                "rationale": f"Verified semantic criterion for {r.title}.",
+                "evidence_path": "Phase-2A/agent_reviews.json",
+            }
+            for r in catalog
+            if r.category == "AGENT_ASSISTED"
+        }
+        (phase2a_dir / "agent_reviews.json").write_text(
+            canonical_json_dumps({"task_id": "task-101", "attempt": 1, "agent_assisted_reviews": agent_reviews}),
+            encoding="utf-8",
+        )
         status_data = {
             "schema_version": "1.0.0",
             "task_id": "task-101",
@@ -143,7 +204,19 @@ class TestEndToEndLifecycle(unittest.TestCase):
         # Delivery report for Phase 2B
         phase2b_dir = self.ws / "evidence/tasks/task-101/attempt_1/Phase-2B"
         phase2b_dir.mkdir(parents=True, exist_ok=True)
-        (phase2b_dir / "report.md").write_text("# Delivery report\nImplemented service.py and tests.\n")
+        report_path = phase2b_dir / "report.md"
+        report_path.write_text("# Delivery report\nImplemented service.py and tests.\n")
+        (phase2b_dir / "claims.json").write_text(
+            canonical_json_dumps({
+                "task_id": "task-101",
+                "iteration": 1,
+                "contract_sha256": sha256_file(self.ws / "AGENTS.md"),
+                "record": "Phase-2B/report.md",
+                "record_sha256": sha256_file(report_path),
+                "claims": [],
+            }),
+            encoding="utf-8",
+        )
 
         # Advance Gate 2B (PHASE_2A_CODING -> PHASE_3_AUDIT)
         rc = run_gate_advance("Gate-2B", task="task-101", attempt=1, workspace=str(self.ws))

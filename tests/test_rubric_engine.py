@@ -153,8 +153,171 @@ class TestRubricEngine(unittest.TestCase):
         with self.assertRaises(InvalidRubricExemptionError):
             validate_rubric_evaluation_payload(missing_evidence)
 
+    def _seed_full_compliant_workspace(self) -> None:
+        """Populate authentic Phase-1, Phase-2A, Phase-2B, Phase-3, test, review, and waiver artifacts."""
+        from stagecheck.core.agents_md import write_agents_contract
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+        from stagecheck.core.utils import canonical_json_dumps, sha256_file
+
+        # 1. Real test suite with positive, negative, malformed, and duplicate/idempotency tests
+        (self.repo_dir / "test_service.py").write_text(
+            "import unittest\n\n\n"
+            "def process_item(val):\n"
+            "    if not isinstance(val, int):\n"
+            "        raise TypeError('expected int')\n"
+            "    if val < 0:\n"
+            "        raise ValueError('negative disallowed')\n"
+            "    return val * 2\n\n\n"
+            "class TestService(unittest.TestCase):\n"
+            "    def test_positive_calculation(self):\n"
+            "        self.assertEqual(process_item(4), 8)\n\n"
+            "    def test_negative_boundary_rejected(self):\n"
+            "        with self.assertRaises(ValueError):\n"
+            "            process_item(-1)\n\n"
+            "    def test_malformed_input_invalid_type(self):\n"
+            "        with self.assertRaises(TypeError):\n"
+            "            process_item(None)\n\n"
+            "    def test_duplicate_replay_idempotent(self):\n"
+            "        first = process_item(5)\n"
+            "        second = process_item(5)\n"
+            "        self.assertEqual(first, second)\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "test_service.py"], cwd=str(self.repo_dir), check=True)
+        subprocess.run(["git", "commit", "-m", "add compliant tests"], cwd=str(self.repo_dir), check=True)
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(self.repo_dir), check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+        # 2. Eval dir
+        (self.workspace / "evals").mkdir(parents=True, exist_ok=True)
+
+        # 3. Phase-1 artifacts + prompt freeze
+        p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").write_text("# Task Blueprint\nImplement service cleanly.\n", encoding="utf-8")
+        (p1_dir / "declared_scope.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "allowed_paths": ["repos/backend/**"],
+                "read_only_paths": [],
+                "forbidden_paths": [".git/**", "controls/**"],
+            }),
+            encoding="utf-8",
+        )
+        freeze_prompt_and_scope(self.workspace, self.task_id, self.attempt)
+
+        # Mark Gate-1 cleared in ACTIVE_STATE
+        state = load_active_state(self.workspace)
+        state["cleared_gates"] = {"GATE_1": "0" * 64}
+        save_active_state(self.workspace, state)
+
+        # Issue history ledger
+        (self.workspace / "evidence" / "issue_history.json").write_text(
+            canonical_json_dumps({"schema_version": "1.0", "issues": []}),
+            encoding="utf-8",
+        )
+
+        # 4. Human waivers (all 10 HUMAN_WAIVER rules) + AGENTS contract digest update
+        catalog = load_270_rule_catalog()
+        waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        disp_doc = {
+            "schema_version": "2.0",
+            "dispositions": [
+                {
+                    "disposition_id": "DISP-RUBRIC-001",
+                    "task_id": self.task_id,
+                    "rule_id": waiver_ids[0],
+                    "waived_rules": waiver_ids,
+                    "authorized_by": "human-operator",
+                    "rationale": "Explicit operator authorization for test workspace",
+                    "status": "APPROVED",
+                }
+            ],
+        }
+        with controlled_write_transaction(self.workspace / "controls"):
+            (self.workspace / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps(disp_doc), encoding="utf-8"
+            )
+        write_agents_contract(self.workspace)
+
+        from stagecheck.core.utils import load_json_file
+        prod_repos = load_json_file(self.workspace / "controls" / "PRODUCT_REPOSITORIES.json")
+        baseline_sha = prod_repos["repositories"]["backend"]["baseline_head"]
+
+        # 5. Phase-2A status + recorded Agent 1 semantic reviews for all 34 AGENT_ASSISTED rules
+        p2a_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
+        p2a_dir.mkdir(parents=True, exist_ok=True)
+        (p2a_dir / "pre_commit_status.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "cycle": 1,
+                "status": "AWAITING_REVIEW",
+                "touched_repositories": ["backend"],
+                "base_commits": {"backend": baseline_sha},
+                "summary": "Ready for pre-commit rubric verification",
+            }),
+            encoding="utf-8",
+        )
+        agent_reviews = {
+            r.rule_id: {
+                "status": "PASS",
+                "rationale": f"Verified semantic criterion for {r.title}.",
+                "evidence_path": "Phase-2A/agent_reviews.json",
+            }
+            for r in catalog
+            if r.category == "AGENT_ASSISTED"
+        }
+        (p2a_dir / "agent_reviews.json").write_text(
+            canonical_json_dumps({"task_id": self.task_id, "attempt": self.attempt, "agent_assisted_reviews": agent_reviews}),
+            encoding="utf-8",
+        )
+
+        # 6. Phase-2B report & schema-valid claims
+        p2b_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2B"
+        p2b_dir.mkdir(parents=True, exist_ok=True)
+        report_path = p2b_dir / "report.md"
+        report_path.write_text("# Delivery Report\n\n## Summary\nVerified backend service and tests.\n", encoding="utf-8")
+        (p2b_dir / "claims.json").write_text(
+            canonical_json_dumps({
+                "task_id": self.task_id,
+                "iteration": 1,
+                "contract_sha256": sha256_file(self.workspace / "AGENTS.md"),
+                "record": "Phase-2B/report.md",
+                "record_sha256": sha256_file(report_path),
+                "claims": [],
+            }),
+            encoding="utf-8",
+        )
+
+        # 7. Phase-3 execution, scanner, verdict evidence
+        p3_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        (p3_dir / "test_execution.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "status": "PASS",
+                "repositories": {"backend": {"status": "PASS", "exit_code": 0}},
+            }),
+            encoding="utf-8",
+        )
+        (p3_dir / "scanner_report.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "status": "CLEAN", "findings": []}),
+            encoding="utf-8",
+        )
+        (p3_dir / "verdict.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "result": "CLEAR", "counts": {"blocking": 0}}),
+            encoding="utf-8",
+        )
+
     def test_cli_check_rubric_and_artifact_updates(self) -> None:
-        """Verify 'stagecheck check-rubric --update-json' outputs report and writes artifacts."""
+        """Verify 'stagecheck check-rubric --update-json' fails closed on incomplete state and passes on compliant state."""
         p2a_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
         p2a_dir.mkdir(parents=True, exist_ok=True)
         (p2a_dir / "pre_commit_review.json").write_text(
@@ -168,31 +331,60 @@ class TestRubricEngine(unittest.TestCase):
             encoding="utf-8",
         )
 
+        # 1. Incomplete workspace MUST fail closed (rc=1, REVISION_REQUIRED)
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = main([
+            rc_inc = main([
                 "check-rubric",
                 "--task", self.task_id,
                 "--update-json",
                 "--workspace", str(self.workspace),
             ])
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc_inc, 1)
 
         out = buf.getvalue()
         self.assertIn("STAGECHECK AUTOMATED AUDIT RUBRIC EVALUATOR", out)
         self.assertIn("Total Evaluated: 270 Rules", out)
 
-        # Verify rubric_evaluation.json created
         rubric_file = p2a_dir / "rubric_evaluation.json"
         self.assertTrue(rubric_file.is_file())
-        r_data = json.loads(rubric_file.read_text(encoding="utf-8"))
-        self.assertEqual(r_data["counts"]["total_rules"], 270)
-        validate_rubric_evaluation(r_data)
+        r_inc = json.loads(rubric_file.read_text(encoding="utf-8"))
+        self.assertEqual(r_inc["counts"]["total_rules"], 270)
+        self.assertEqual(r_inc["overall_verdict"], "FAIL")
+        validate_rubric_evaluation(r_inc)
 
-        # Verify pre_commit_review.json updated with rubric summary
-        rev_data = json.loads((p2a_dir / "pre_commit_review.json").read_text(encoding="utf-8"))
-        self.assertIn("rubric_summary", rev_data)
-        self.assertEqual(rev_data["rubric_summary"]["total_evaluated"], 270)
+        rev_inc = json.loads((p2a_dir / "pre_commit_review.json").read_text(encoding="utf-8"))
+        self.assertIn("rubric_summary", rev_inc)
+        self.assertEqual(rev_inc["rubric_summary"]["total_evaluated"], 270)
+        self.assertEqual(rev_inc["status"], "REVISION_REQUIRED")
+
+        # 2. Fully compliant workspace MUST pass all 270 rules (rc=0, overall_verdict=PASS)
+        self._seed_full_compliant_workspace()
+        buf_ok = io.StringIO()
+        with redirect_stdout(buf_ok):
+            rc_ok = main([
+                "check-rubric",
+                "--task", self.task_id,
+                "--update-json",
+                "--workspace", str(self.workspace),
+            ])
+        self.assertEqual(rc_ok, 0, f"Expected full pass on compliant workspace, stdout:\n{buf_ok.getvalue()}")
+
+        r_ok = json.loads(rubric_file.read_text(encoding="utf-8"))
+        self.assertEqual(r_ok["overall_verdict"], "PASS")
+        self.assertEqual(r_ok["counts"]["failed"], 0)
+        self.assertEqual(r_ok["counts"]["blocked"], 0)
+        self.assertEqual(r_ok["counts"]["not_evaluated"], 0)
+        self.assertEqual(r_ok["counts"]["passed"] + r_ok["counts"]["not_applicable"], 270)
+        validate_rubric_evaluation(r_ok)
+
+        rev_ok = json.loads((p2a_dir / "pre_commit_review.json").read_text(encoding="utf-8"))
+        self.assertEqual(rev_ok["rubric_summary"]["failed"], 0)
+        self.assertEqual(rev_ok["rubric_summary"]["blocked"], 0)
+        self.assertEqual(rev_ok["rubric_summary"]["not_evaluated"], 0)
+        self.assertEqual(
+            rev_ok["rubric_summary"]["passed"] + rev_ok["rubric_summary"]["not_applicable"], 270
+        )
 
     def test_rule_with_no_evaluator_cannot_pass_by_default(self) -> None:
         """Verify an unsupported or unmapped rule returns NOT_EVALUATED and cannot pass by default (Gap A)."""
@@ -415,6 +607,228 @@ class TestRubricEngine(unittest.TestCase):
         ]
         _, _, d_ne = aggregate_rubric_results(mix_noteval)
         self.assertEqual(d_ne["D3"]["status"], "NOT_EVALUATED")
+
+    def test_audit_matrix_completeness_and_no_bogus_exemptions(self) -> None:
+        """Verify 270-rule audit matrix completeness, schema fields, and absence of mismatched React/Flask exemptions (GAP-01)."""
+        from stagecheck.core.rubric_engine import get_rule_strategy, load_270_rule_audit_matrix
+
+        matrix = load_270_rule_audit_matrix()
+        catalog = load_270_rule_catalog()
+        self.assertEqual(len(matrix), 270)
+        self.assertEqual([e["rule_id"] for e in matrix], [r.rule_id for r in catalog])
+
+        required_fields = (
+            "rule_id",
+            "domain",
+            "category",
+            "original_criterion",
+            "evaluation_strategy",
+            "evaluator_implementation",
+            "required_inputs",
+            "required_evidence",
+            "evidence_validation_method",
+            "expected_result_statuses",
+            "corresponding_tests",
+            "verification_outcome",
+        )
+        cat_counts: dict[str, int] = {}
+        for entry in matrix:
+            for field in required_fields:
+                self.assertIn(field, entry)
+                val = entry[field]
+                if isinstance(val, str):
+                    self.assertTrue(val.strip(), f"Empty {field} for {entry['rule_id']}")
+                elif isinstance(val, (list, dict)):
+                    self.assertTrue(len(val) > 0, f"Empty {field} for {entry['rule_id']}")
+            self.assertEqual(entry["verification_outcome"], "VERIFIED")
+            cat_counts[entry["category"]] = cat_counts.get(entry["category"], 0) + 1
+            self.assertIsNotNone(get_rule_strategy(entry["rule_id"]))
+
+        self.assertEqual(cat_counts, {"AUTOMATED": 162, "EVIDENCE": 64, "AGENT_ASSISTED": 34, "HUMAN_WAIVER": 10})
+
+        # Ensure generic test/error/scope rules were stripped of bogus React/Flask/TSX predicates
+        for rid in ("TEST_ADEQUACY-018", "TEST_ADEQUACY-019", "FAILURE_CLASS-029", "BLAST_RADIUS-030"):
+            strat = get_rule_strategy(rid)
+            self.assertIsNotNone(strat)
+            self.assertIsNone(strat.get("exemption_predicate"), f"Rule {rid} must not carry bogus exemption predicate")
+
+    def test_human_waiver_rules_require_real_approved_dispositions(self) -> None:
+        """Verify all 10 HUMAN_WAIVER rules return BLOCKED without task-scoped APPROVED waiver and PASS with one."""
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.utils import canonical_json_dumps
+
+        # Without dispositions -> all 10 COMMON-001..010 are BLOCKED
+        payload_missing, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
+        waiver_evals = [e for e in payload_missing["evaluations"] if e["category"] == "HUMAN_WAIVER"]
+        self.assertEqual(len(waiver_evals), 10)
+        self.assertTrue(all(e["status"] == "BLOCKED" for e in waiver_evals))
+        self.assertEqual(payload_missing["overall_verdict"], "FAIL")
+
+        # Disposition for another task or non-APPROVED status must NOT satisfy
+        with controlled_write_transaction(self.workspace / "controls"):
+            (self.workspace / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps({
+                    "schema_version": "2.0",
+                    "dispositions": [
+                        {
+                            "disposition_id": "DISP-OTHER",
+                            "task_id": "other-task",
+                            "rule_id": "COMMON-001",
+                            "waived_rules": [f"COMMON-{i:03d}" for i in range(1, 11)],
+                            "authorized_by": "human-operator",
+                            "rationale": "Wrong task scope",
+                            "status": "APPROVED",
+                        },
+                        {
+                            "disposition_id": "DISP-PENDING",
+                            "task_id": self.task_id,
+                            "rule_id": "COMMON-001",
+                            "waived_rules": [f"COMMON-{i:03d}" for i in range(1, 11)],
+                            "authorized_by": "human-operator",
+                            "rationale": "Pending only",
+                            "status": "PENDING",
+                        },
+                    ],
+                }),
+                encoding="utf-8",
+            )
+        payload_wrong, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
+        waiver_wrong = [e for e in payload_wrong["evaluations"] if e["category"] == "HUMAN_WAIVER"]
+        self.assertTrue(all(e["status"] == "BLOCKED" for e in waiver_wrong))
+
+        # Approved disposition scoped to active task -> PASS
+        with controlled_write_transaction(self.workspace / "controls"):
+            (self.workspace / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps({
+                    "schema_version": "2.0",
+                    "dispositions": [
+                        {
+                            "disposition_id": "DISP-ACTIVE",
+                            "task_id": self.task_id,
+                            "rule_id": "COMMON-001",
+                            "waived_rules": [f"COMMON-{i:03d}" for i in range(1, 11)],
+                            "authorized_by": "human-operator",
+                            "rationale": "Operator approved",
+                            "status": "APPROVED",
+                        }
+                    ],
+                }),
+                encoding="utf-8",
+            )
+        payload_ok, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
+        waiver_ok = [e for e in payload_ok["evaluations"] if e["category"] == "HUMAN_WAIVER"]
+        self.assertTrue(all(e["status"] == "PASS" for e in waiver_ok))
+
+    def test_agent_assisted_rules_require_real_recorded_reviews(self) -> None:
+        """Verify AGENT_ASSISTED rules fail closed when missing, report FAIL on negative review, and block self-exemption."""
+        from stagecheck.core.rubric_engine import evaluate_rubric_rule
+        from stagecheck.core.utils import canonical_json_dumps
+
+        # Without recorded reviews -> all 34 AGENT_ASSISTED rules are NOT_EVALUATED
+        payload_missing, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
+        aa_missing = [e for e in payload_missing["evaluations"] if e["category"] == "AGENT_ASSISTED"]
+        self.assertEqual(len(aa_missing), 34)
+        self.assertTrue(all(e["status"] == "NOT_EVALUATED" for e in aa_missing))
+
+        # Record a FAIL review for one rule and PASS for another
+        p2a_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
+        p2a_dir.mkdir(parents=True, exist_ok=True)
+        aa_rule_ids = [r.rule_id for r in load_270_rule_catalog() if r.category == "AGENT_ASSISTED"]
+        reviews = {
+            aa_rule_ids[0]: {"status": "FAIL", "rationale": "Semantic flaw detected in module."},
+            aa_rule_ids[1]: {"status": "PASS", "rationale": "Reviewed and verified clean."},
+        }
+        (p2a_dir / "agent_reviews.json").write_text(
+            canonical_json_dumps({"agent_assisted_reviews": reviews}), encoding="utf-8"
+        )
+        payload_mixed, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
+        by_id = {e["rule_id"]: e for e in payload_mixed["evaluations"]}
+        self.assertEqual(by_id[aa_rule_ids[0]]["status"], "FAIL")
+        self.assertEqual(by_id[aa_rule_ids[1]]["status"], "PASS")
+        self.assertEqual(by_id[aa_rule_ids[2]]["status"], "NOT_EVALUATED")
+
+        # Self NOT_APPLICABLE inside AGENT_ASSISTED review must raise InvalidRubricExemptionError
+        aa_rule = next(r for r in load_270_rule_catalog() if r.rule_id == aa_rule_ids[0])
+        with self.assertRaises(InvalidRubricExemptionError):
+            evaluate_rubric_rule(
+                aa_rule,
+                self.workspace,
+                self.repo_dir,
+                context={"agent_reviews": {aa_rule_ids[0]: {"status": "NOT_APPLICABLE", "rationale": "skip"}}},
+            )
+
+    def test_real_ast_hygiene_and_evidence_failures_detected(self) -> None:
+        """Verify AST checks and phase evidence checks catch real defects rather than auto-passing."""
+        self._seed_full_compliant_workspace()
+
+        # 1. Inject weak assertion, sleep, and skip into test_service.py -> TEST_ADEQUACY-006/010/021 FAIL
+        (self.repo_dir / "test_service.py").write_text(
+            "import time\nimport unittest\n\n"
+            "class TestWeak(unittest.TestCase):\n"
+            "    @unittest.skip('flaky')\n"
+            "    def test_bad(self):\n"
+            "        time.sleep(0.01)\n"
+            "        assert True\n",
+            encoding="utf-8",
+        )
+        # 2. Unpinned requirement -> UPSTREAM_REUSE-001 FAIL
+        (self.repo_dir / "requirements.txt").write_text("requests>=2.0.0\n", encoding="utf-8")
+        # 3. Remove Phase-2B/claims.json -> CLAIM_SUPPORT-001 FAIL
+        (self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2B" / "claims.json").unlink()
+        # 4. Remove Phase-3/test_execution.json -> TEST_ADEQUACY-026 FAIL
+        (self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-3" / "test_execution.json").unlink()
+
+        payload, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
+        by_id = {e["rule_id"]: e for e in payload["evaluations"]}
+
+        self.assertEqual(payload["overall_verdict"], "FAIL")
+        self.assertEqual(by_id["TEST_ADEQUACY-006"]["status"], "FAIL")
+        self.assertEqual(by_id["TEST_ADEQUACY-010"]["status"], "FAIL")
+        self.assertEqual(by_id["TEST_ADEQUACY-017"]["status"], "FAIL")
+        self.assertEqual(by_id["TEST_ADEQUACY-018"]["status"], "FAIL")
+        self.assertEqual(by_id["TEST_ADEQUACY-019"]["status"], "FAIL")
+        self.assertEqual(by_id["TEST_ADEQUACY-021"]["status"], "FAIL")
+        self.assertEqual(by_id["UPSTREAM_REUSE-001"]["status"], "FAIL")
+        self.assertEqual(by_id["CLAIM_SUPPORT-001"]["status"], "FAIL")
+        self.assertEqual(by_id["TEST_ADEQUACY-026"]["status"], "FAIL")
+
+    def test_review_precommit_blocks_when_rubric_has_blocked_or_unevaluated_rules(self) -> None:
+        """Verify review-precommit fails closed (REVISION_REQUIRED) if BLOCKED or NOT_EVALUATED rules exist even with failed=0."""
+        from unittest.mock import patch
+        from stagecheck.core.gate_engine import GateId, advance_gate_atomic
+        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+        from stagecheck.core.utils import canonical_json_dumps
+
+        self._seed_full_compliant_workspace()
+        state = load_active_state(self.workspace)
+        state["phase"] = "PHASE_1_PLANNING"
+        state["cleared_gates"] = {}
+        save_active_state(self.workspace, state)
+        # Re-freeze Phase-1 after setup and advance Gate-1 legitimately
+        freeze_prompt_and_scope(self.workspace, self.task_id, self.attempt)
+        advance_gate_atomic(self.workspace, GateId.GATE_1, self.task_id, self.attempt)
+
+        fake_incomplete_payload = {
+            "schema_version": "2.0.0",
+            "task_id": self.task_id,
+            "attempt": self.attempt,
+            "cycle": 1,
+            "overall_verdict": "FAIL",
+            "evaluation_duration_ms": 1.0,
+            "counts": {"total_rules": 270, "passed": 268, "failed": 0, "not_applicable": 0, "not_evaluated": 1, "blocked": 1},
+            "domains": {},
+            "evaluations": [
+                {"rule_id": "COMMON-001", "domain": "COMMON", "category": "HUMAN_WAIVER", "status": "BLOCKED", "witness": "controls/DISPOSITIONS.json", "message": "Missing waiver"},
+                {"rule_id": "BLAST_RADIUS-005", "domain": "BLAST_RADIUS", "category": "AGENT_ASSISTED", "status": "NOT_EVALUATED", "witness": "Phase-2A/agent_reviews.json", "message": "Missing review"},
+            ],
+        }
+        p2a_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
+        with patch("stagecheck.core.rubric_engine.run_rubric_evaluation", return_value=(fake_incomplete_payload, 1.0)):
+            rc = main(["review-precommit", "--task", self.task_id, "--attempt", str(self.attempt), "--workspace", str(self.workspace)])
+        self.assertEqual(rc, 1)
+        rev = json.loads((p2a_dir / "pre_commit_review.json").read_text(encoding="utf-8"))
+        self.assertEqual(rev["status"], "REVISION_REQUIRED")
+        self.assertEqual(len(rev["new_issues_found"]), 2)
 
 
 if __name__ == "__main__":

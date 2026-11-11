@@ -137,13 +137,63 @@ class TestProductionSmoke(unittest.TestCase):
         self.assertEqual(premature_exit, 1, "review-precommit should fail before Gate 1 is advanced")
 
         # Prepare Phase 1 artifacts and verify prompt to satisfy Gate 1
+        from stagecheck.core.agents_md import write_agents_contract
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.rubric_engine import load_270_rule_catalog
+        from stagecheck.core.utils import canonical_json_dumps, sha256_file
+
+        repo_dir = self.workspace_dir / "repos" / "core-service"
+        (repo_dir / "test_service.py").write_text(
+            "import unittest\n\n\n"
+            "def compute_val(n):\n"
+            "    if not isinstance(n, int):\n"
+            "        raise TypeError('int expected')\n"
+            "    if n < 0:\n"
+            "        raise ValueError('negative disallowed')\n"
+            "    return n + 1\n\n\n"
+            "class TestService(unittest.TestCase):\n"
+            "    def test_positive(self):\n"
+            "        self.assertEqual(compute_val(1), 2)\n\n"
+            "    def test_negative_boundary(self):\n"
+            "        with self.assertRaises(ValueError):\n"
+            "            compute_val(-1)\n\n"
+            "    def test_malformed_input(self):\n"
+            "        with self.assertRaises(TypeError):\n"
+            "            compute_val(None)\n\n"
+            "    def test_duplicate_replay_idempotent(self):\n"
+            "        self.assertEqual(compute_val(3), compute_val(3))\n",
+            encoding="utf-8",
+        )
+        (self.workspace_dir / "evals").mkdir(parents=True, exist_ok=True)
+        catalog = load_270_rule_catalog()
+        waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        disp_doc = {
+            "schema_version": "2.0",
+            "dispositions": [
+                {
+                    "disposition_id": "DISP-SMOKE-101",
+                    "task_id": "task-101",
+                    "rule_id": waiver_ids[0],
+                    "waived_rules": waiver_ids,
+                    "authorized_by": "human-operator",
+                    "rationale": "Authorized for production smoke test",
+                    "status": "APPROVED",
+                }
+            ],
+        }
+        with controlled_write_transaction(self.workspace_dir / "controls"):
+            (self.workspace_dir / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps(disp_doc), encoding="utf-8"
+            )
+        write_agents_contract(self.workspace_dir)
+
         p1_dir = self.workspace_dir / "evidence/tasks/task-101/attempt_1/Phase-1"
         p1_dir.mkdir(parents=True, exist_ok=True)
         (p1_dir / "prompt.md").write_text("# Prompt for task-101\nImplement service components\n", encoding="utf-8")
         scope_payload = {
             "schema_version": "2.0",
             "task_id": "task-101",
-            "allowed_paths": ["repos/core-service/service.py"],
+            "allowed_paths": ["repos/core-service/service.py", "repos/core-service/test_service.py"],
         }
         (p1_dir / "declared_scope.json").write_text(
             __import__("json").dumps(scope_payload, indent=2) + "\n", encoding="utf-8"
@@ -154,6 +204,55 @@ class TestProductionSmoke(unittest.TestCase):
         # Advance Gate 1
         gate1_adv = main(["gate", "advance", "Gate-1", "--task", "task-101", "--workspace", ws])
         self.assertEqual(gate1_adv, 0, "Gate-1 advance failed")
+
+        agent_reviews = {
+            r.rule_id: {
+                "status": "PASS",
+                "rationale": f"Verified semantic criterion for {r.title}.",
+                "evidence_path": "Phase-2A/agent_reviews.json",
+            }
+            for r in catalog
+            if r.category == "AGENT_ASSISTED"
+        }
+        (phase2a_dir / "agent_reviews.json").write_text(
+            canonical_json_dumps({"task_id": "task-101", "attempt": 1, "agent_assisted_reviews": agent_reviews}),
+            encoding="utf-8",
+        )
+        p2b_dir = self.workspace_dir / "evidence/tasks/task-101/attempt_1/Phase-2B"
+        p2b_dir.mkdir(parents=True, exist_ok=True)
+        report_file = p2b_dir / "report.md"
+        report_file.write_text("# Delivery Report\nCore service verified.\n", encoding="utf-8")
+        (p2b_dir / "claims.json").write_text(
+            canonical_json_dumps({
+                "task_id": "task-101",
+                "iteration": 1,
+                "contract_sha256": sha256_file(self.workspace_dir / "AGENTS.md"),
+                "record": "Phase-2B/report.md",
+                "record_sha256": sha256_file(report_file),
+                "claims": [],
+            }),
+            encoding="utf-8",
+        )
+        p3_dir = self.workspace_dir / "evidence/tasks/task-101/attempt_1/Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        (p3_dir / "test_execution.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": "task-101",
+                "attempt": 1,
+                "status": "PASS",
+                "repositories": {"core-service": {"status": "PASS", "exit_code": 0}},
+            }),
+            encoding="utf-8",
+        )
+        (p3_dir / "scanner_report.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "status": "CLEAN", "findings": []}),
+            encoding="utf-8",
+        )
+        (p3_dir / "verdict.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "result": "CLEAR", "counts": {"blocking": 0}}),
+            encoding="utf-8",
+        )
 
         review_exit = main(["review-precommit", "--task", "task-101", "--workspace", ws])
         self.assertEqual(review_exit, 0, "review-precommit failed")

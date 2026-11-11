@@ -43,6 +43,27 @@ class TestMultiRepoAggregateScenarios(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo_a), "config", "user.name", "Tester"], check=True)
         subprocess.run(["git", "-C", str(self.repo_a), "config", "user.email", "tester@example.com"], check=True)
         (self.repo_a / "app.py").write_text("# service a\n", encoding="utf-8")
+        (self.repo_a / "test_app.py").write_text(
+            "import unittest\n\n\n"
+            "def validate_a(x):\n"
+            "    if not isinstance(x, int):\n"
+            "        raise TypeError('int expected')\n"
+            "    if x < 0:\n"
+            "        raise ValueError('negative disallowed')\n"
+            "    return x\n\n\n"
+            "class TestServiceA(unittest.TestCase):\n"
+            "    def test_positive(self):\n"
+            "        self.assertEqual(validate_a(1), 1)\n\n"
+            "    def test_negative_boundary(self):\n"
+            "        with self.assertRaises(ValueError):\n"
+            "            validate_a(-1)\n\n"
+            "    def test_malformed_input(self):\n"
+            "        with self.assertRaises(TypeError):\n"
+            "            validate_a(None)\n\n"
+            "    def test_duplicate_replay_idempotent(self):\n"
+            "        self.assertEqual(validate_a(2), validate_a(2))\n",
+            encoding="utf-8",
+        )
         subprocess.run(["git", "-C", str(self.repo_a), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.repo_a), "commit", "-m", "init a"], check=True)
         subprocess.run(["git", "-C", str(self.repo_a), "switch", "-c", f"task/{self.task_id}"], check=True, capture_output=True)
@@ -62,6 +83,37 @@ class TestMultiRepoAggregateScenarios(unittest.TestCase):
         base_a = discover_repository(self.repo_a, name="service-a", workspace_root=self.workspace_root)
         base_b = discover_repository(self.repo_b, name="service-b", workspace_root=self.workspace_root)
         scaffold_controls_atomic(self.workspace_root, {"service-a": base_a, "service-b": base_b})
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.rubric_engine import load_270_rule_catalog
+        from stagecheck.core.start_manifest import generate_start_manifest
+        from stagecheck.core.state import load_active_state, save_active_state
+
+        (self.workspace_root / "specs").mkdir(parents=True, exist_ok=True)
+        generate_start_manifest(self.workspace_root)
+
+        catalog = load_270_rule_catalog()
+        waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        disp_doc = {
+            "schema_version": "2.0",
+            "dispositions": [
+                {
+                    "disposition_id": "DISP-MR-01",
+                    "task_id": self.task_id,
+                    "rule_id": waiver_ids[0],
+                    "waived_rules": waiver_ids,
+                    "authorized_by": "human-operator",
+                    "rationale": "Authorized for multi-repo scenario tests",
+                    "status": "APPROVED",
+                }
+            ],
+        }
+        with controlled_write_transaction(self.workspace_root / "controls"):
+            (self.workspace_root / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps(disp_doc), encoding="utf-8"
+            )
+        state = load_active_state(self.workspace_root)
+        state["cleared_gates"] = {"GATE_1": "0" * 64}
+        save_active_state(self.workspace_root, state)
         write_agents_contract(self.workspace_root)
         (self.workspace_root / "evals").mkdir(parents=True, exist_ok=True)
 
@@ -110,11 +162,51 @@ class TestMultiRepoAggregateScenarios(unittest.TestCase):
             "code_quality_observations": [],
         }
         (p2a_dir / "pre_commit_review.json").write_text(canonical_json_dumps(review_data), encoding="utf-8")
+        (p2a_dir / "pre_commit_status.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "cycle": 1,
+                "status": "AWAITING_REVIEW",
+                "touched_repositories": ["service-a", "service-b"],
+                "base_commits": {"service-a": base_a, "service-b": base_b},
+            }),
+            encoding="utf-8",
+        )
+        from stagecheck.core.rubric_engine import load_270_rule_catalog
+        from stagecheck.core.utils import sha256_file
+
+        agent_reviews = {
+            r.rule_id: {
+                "status": "PASS",
+                "rationale": f"Verified semantic criterion for {r.title}.",
+                "evidence_path": "Phase-2A/agent_reviews.json",
+            }
+            for r in load_270_rule_catalog()
+            if r.category == "AGENT_ASSISTED"
+        }
+        (p2a_dir / "agent_reviews.json").write_text(
+            canonical_json_dumps({"task_id": self.task_id, "attempt": self.attempt, "agent_assisted_reviews": agent_reviews}),
+            encoding="utf-8",
+        )
 
         # Phase 2B delivery report
         p2b_dir = self.workspace_root / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2B"
         p2b_dir.mkdir(parents=True, exist_ok=True)
-        (p2b_dir / "report.md").write_text("# Delivery Report\n\n## Summary\nAll repos clean.\n\n## Changes\nNone.\n\n## Verification\nVerified.\n", encoding="utf-8")
+        report_file = p2b_dir / "report.md"
+        report_file.write_text("# Delivery Report\n\n## Summary\nAll repos clean.\n\n## Changes\nNone.\n\n## Verification\nVerified.\n", encoding="utf-8")
+        (p2b_dir / "claims.json").write_text(
+            canonical_json_dumps({
+                "task_id": self.task_id,
+                "iteration": 1,
+                "contract_sha256": sha256_file(self.workspace_root / "AGENTS.md"),
+                "record": "Phase-2B/report.md",
+                "record_sha256": sha256_file(report_file),
+                "claims": [],
+            }),
+            encoding="utf-8",
+        )
         report_data = {
             "schema_version": "2.0",
             "task_id": self.task_id,

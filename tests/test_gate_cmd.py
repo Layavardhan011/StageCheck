@@ -185,7 +185,20 @@ class TestGateCLIAndPrerequisites(unittest.TestCase):
 
     def test_tampered_receipt_blocks_execution_fail_closed(self) -> None:
         """Verify altered receipt on disk halts downstream operations fail-closed."""
-        self._setup_gate1_artifacts()
+        from stagecheck.core.agents_md import write_agents_contract
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.rubric_engine import load_270_rule_catalog
+        from stagecheck.core.utils import canonical_json_dumps
+
+        p1_dir = self._setup_gate1_artifacts()
+        (p1_dir / "declared_scope.json").write_text(
+            json.dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "allowed_paths": ["repos/core-service/service.py", "repos/core-service/test_service.py"],
+            }, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
         # Advance Gate 1
         rc = main([
@@ -196,9 +209,105 @@ class TestGateCLIAndPrerequisites(unittest.TestCase):
         ])
         self.assertEqual(rc, 0)
 
+        # Populate compliant tests, waivers, reviews, and supporting evidence for strict 270-rule check-rubric
+        (self.repo_dir / "test_service.py").write_text(
+            "import unittest\n\n\n"
+            "def validate_val(x):\n"
+            "    if not isinstance(x, int):\n"
+            "        raise TypeError('int expected')\n"
+            "    if x < 0:\n"
+            "        raise ValueError('negative disallowed')\n"
+            "    return x\n\n\n"
+            "class TestService(unittest.TestCase):\n"
+            "    def test_positive(self):\n"
+            "        self.assertEqual(validate_val(1), 1)\n\n"
+            "    def test_negative_boundary(self):\n"
+            "        with self.assertRaises(ValueError):\n"
+            "            validate_val(-1)\n\n"
+            "    def test_malformed_input(self):\n"
+            "        with self.assertRaises(TypeError):\n"
+            "            validate_val(None)\n\n"
+            "    def test_duplicate_replay_idempotent(self):\n"
+            "        self.assertEqual(validate_val(2), validate_val(2))\n",
+            encoding="utf-8",
+        )
+        (self.workspace / "evals").mkdir(parents=True, exist_ok=True)
+        catalog = load_270_rule_catalog()
+        waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        disp_doc = {
+            "schema_version": "2.0",
+            "dispositions": [
+                {
+                    "disposition_id": "DISP-GATE-01",
+                    "task_id": self.task_id,
+                    "rule_id": waiver_ids[0],
+                    "waived_rules": waiver_ids,
+                    "authorized_by": "human-operator",
+                    "rationale": "Authorized for gate fail-closed test",
+                    "status": "APPROVED",
+                }
+            ],
+        }
+        with controlled_write_transaction(self.workspace / "controls"):
+            (self.workspace / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps(disp_doc), encoding="utf-8"
+            )
+        write_agents_contract(self.workspace)
+        (self.workspace / "evidence" / "issue_history.json").write_text(
+            canonical_json_dumps({"schema_version": "1.0", "issues": []}), encoding="utf-8"
+        )
+
         # Pre-commit review status
         p2a_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
         p2a_dir.mkdir(parents=True, exist_ok=True)
+        agent_reviews = {
+            r.rule_id: {
+                "status": "PASS",
+                "rationale": f"Verified semantic criterion for {r.title}.",
+                "evidence_path": "Phase-2A/agent_reviews.json",
+            }
+            for r in catalog
+            if r.category == "AGENT_ASSISTED"
+        }
+        (p2a_dir / "agent_reviews.json").write_text(
+            canonical_json_dumps({"task_id": self.task_id, "attempt": self.attempt, "agent_assisted_reviews": agent_reviews}),
+            encoding="utf-8",
+        )
+        p2b_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2B"
+        p2b_dir.mkdir(parents=True, exist_ok=True)
+        report_file = p2b_dir / "report.md"
+        report_file.write_text("# Delivery Report\nImplemented core service.\n", encoding="utf-8")
+        (p2b_dir / "claims.json").write_text(
+            canonical_json_dumps({
+                "task_id": self.task_id,
+                "iteration": 1,
+                "contract_sha256": sha256_file(self.workspace / "AGENTS.md"),
+                "record": "Phase-2B/report.md",
+                "record_sha256": sha256_file(report_file),
+                "claims": [],
+            }),
+            encoding="utf-8",
+        )
+        p3_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        (p3_dir / "test_execution.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "status": "PASS",
+                "repositories": {"core-service": {"status": "PASS", "exit_code": 0}},
+            }),
+            encoding="utf-8",
+        )
+        (p3_dir / "scanner_report.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "status": "CLEAN", "findings": []}),
+            encoding="utf-8",
+        )
+        (p3_dir / "verdict.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "result": "CLEAR", "counts": {"blocking": 0}}),
+            encoding="utf-8",
+        )
         (p2a_dir / "pre_commit_status.json").write_text(
             json.dumps({
                 "schema_version": "1.0.0",

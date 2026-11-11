@@ -209,15 +209,122 @@ class TestCooperativeReview(unittest.TestCase):
         scaffold_controls_atomic(self.workspace, baselines)
         generate_start_manifest(self.workspace)
 
+        from stagecheck.core.agents_md import write_agents_contract
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.rubric_engine import load_270_rule_catalog
+        from stagecheck.core.utils import canonical_json_dumps, sha256_file
+
         p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
         p1_dir.mkdir(parents=True, exist_ok=True)
         (p1_dir / "prompt.md").write_text("# Prompt\n", encoding="utf-8")
         (p1_dir / "declared_scope.json").write_text(
-            json.dumps({"schema_version": "2.0", "task_id": self.task_id, "allowed_paths": ["repos/backend/order.py"]}),
+            json.dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "allowed_paths": ["repos/backend/order.py", "repos/backend/test_order.py"],
+            }),
             encoding="utf-8",
         )
         (p1_dir / "prompt_verified.json").write_text(
             json.dumps({"task_id": self.task_id, "status": "VERIFIED"}),
+            encoding="utf-8",
+        )
+
+        # Compliant tests, evals, waivers, reviews, and phase evidence for strict 270-rule check-rubric
+        (self.backend_dir / "test_order.py").write_text(
+            "import unittest\n\n\n"
+            "def validate_qty(q):\n"
+            "    if not isinstance(q, int):\n"
+            "        raise TypeError('int expected')\n"
+            "    if q <= 0:\n"
+            "        raise ValueError('must be positive')\n"
+            "    return q\n\n\n"
+            "class TestOrder(unittest.TestCase):\n"
+            "    def test_positive(self):\n"
+            "        self.assertEqual(validate_qty(3), 3)\n\n"
+            "    def test_negative_boundary(self):\n"
+            "        with self.assertRaises(ValueError):\n"
+            "            validate_qty(0)\n\n"
+            "    def test_malformed_input(self):\n"
+            "        with self.assertRaises(TypeError):\n"
+            "            validate_qty(None)\n\n"
+            "    def test_duplicate_replay_idempotent(self):\n"
+            "        self.assertEqual(validate_qty(2), validate_qty(2))\n",
+            encoding="utf-8",
+        )
+        (self.workspace / "evals").mkdir(parents=True, exist_ok=True)
+        catalog = load_270_rule_catalog()
+        waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        disp_doc = {
+            "schema_version": "2.0",
+            "dispositions": [
+                {
+                    "disposition_id": "DISP-COOP-01",
+                    "task_id": self.task_id,
+                    "rule_id": waiver_ids[0],
+                    "waived_rules": waiver_ids,
+                    "authorized_by": "human-operator",
+                    "rationale": "Authorized for cooperative pre-commit CLI test",
+                    "status": "APPROVED",
+                }
+            ],
+        }
+        with controlled_write_transaction(self.workspace / "controls"):
+            (self.workspace / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps(disp_doc), encoding="utf-8"
+            )
+        write_agents_contract(self.workspace)
+        if not (self.workspace / "evidence" / "issue_history.json").is_file():
+            (self.workspace / "evidence" / "issue_history.json").write_text(
+                canonical_json_dumps({"schema_version": "1.0", "issues": []}), encoding="utf-8"
+            )
+        p2a_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
+        agent_reviews = {
+            r.rule_id: {
+                "status": "PASS",
+                "rationale": f"Verified semantic criterion for {r.title}.",
+                "evidence_path": "Phase-2A/agent_reviews.json",
+            }
+            for r in catalog
+            if r.category == "AGENT_ASSISTED"
+        }
+        (p2a_dir / "agent_reviews.json").write_text(
+            canonical_json_dumps({"task_id": self.task_id, "attempt": self.attempt, "agent_assisted_reviews": agent_reviews}),
+            encoding="utf-8",
+        )
+        p2b_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2B"
+        p2b_dir.mkdir(parents=True, exist_ok=True)
+        report_file = p2b_dir / "report.md"
+        report_file.write_text("# Delivery Report\nImplemented order service.\n", encoding="utf-8")
+        (p2b_dir / "claims.json").write_text(
+            canonical_json_dumps({
+                "task_id": self.task_id,
+                "iteration": 1,
+                "contract_sha256": sha256_file(self.workspace / "AGENTS.md"),
+                "record": "Phase-2B/report.md",
+                "record_sha256": sha256_file(report_file),
+                "claims": [],
+            }),
+            encoding="utf-8",
+        )
+        p3_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        (p3_dir / "test_execution.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "status": "PASS",
+                "repositories": {"backend": {"status": "PASS", "exit_code": 0}},
+            }),
+            encoding="utf-8",
+        )
+        (p3_dir / "scanner_report.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "status": "CLEAN", "findings": []}),
+            encoding="utf-8",
+        )
+        (p3_dir / "verdict.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "result": "CLEAR", "counts": {"blocking": 0}}),
             encoding="utf-8",
         )
 

@@ -89,19 +89,45 @@ class TestCustomProviderE2E(unittest.TestCase):
     def test_custom_provider_full_lifecycle_governance(self):
         """Test full task lifecycle with custom agents: prompt, review, delivery, and audit."""
         from stagecheck.core.agents_md import write_agents_contract
-        write_agents_contract(self.workspace_root)
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.rubric_engine import load_270_rule_catalog
+        from stagecheck.core.start_manifest import generate_start_manifest
+        from stagecheck.core.utils import sha256_file
 
-        # Setup custom agents in ACTIVE_STATE.json
+        (self.workspace_root / "evals").mkdir(parents=True, exist_ok=True)
+        (self.workspace_root / "specs").mkdir(parents=True, exist_ok=True)
+        generate_start_manifest(self.workspace_root)
+        catalog = load_270_rule_catalog()
+        waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        disp_doc = {
+            "schema_version": "2.0",
+            "dispositions": [
+                {
+                    "disposition_id": "DISP-CUSTOM-01",
+                    "task_id": self.task_id,
+                    "rule_id": waiver_ids[0],
+                    "waived_rules": waiver_ids,
+                    "authorized_by": "human-operator",
+                    "rationale": "Authorized for custom provider E2E governance test",
+                    "status": "APPROVED",
+                }
+            ],
+        }
         active_state_path = self.workspace_root / "controls" / "ACTIVE_STATE.json"
-        state_data = json.loads(active_state_path.read_text(encoding="utf-8"))
-        state_data["task_id"] = self.task_id
-        state_data["attempt"] = self.attempt
-        state_data["registered_agents"] = [
-            {"name": "gemini-coder", "role": "code_implementation"},
-            {"name": "custom-auditor", "role": "prompt_and_audit"},
-        ]
-        state_data["agent_turns"] = {"gemini-coder": 2, "custom-auditor": 1}
-        active_state_path.write_text(canonical_json_dumps(state_data), encoding="utf-8")
+        with controlled_write_transaction(self.workspace_root / "controls"):
+            (self.workspace_root / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps(disp_doc), encoding="utf-8"
+            )
+            state_data = json.loads(active_state_path.read_text(encoding="utf-8"))
+            state_data["task_id"] = self.task_id
+            state_data["attempt_index"] = self.attempt
+            state_data["cleared_gates"] = {"GATE_1": "0" * 64}
+            state_data["registered_agents"] = [
+                {"name": "gemini-coder", "role": "code_implementation"},
+                {"name": "custom-auditor", "role": "prompt_and_audit"},
+            ]
+            active_state_path.write_text(canonical_json_dumps(state_data), encoding="utf-8")
+        write_agents_contract(self.workspace_root)
 
         # Phase 1: Prompt & Scope freeze
         p1_dir = self.workspace_root / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
@@ -117,8 +143,29 @@ class TestCustomProviderE2E(unittest.TestCase):
         (p1_dir / "declared_scope.json").write_text(canonical_json_dumps(scope), encoding="utf-8")
         freeze_prompt_and_scope(self.workspace_root, self.task_id, self.attempt)
 
-        # Agent implementation commit
+        # Agent implementation commit (with real positive/negative/malformed/duplicate tests)
         (self.repo_dir / "app.py").write_text("# Core app\nprint('hello from gemini')\n", encoding="utf-8")
+        (self.repo_dir / "test_app.py").write_text(
+            "import unittest\n\n\n"
+            "def check_val(x):\n"
+            "    if not isinstance(x, int):\n"
+            "        raise TypeError('int expected')\n"
+            "    if x < 0:\n"
+            "        raise ValueError('negative disallowed')\n"
+            "    return x\n\n\n"
+            "class TestApp(unittest.TestCase):\n"
+            "    def test_positive(self):\n"
+            "        self.assertEqual(check_val(1), 1)\n\n"
+            "    def test_negative_boundary(self):\n"
+            "        with self.assertRaises(ValueError):\n"
+            "            check_val(-1)\n\n"
+            "    def test_malformed_input(self):\n"
+            "        with self.assertRaises(TypeError):\n"
+            "            check_val(None)\n\n"
+            "    def test_duplicate_replay_idempotent(self):\n"
+            "        self.assertEqual(check_val(2), check_val(2))\n",
+            encoding="utf-8",
+        )
         subprocess.run(["git", "-C", str(self.repo_dir), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.repo_dir), "commit", "-m", "gemini feature commit"], check=True)
 
@@ -156,6 +203,31 @@ class TestCustomProviderE2E(unittest.TestCase):
             "code_quality_observations": [],
         }
         (p2a_dir / "pre_commit_review.json").write_text(canonical_json_dumps(review_data), encoding="utf-8")
+        (p2a_dir / "pre_commit_status.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "cycle": 1,
+                "status": "AWAITING_REVIEW",
+                "touched_repositories": ["core-app"],
+                "base_commits": {"core-app": base_sha},
+            }),
+            encoding="utf-8",
+        )
+        agent_reviews = {
+            r.rule_id: {
+                "status": "PASS",
+                "rationale": f"Verified semantic criterion for {r.title}.",
+                "evidence_path": "Phase-2A/agent_reviews.json",
+            }
+            for r in catalog
+            if r.category == "AGENT_ASSISTED"
+        }
+        (p2a_dir / "agent_reviews.json").write_text(
+            canonical_json_dumps({"task_id": self.task_id, "attempt": self.attempt, "agent_assisted_reviews": agent_reviews}),
+            encoding="utf-8",
+        )
 
         # Phase 2B: Delivery report
         p2b_dir = self.workspace_root / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2B"
@@ -168,6 +240,17 @@ class TestCustomProviderE2E(unittest.TestCase):
             "## Verification\nRan verification suite.\n"
         )
         report_file.write_text(report_content, encoding="utf-8")
+        (p2b_dir / "claims.json").write_text(
+            canonical_json_dumps({
+                "task_id": self.task_id,
+                "iteration": 1,
+                "contract_sha256": sha256_file(self.workspace_root / "AGENTS.md"),
+                "record": "Phase-2B/report.md",
+                "record_sha256": sha256_file(report_file),
+                "claims": [],
+            }),
+            encoding="utf-8",
+        )
         report_data = {
             "schema_version": "2.0",
             "task_id": self.task_id,

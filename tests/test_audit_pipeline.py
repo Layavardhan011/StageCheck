@@ -60,6 +60,32 @@ class TestAuditPipeline(unittest.TestCase):
         # Set up repositories under repos/
         self.repo_api = self.ws / "repos" / "api-service"
         self.commit_api = _setup_git_repo(self.repo_api, "api.py")
+        (self.repo_api / "test_api.py").write_text(
+            "import unittest\n\n\n"
+            "def validate_payload(v):\n"
+            "    if not isinstance(v, int):\n"
+            "        raise TypeError('int expected')\n"
+            "    if v < 0:\n"
+            "        raise ValueError('negative disallowed')\n"
+            "    return v * 2\n\n\n"
+            "class TestApi(unittest.TestCase):\n"
+            "    def test_positive(self):\n"
+            "        self.assertEqual(validate_payload(3), 6)\n\n"
+            "    def test_negative_boundary(self):\n"
+            "        with self.assertRaises(ValueError):\n"
+            "            validate_payload(-1)\n\n"
+            "    def test_malformed_input(self):\n"
+            "        with self.assertRaises(TypeError):\n"
+            "            validate_payload(None)\n\n"
+            "    def test_duplicate_replay_idempotent(self):\n"
+            "        self.assertEqual(validate_payload(5), validate_payload(5))\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "-C", str(self.repo_api), "add", "test_api.py"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(self.repo_api), "commit", "-m", "Add API tests"], check=True, capture_output=True)
+        self.commit_api = subprocess.run(
+            ["git", "-C", str(self.repo_api), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+        ).stdout.strip()
 
         self.repo_db = self.ws / "repos" / "db-service"
         self.commit_db = _setup_git_repo(self.repo_db, "db.py")
@@ -72,6 +98,32 @@ class TestAuditPipeline(unittest.TestCase):
             repos="api-service,db-service",
         )
         self.assertEqual(rc, 0)
+
+        from stagecheck.core.agents_md import write_agents_contract
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.rubric_engine import load_270_rule_catalog
+
+        catalog = load_270_rule_catalog()
+        waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        disp_doc = {
+            "schema_version": "2.0",
+            "dispositions": [
+                {
+                    "disposition_id": "DISP-AUDIT-01",
+                    "task_id": self.task_id,
+                    "rule_id": waiver_ids[0],
+                    "waived_rules": waiver_ids,
+                    "authorized_by": "human-operator",
+                    "rationale": "Authorized for audit pipeline verification",
+                    "status": "APPROVED",
+                }
+            ],
+        }
+        with controlled_write_transaction(self.ws / "controls"):
+            (self.ws / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps(disp_doc), encoding="utf-8"
+            )
+        write_agents_contract(self.ws)
 
         # Qualification directory
         (self.ws / "evals").mkdir(parents=True, exist_ok=True)
@@ -145,12 +197,37 @@ class TestAuditPipeline(unittest.TestCase):
             "code_quality_observations": [],
         }
         (p2a_dir / "pre_commit_review.json").write_text(json.dumps(review_data), encoding="utf-8")
+        agent_reviews = {
+            r.rule_id: {
+                "status": "PASS",
+                "rationale": f"Verified semantic criterion for {r.title}.",
+                "evidence_path": "Phase-2A/agent_reviews.json",
+            }
+            for r in load_270_rule_catalog()
+            if r.category == "AGENT_ASSISTED"
+        }
+        (p2a_dir / "agent_reviews.json").write_text(
+            canonical_json_dumps({"task_id": self.task_id, "attempt": self.attempt, "agent_assisted_reviews": agent_reviews}),
+            encoding="utf-8",
+        )
         advance_gate_atomic(self.ws, GateId.GATE_2A, self.task_id, self.attempt)
 
         # Setup Phase 2B delivery report & advance Gate 2B
         p2b_dir = self.ws / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2B"
         p2b_dir.mkdir(parents=True, exist_ok=True)
-        (p2b_dir / "report.md").write_text("# Delivery Report\n\n## Summary\nAll clean.\n\n## Changes\nNone.\n\n## Verification\nVerified.\n", encoding="utf-8")
+        report_file = p2b_dir / "report.md"
+        report_file.write_text("# Delivery Report\n\n## Summary\nAll clean.\n\n## Changes\nNone.\n\n## Verification\nVerified.\n", encoding="utf-8")
+        (p2b_dir / "claims.json").write_text(
+            canonical_json_dumps({
+                "task_id": self.task_id,
+                "iteration": 1,
+                "contract_sha256": sha256_file(self.ws / "AGENTS.md"),
+                "record": "Phase-2B/report.md",
+                "record_sha256": sha256_file(report_file),
+                "claims": [],
+            }),
+            encoding="utf-8",
+        )
         report_data = {
             "schema_version": "2.0",
             "task_id": self.task_id,
