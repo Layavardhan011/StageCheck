@@ -62,7 +62,28 @@ class TestGate2BAuthorization(unittest.TestCase):
         _git_run(["config", "user.email", "test@stagecheck.local"], cwd=self.repo_dir)
         readme = self.repo_dir / "README.md"
         readme.write_text("# Payment Service\n", encoding="utf-8")
-        _git_run(["add", "README.md"], cwd=self.repo_dir)
+        (self.repo_dir / "test_service.py").write_text(
+            "import unittest\n\n\n"
+            "def check_amount(val):\n"
+            "    if not isinstance(val, int):\n"
+            "        raise TypeError('int expected')\n"
+            "    if val < 0:\n"
+            "        raise ValueError('negative disallowed')\n"
+            "    return val\n\n\n"
+            "class TestService(unittest.TestCase):\n"
+            "    def test_positive(self):\n"
+            "        self.assertEqual(check_amount(10), 10)\n\n"
+            "    def test_negative_boundary(self):\n"
+            "        with self.assertRaises(ValueError):\n"
+            "            check_amount(-1)\n\n"
+            "    def test_malformed_input(self):\n"
+            "        with self.assertRaises(TypeError):\n"
+            "            check_amount(None)\n\n"
+            "    def test_duplicate_replay_idempotent(self):\n"
+            "        self.assertEqual(check_amount(5), check_amount(5))\n",
+            encoding="utf-8",
+        )
+        _git_run(["add", "README.md", "test_service.py"], cwd=self.repo_dir)
         _git_run(["commit", "-m", "Initial commit"], cwd=self.repo_dir)
 
         # Initialize workspace with repo "payment-service"
@@ -153,6 +174,112 @@ class TestGate2BAuthorization(unittest.TestCase):
             "summary": "Implementation ready for review",
         }
         (self.p2a_dir / "pre_commit_status.json").write_text(json.dumps(status_data, indent=2) + "\n", encoding="utf-8")
+
+        # Seed complete rubric artifacts with valid human-waiver and agent-review provenance
+        from stagecheck.core.agents_md import write_agents_contract
+        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from stagecheck.core.rubric_engine import (
+            build_agent_reviews_artifact,
+            load_270_rule_catalog,
+            run_rubric_evaluation,
+            update_rubric_artifacts,
+        )
+        from stagecheck.core.utils import canonical_json_dumps
+
+        (self.ws / "evals").mkdir(parents=True, exist_ok=True)
+        waiver_evidence = self.ws / "evidence" / "waiver_g2b.txt"
+        with controlled_write_transaction(self.ws / "evidence"):
+            waiver_evidence.parent.mkdir(parents=True, exist_ok=True)
+            waiver_evidence.write_text("Approved waiver evidence for Gate-2B test.\n", encoding="utf-8")
+            (self.ws / "evidence" / "issue_history.json").write_text(
+                canonical_json_dumps({"schema_version": "1.0", "issues": []}),
+                encoding="utf-8",
+            )
+
+        catalog = load_270_rule_catalog()
+        waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        w_entry = build_waiver_entry(
+            workspace_root=self.ws,
+            task_id=self.task_id,
+            defect_id=waiver_ids[0],
+            rationale="Authorized for Gate-2B pre-commit rubric test",
+            authorized_by="owner@stagecheck.local",
+            attempt=self.attempt,
+            evidence_path="evidence/waiver_g2b.txt",
+            rule_id=waiver_ids[0],
+            waived_rules=waiver_ids,
+        )
+        with controlled_write_transaction(self.ws / "controls"):
+            (self.ws / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps({"schema_version": "2.0", "dispositions": [w_entry]}),
+                encoding="utf-8",
+            )
+        record_waiver_in_replay_ledger(self.ws, w_entry)
+        write_agents_contract(self.ws)
+
+        agent_reviews = {
+            r.rule_id: {
+                "status": "PASS",
+                "rationale": f"Verified semantic criterion for {r.title}.",
+                "evidence_path": "Phase-2A/agent_reviews.json",
+            }
+            for r in catalog
+            if r.category == "AGENT_ASSISTED"
+        }
+        reviews_artifact = build_agent_reviews_artifact(
+            workspace_root=self.ws,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            reviews=agent_reviews,
+            reviewer="agent1",
+            reviewer_role="prompt_and_audit",
+        )
+        (self.p2a_dir / "agent_reviews.json").write_text(
+            canonical_json_dumps(reviews_artifact),
+            encoding="utf-8",
+        )
+
+        report_file = self.p2b_dir / "report.md"
+        report_file.write_text("# Delivery Report\nImplemented payment service.\n", encoding="utf-8")
+        (self.p2b_dir / "claims.json").write_text(
+            canonical_json_dumps({
+                "task_id": self.task_id,
+                "iteration": 1,
+                "contract_sha256": sha256_file(self.ws / "AGENTS.md"),
+                "record": "Phase-2B/report.md",
+                "record_sha256": sha256_file(report_file),
+                "claims": [],
+            }),
+            encoding="utf-8",
+        )
+        p3_dir = self.attempt_dir / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        (p3_dir / "test_execution.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "status": "PASS",
+                "repositories": {"payment-service": {"status": "PASS", "exit_code": 0}},
+            }),
+            encoding="utf-8",
+        )
+        (p3_dir / "scanner_report.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "status": "CLEAN", "findings": []}),
+            encoding="utf-8",
+        )
+        (p3_dir / "verdict.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "result": "CLEAR", "counts": {"blocking": 0}}),
+            encoding="utf-8",
+        )
+        rubric_payload, _ = run_rubric_evaluation(
+            workspace_root=self.ws,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            cycle=1,
+        )
+        self.assertEqual(rubric_payload["overall_verdict"], "PASS", f"Rubric setup failed: {rubric_payload.get('counts')}")
+        update_rubric_artifacts(self.ws, rubric_payload)
 
         # Run approve-review
         rc = run_approve_review(self.task_id, attempt=self.attempt, workspace=str(self.ws))

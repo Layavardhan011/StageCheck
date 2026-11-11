@@ -83,6 +83,7 @@ class TestMultiRepoAggregateScenarios(unittest.TestCase):
         base_a = discover_repository(self.repo_a, name="service-a", workspace_root=self.workspace_root)
         base_b = discover_repository(self.repo_b, name="service-b", workspace_root=self.workspace_root)
         scaffold_controls_atomic(self.workspace_root, {"service-a": base_a, "service-b": base_b})
+        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
         from stagecheck.core.permissions import controlled_write_transaction
         from stagecheck.core.rubric_engine import load_270_rule_catalog
         from stagecheck.core.start_manifest import generate_start_manifest
@@ -91,26 +92,32 @@ class TestMultiRepoAggregateScenarios(unittest.TestCase):
         (self.workspace_root / "specs").mkdir(parents=True, exist_ok=True)
         generate_start_manifest(self.workspace_root)
 
+        waiver_ev = self.workspace_root / "evidence" / "waiver_mr.txt"
+        waiver_ev.parent.mkdir(parents=True, exist_ok=True)
+        waiver_ev.write_text("Approved waiver evidence for multi-repo test.\n", encoding="utf-8")
+
         catalog = load_270_rule_catalog()
         waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        w_entry = build_waiver_entry(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            defect_id=waiver_ids[0],
+            rationale="Authorized for multi-repo scenario tests",
+            authorized_by="owner@stagecheck.local",
+            attempt=self.attempt,
+            evidence_path="evidence/waiver_mr.txt",
+            rule_id=waiver_ids[0],
+            waived_rules=waiver_ids,
+        )
         disp_doc = {
             "schema_version": "2.0",
-            "dispositions": [
-                {
-                    "disposition_id": "DISP-MR-01",
-                    "task_id": self.task_id,
-                    "rule_id": waiver_ids[0],
-                    "waived_rules": waiver_ids,
-                    "authorized_by": "human-operator",
-                    "rationale": "Authorized for multi-repo scenario tests",
-                    "status": "APPROVED",
-                }
-            ],
+            "dispositions": [w_entry],
         }
         with controlled_write_transaction(self.workspace_root / "controls"):
             (self.workspace_root / "controls" / "DISPOSITIONS.json").write_text(
                 canonical_json_dumps(disp_doc), encoding="utf-8"
             )
+        record_waiver_in_replay_ledger(self.workspace_root, w_entry)
         state = load_active_state(self.workspace_root)
         state["cleared_gates"] = {"GATE_1": "0" * 64}
         save_active_state(self.workspace_root, state)
@@ -174,7 +181,7 @@ class TestMultiRepoAggregateScenarios(unittest.TestCase):
             }),
             encoding="utf-8",
         )
-        from stagecheck.core.rubric_engine import load_270_rule_catalog
+        from stagecheck.core.rubric_engine import build_agent_reviews_artifact, load_270_rule_catalog
         from stagecheck.core.utils import sha256_file
 
         agent_reviews = {
@@ -186,8 +193,16 @@ class TestMultiRepoAggregateScenarios(unittest.TestCase):
             for r in load_270_rule_catalog()
             if r.category == "AGENT_ASSISTED"
         }
+        reviews_artifact = build_agent_reviews_artifact(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            reviews=agent_reviews,
+            reviewer="agent1",
+            reviewer_role="prompt_and_audit",
+        )
         (p2a_dir / "agent_reviews.json").write_text(
-            canonical_json_dumps({"task_id": self.task_id, "attempt": self.attempt, "agent_assisted_reviews": agent_reviews}),
+            canonical_json_dumps(reviews_artifact),
             encoding="utf-8",
         )
 

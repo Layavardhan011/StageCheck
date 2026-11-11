@@ -100,29 +100,45 @@ class TestAuditPipeline(unittest.TestCase):
         self.assertEqual(rc, 0)
 
         from stagecheck.core.agents_md import write_agents_contract
+        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
         from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.rubric_engine import load_270_rule_catalog
+        from stagecheck.core.rubric_engine import (
+            build_agent_reviews_artifact,
+            load_270_rule_catalog,
+            run_rubric_evaluation,
+            update_rubric_artifacts,
+        )
+
+        waiver_evidence = self.ws / "evidence" / "waiver_audit.txt"
+        with controlled_write_transaction(self.ws / "evidence"):
+            waiver_evidence.parent.mkdir(parents=True, exist_ok=True)
+            waiver_evidence.write_text("Approved waiver evidence for audit pipeline.\n", encoding="utf-8")
+            (self.ws / "evidence" / "issue_history.json").write_text(
+                canonical_json_dumps({"schema_version": "1.0", "issues": []}), encoding="utf-8"
+            )
 
         catalog = load_270_rule_catalog()
         waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        w_entry = build_waiver_entry(
+            workspace_root=self.ws,
+            task_id=self.task_id,
+            defect_id=waiver_ids[0],
+            rationale="Authorized for audit pipeline verification",
+            authorized_by="owner@stagecheck.local",
+            attempt=self.attempt,
+            evidence_path="evidence/waiver_audit.txt",
+            rule_id=waiver_ids[0],
+            waived_rules=waiver_ids,
+        )
         disp_doc = {
             "schema_version": "2.0",
-            "dispositions": [
-                {
-                    "disposition_id": "DISP-AUDIT-01",
-                    "task_id": self.task_id,
-                    "rule_id": waiver_ids[0],
-                    "waived_rules": waiver_ids,
-                    "authorized_by": "human-operator",
-                    "rationale": "Authorized for audit pipeline verification",
-                    "status": "APPROVED",
-                }
-            ],
+            "dispositions": [w_entry],
         }
         with controlled_write_transaction(self.ws / "controls"):
             (self.ws / "controls" / "DISPOSITIONS.json").write_text(
                 canonical_json_dumps(disp_doc), encoding="utf-8"
             )
+        record_waiver_in_replay_ledger(self.ws, w_entry)
         write_agents_contract(self.ws)
 
         # Qualification directory
@@ -206,10 +222,58 @@ class TestAuditPipeline(unittest.TestCase):
             for r in load_270_rule_catalog()
             if r.category == "AGENT_ASSISTED"
         }
+        reviews_artifact = build_agent_reviews_artifact(
+            workspace_root=self.ws,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            reviews=agent_reviews,
+            reviewer="agent1",
+            reviewer_role="prompt_and_audit",
+        )
         (p2a_dir / "agent_reviews.json").write_text(
-            canonical_json_dumps({"task_id": self.task_id, "attempt": self.attempt, "agent_assisted_reviews": agent_reviews}),
+            canonical_json_dumps(reviews_artifact),
             encoding="utf-8",
         )
+
+        # Ensure Phase-2B & Phase-3 baseline files exist for COMPLETE 270-rule pre-Gate-2A rubric check
+        p2b_dir = self.ws / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2B"
+        p2b_dir.mkdir(parents=True, exist_ok=True)
+        report_file = p2b_dir / "report.md"
+        report_file.write_text("# Delivery Report\n\n## Summary\nAll clean.\n\n## Changes\nNone.\n\n## Verification\nVerified.\n", encoding="utf-8")
+        (p2b_dir / "claims.json").write_text(
+            canonical_json_dumps({
+                "task_id": self.task_id,
+                "iteration": 1,
+                "contract_sha256": sha256_file(self.ws / "AGENTS.md"),
+                "record": "Phase-2B/report.md",
+                "record_sha256": sha256_file(report_file),
+                "claims": [],
+            }),
+            encoding="utf-8",
+        )
+        p3_dir = self.ws / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        (p3_dir / "test_execution.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "status": "PASS",
+                "repositories": {"api-service": {"status": "PASS", "exit_code": 0}, "db-service": {"status": "PASS", "exit_code": 0}},
+            }),
+            encoding="utf-8",
+        )
+        (p3_dir / "scanner_report.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "status": "CLEAN", "findings": []}),
+            encoding="utf-8",
+        )
+        (p3_dir / "verdict.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "result": "CLEAR", "counts": {"blocking": 0}}),
+            encoding="utf-8",
+        )
+        rubric_payload, _ = run_rubric_evaluation(self.ws, self.task_id, self.attempt, cycle=1)
+        self.assertEqual(rubric_payload["overall_verdict"], "PASS", f"Audit setup rubric failed: {rubric_payload.get('counts')}")
+        update_rubric_artifacts(self.ws, rubric_payload)
         advance_gate_atomic(self.ws, GateId.GATE_2A, self.task_id, self.attempt)
 
         # Setup Phase 2B delivery report & advance Gate 2B

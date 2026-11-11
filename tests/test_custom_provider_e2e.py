@@ -97,21 +97,35 @@ class TestCustomProviderE2E(unittest.TestCase):
         (self.workspace_root / "evals").mkdir(parents=True, exist_ok=True)
         (self.workspace_root / "specs").mkdir(parents=True, exist_ok=True)
         generate_start_manifest(self.workspace_root)
+        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from stagecheck.core.rubric_engine import build_agent_reviews_artifact
+
+        waiver_evidence = self.workspace_root / "evidence" / "waiver_custom.txt"
+        with controlled_write_transaction(self.workspace_root / "evidence"):
+            waiver_evidence.parent.mkdir(parents=True, exist_ok=True)
+            waiver_evidence.write_text("Approved waiver evidence for custom provider test.\n", encoding="utf-8")
+            if not (self.workspace_root / "evidence" / "issue_history.json").is_file():
+                (self.workspace_root / "evidence" / "issue_history.json").write_text(
+                    canonical_json_dumps({"schema_version": "1.0", "issues": []}),
+                    encoding="utf-8",
+                )
+
         catalog = load_270_rule_catalog()
         waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        w_entry = build_waiver_entry(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            defect_id=waiver_ids[0],
+            rationale="Authorized for custom provider E2E governance test",
+            authorized_by="owner@stagecheck.local",
+            attempt=self.attempt,
+            evidence_path="evidence/waiver_custom.txt",
+            rule_id=waiver_ids[0],
+            waived_rules=waiver_ids,
+        )
         disp_doc = {
             "schema_version": "2.0",
-            "dispositions": [
-                {
-                    "disposition_id": "DISP-CUSTOM-01",
-                    "task_id": self.task_id,
-                    "rule_id": waiver_ids[0],
-                    "waived_rules": waiver_ids,
-                    "authorized_by": "human-operator",
-                    "rationale": "Authorized for custom provider E2E governance test",
-                    "status": "APPROVED",
-                }
-            ],
+            "dispositions": [w_entry],
         }
         active_state_path = self.workspace_root / "controls" / "ACTIVE_STATE.json"
         with controlled_write_transaction(self.workspace_root / "controls"):
@@ -127,6 +141,7 @@ class TestCustomProviderE2E(unittest.TestCase):
                 {"name": "custom-auditor", "role": "prompt_and_audit"},
             ]
             active_state_path.write_text(canonical_json_dumps(state_data), encoding="utf-8")
+        record_waiver_in_replay_ledger(self.workspace_root, w_entry)
         write_agents_contract(self.workspace_root)
 
         # Phase 1: Prompt & Scope freeze
@@ -224,8 +239,16 @@ class TestCustomProviderE2E(unittest.TestCase):
             for r in catalog
             if r.category == "AGENT_ASSISTED"
         }
+        reviews_artifact = build_agent_reviews_artifact(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            reviews=agent_reviews,
+            reviewer="custom-auditor",
+            reviewer_role="prompt_and_audit",
+        )
         (p2a_dir / "agent_reviews.json").write_text(
-            canonical_json_dumps({"task_id": self.task_id, "attempt": self.attempt, "agent_assisted_reviews": agent_reviews}),
+            canonical_json_dumps(reviews_artifact),
             encoding="utf-8",
         )
 

@@ -138,48 +138,53 @@ class TestEndToEndLifecycle(unittest.TestCase):
         run_git(["add", "."], cwd=repo_dir)
 
         from stagecheck.core.agents_md import write_agents_contract
+        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
         from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.rubric_engine import load_270_rule_catalog
+        from stagecheck.core.rubric_engine import (
+            build_agent_reviews_artifact,
+            load_270_rule_catalog,
+            run_rubric_evaluation,
+            update_rubric_artifacts,
+        )
         from stagecheck.core.utils import canonical_json_dumps, sha256_file
+
+        waiver_evidence = self.ws / "evidence" / "waiver_e2e.txt"
+        with controlled_write_transaction(self.ws / "evidence"):
+            waiver_evidence.parent.mkdir(parents=True, exist_ok=True)
+            waiver_evidence.write_text("Approved waiver evidence for E2E lifecycle.\n", encoding="utf-8")
+            if not (self.ws / "evidence" / "issue_history.json").is_file():
+                (self.ws / "evidence" / "issue_history.json").write_text(
+                    canonical_json_dumps({"schema_version": "1.0", "issues": []}),
+                    encoding="utf-8",
+                )
 
         catalog = load_270_rule_catalog()
         waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        w_entry = build_waiver_entry(
+            workspace_root=self.ws,
+            task_id="task-101",
+            defect_id=waiver_ids[0],
+            rationale="Authorized for E2E lifecycle verification",
+            authorized_by="owner@stagecheck.local",
+            attempt=1,
+            evidence_path="evidence/waiver_e2e.txt",
+            rule_id=waiver_ids[0],
+            waived_rules=waiver_ids,
+        )
         disp_doc = {
             "schema_version": "2.0",
-            "dispositions": [
-                {
-                    "disposition_id": "DISP-E2E-101",
-                    "task_id": "task-101",
-                    "rule_id": waiver_ids[0],
-                    "waived_rules": waiver_ids,
-                    "authorized_by": "human-operator",
-                    "rationale": "Authorized for E2E lifecycle verification",
-                    "status": "APPROVED",
-                }
-            ],
+            "dispositions": [w_entry],
         }
         with controlled_write_transaction(self.ws / "controls"):
             (self.ws / "controls" / "DISPOSITIONS.json").write_text(
                 canonical_json_dumps(disp_doc), encoding="utf-8"
             )
+        record_waiver_in_replay_ledger(self.ws, w_entry)
         write_agents_contract(self.ws)
 
         # 6. Prepare Phase 2A pre-commit review status and approve review
         phase2a_dir = self.ws / "evidence/tasks/task-101/attempt_1/Phase-2A"
         phase2a_dir.mkdir(parents=True, exist_ok=True)
-        agent_reviews = {
-            r.rule_id: {
-                "status": "PASS",
-                "rationale": f"Verified semantic criterion for {r.title}.",
-                "evidence_path": "Phase-2A/agent_reviews.json",
-            }
-            for r in catalog
-            if r.category == "AGENT_ASSISTED"
-        }
-        (phase2a_dir / "agent_reviews.json").write_text(
-            canonical_json_dumps({"task_id": "task-101", "attempt": 1, "agent_assisted_reviews": agent_reviews}),
-            encoding="utf-8",
-        )
         status_data = {
             "schema_version": "1.0.0",
             "task_id": "task-101",
@@ -191,6 +196,68 @@ class TestEndToEndLifecycle(unittest.TestCase):
             "summary": "Implementation completed and ready for review",
         }
         (phase2a_dir / "pre_commit_status.json").write_text(json.dumps(status_data, indent=2) + "\n")
+
+        agent_reviews = {
+            r.rule_id: {
+                "status": "PASS",
+                "rationale": f"Verified semantic criterion for {r.title}.",
+                "evidence_path": "Phase-2A/agent_reviews.json",
+            }
+            for r in catalog
+            if r.category == "AGENT_ASSISTED"
+        }
+        reviews_artifact = build_agent_reviews_artifact(
+            workspace_root=self.ws,
+            task_id="task-101",
+            attempt=1,
+            reviews=agent_reviews,
+            reviewer="agent1",
+            reviewer_role="prompt_and_audit",
+        )
+        (phase2a_dir / "agent_reviews.json").write_text(
+            canonical_json_dumps(reviews_artifact),
+            encoding="utf-8",
+        )
+
+        # Ensure Phase-2B & Phase-3 baseline artifacts exist for COMPLETE 270-rule pre-commit rubric check
+        phase2b_dir = self.ws / "evidence/tasks/task-101/attempt_1/Phase-2B"
+        phase2b_dir.mkdir(parents=True, exist_ok=True)
+        report_path = phase2b_dir / "report.md"
+        report_path.write_text("# Delivery report\nImplemented service.py and tests.\n", encoding="utf-8")
+        (phase2b_dir / "claims.json").write_text(
+            canonical_json_dumps({
+                "task_id": "task-101",
+                "iteration": 1,
+                "contract_sha256": sha256_file(self.ws / "AGENTS.md"),
+                "record": "Phase-2B/report.md",
+                "record_sha256": sha256_file(report_path),
+                "claims": [],
+            }),
+            encoding="utf-8",
+        )
+        phase3_dir = self.ws / "evidence/tasks/task-101/attempt_1/Phase-3"
+        phase3_dir.mkdir(parents=True, exist_ok=True)
+        (phase3_dir / "test_execution.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": "task-101",
+                "attempt": 1,
+                "status": "PASS",
+                "repositories": {"core-service": {"status": "PASS", "exit_code": 0}},
+            }),
+            encoding="utf-8",
+        )
+        (phase3_dir / "scanner_report.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "status": "CLEAN", "findings": []}),
+            encoding="utf-8",
+        )
+        (phase3_dir / "verdict.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "result": "CLEAR", "counts": {"blocking": 0}}),
+            encoding="utf-8",
+        )
+        rubric_payload, _ = run_rubric_evaluation(self.ws, "task-101", attempt=1, cycle=1)
+        self.assertEqual(rubric_payload["overall_verdict"], "PASS", f"E2E rubric failed: {rubric_payload.get('counts')}")
+        update_rubric_artifacts(self.ws, rubric_payload)
 
         rc = run_approve_review("task-101", attempt=1, workspace=str(self.ws))
         self.assertEqual(rc, 0, "approve-review failed")

@@ -203,7 +203,7 @@ class TestGateEngine(unittest.TestCase):
         rep2 = check_gate_preconditions(self.workspace, "Gate-3")
         self.assertFalse(rep2.passed)
 
-        # 3. Passing verdict
+        # 3. Passing verdict WITHOUT complete Phase-3/rubric_evaluation.json -> FAIL (GAP-02)
         (p3_dir / "verdict.json").write_text(json.dumps({
             "schema_version": "2.0",
             "task_id": self.task_id,
@@ -213,8 +213,85 @@ class TestGateEngine(unittest.TestCase):
             "defects": [],
         }), encoding="utf-8")
 
+        rep_no_rubric = check_gate_preconditions(self.workspace, "Gate-3")
+        self.assertFalse(rep_no_rubric.passed)
+
+        # 4. Partial Phase-3/rubric_evaluation.json MUST NOT satisfy Gate-3 (GAP-02)
+        import datetime
+        from stagecheck.core.rubric_engine import compute_rubric_context_digest, load_270_rule_catalog
+
+        catalog = load_270_rule_catalog()
+        now_iso = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        ctx_digest = compute_rubric_context_digest(self.workspace, self.task_id, self.attempt)
+        partial_evals = [
+            {
+                "rule_id": r.rule_id,
+                "domain": r.domain,
+                "category": r.category,
+                "status": "PASS",
+                "message": "ok",
+            }
+            for r in catalog[:30]
+        ]
+        (p3_dir / "rubric_evaluation.json").write_text(canonical_json_dumps({
+            "schema_version": "2.0.0",
+            "task_id": self.task_id,
+            "attempt": self.attempt,
+            "cycle": 1,
+            "evaluated_at": now_iso,
+            "overall_verdict": "PASS",
+            "evaluation_completeness": "PARTIAL",
+            "expected_rule_count": 270,
+            "evaluated_rule_count": 30,
+            "missing_rules": [r.rule_id for r in catalog[30:]],
+            "duplicate_rules": [],
+            "target_domain": "COMMON",
+            "context_digest": ctx_digest,
+            "counts": {"total_rules": 30, "passed": 30, "failed": 0, "not_applicable": 0, "not_evaluated": 0, "blocked": 0},
+            "domains": {"COMMON": {"total": 30, "passed": 30, "failed": 0, "not_applicable": 0, "verdict": "PASS"}},
+            "evaluations": partial_evals,
+        }), encoding="utf-8")
+
+        rep_partial = check_gate_preconditions(self.workspace, "Gate-3")
+        self.assertFalse(rep_partial.passed)
+
+        # 5. Passing verdict WITH COMPLETE 270/270 PASS Phase-3/rubric_evaluation.json -> PASS
+        full_evals = [
+            {
+                "rule_id": r.rule_id,
+                "domain": r.domain,
+                "category": r.category,
+                "status": "PASS",
+                "message": "Verified passing criterion.",
+            }
+            for r in catalog
+        ]
+        domain_counts = {}
+        for r in catalog:
+            d = domain_counts.setdefault(r.domain, {"total": 0, "passed": 0, "failed": 0, "not_applicable": 0, "verdict": "PASS"})
+            d["total"] += 1
+            d["passed"] += 1
+        (p3_dir / "rubric_evaluation.json").write_text(canonical_json_dumps({
+            "schema_version": "2.0.0",
+            "task_id": self.task_id,
+            "attempt": self.attempt,
+            "cycle": 1,
+            "evaluated_at": now_iso,
+            "overall_verdict": "PASS",
+            "evaluation_completeness": "COMPLETE",
+            "expected_rule_count": 270,
+            "evaluated_rule_count": 270,
+            "missing_rules": [],
+            "duplicate_rules": [],
+            "target_domain": None,
+            "context_digest": ctx_digest,
+            "counts": {"total_rules": 270, "passed": 270, "failed": 0, "not_applicable": 0, "not_evaluated": 0, "blocked": 0},
+            "domains": domain_counts,
+            "evaluations": full_evals,
+        }), encoding="utf-8")
+
         rep3 = check_gate_preconditions(self.workspace, "Gate-3")
-        self.assertTrue(rep3.passed)
+        self.assertTrue(rep3.passed, f"Expected Gate-3 to pass, failures={rep3.failure_reasons}")
 
     def test_active_state_schema_synchronization(self) -> None:
         """Verify active_state.schema.json validates all LifecyclePhase enum values."""

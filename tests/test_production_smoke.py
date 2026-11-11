@@ -138,8 +138,9 @@ class TestProductionSmoke(unittest.TestCase):
 
         # Prepare Phase 1 artifacts and verify prompt to satisfy Gate 1
         from stagecheck.core.agents_md import write_agents_contract
+        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
         from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.rubric_engine import load_270_rule_catalog
+        from stagecheck.core.rubric_engine import build_agent_reviews_artifact, load_270_rule_catalog
         from stagecheck.core.utils import canonical_json_dumps, sha256_file
 
         repo_dir = self.workspace_dir / "repos" / "core-service"
@@ -165,26 +166,38 @@ class TestProductionSmoke(unittest.TestCase):
             encoding="utf-8",
         )
         (self.workspace_dir / "evals").mkdir(parents=True, exist_ok=True)
+        waiver_evidence = self.workspace_dir / "evidence" / "waiver_smoke.txt"
+        with controlled_write_transaction(self.workspace_dir / "evidence"):
+            waiver_evidence.parent.mkdir(parents=True, exist_ok=True)
+            waiver_evidence.write_text("Approved waiver evidence for smoke test.\n", encoding="utf-8")
+            if not (self.workspace_dir / "evidence" / "issue_history.json").is_file():
+                (self.workspace_dir / "evidence" / "issue_history.json").write_text(
+                    canonical_json_dumps({"schema_version": "1.0", "issues": []}),
+                    encoding="utf-8",
+                )
+
         catalog = load_270_rule_catalog()
         waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        w_entry = build_waiver_entry(
+            workspace_root=self.workspace_dir,
+            task_id="task-101",
+            defect_id=waiver_ids[0],
+            rationale="Authorized for production smoke test",
+            authorized_by="owner@stagecheck.local",
+            attempt=1,
+            evidence_path="evidence/waiver_smoke.txt",
+            rule_id=waiver_ids[0],
+            waived_rules=waiver_ids,
+        )
         disp_doc = {
             "schema_version": "2.0",
-            "dispositions": [
-                {
-                    "disposition_id": "DISP-SMOKE-101",
-                    "task_id": "task-101",
-                    "rule_id": waiver_ids[0],
-                    "waived_rules": waiver_ids,
-                    "authorized_by": "human-operator",
-                    "rationale": "Authorized for production smoke test",
-                    "status": "APPROVED",
-                }
-            ],
+            "dispositions": [w_entry],
         }
         with controlled_write_transaction(self.workspace_dir / "controls"):
             (self.workspace_dir / "controls" / "DISPOSITIONS.json").write_text(
                 canonical_json_dumps(disp_doc), encoding="utf-8"
             )
+        record_waiver_in_replay_ledger(self.workspace_dir, w_entry)
         write_agents_contract(self.workspace_dir)
 
         p1_dir = self.workspace_dir / "evidence/tasks/task-101/attempt_1/Phase-1"
@@ -214,8 +227,16 @@ class TestProductionSmoke(unittest.TestCase):
             for r in catalog
             if r.category == "AGENT_ASSISTED"
         }
+        reviews_artifact = build_agent_reviews_artifact(
+            workspace_root=self.workspace_dir,
+            task_id="task-101",
+            attempt=1,
+            reviews=agent_reviews,
+            reviewer="agent1",
+            reviewer_role="prompt_and_audit",
+        )
         (phase2a_dir / "agent_reviews.json").write_text(
-            canonical_json_dumps({"task_id": "task-101", "attempt": 1, "agent_assisted_reviews": agent_reviews}),
+            canonical_json_dumps(reviews_artifact),
             encoding="utf-8",
         )
         p2b_dir = self.workspace_dir / "evidence/tasks/task-101/attempt_1/Phase-2B"
