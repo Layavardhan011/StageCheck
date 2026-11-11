@@ -240,24 +240,56 @@ class AuditOrchestrator:
         rubric_payload: Dict[str, Any] = {}
         try:
             from stagecheck.core.rubric_engine import run_rubric_evaluation
+
+            rerun_stage = next((r for r in stage_results if r.stage_id == "rerun"), None)
+            sec_stage = next((r for r in stage_results if r.stage_id == "secrets"), None)
+            stage_summaries = [r.to_dict() for r in stage_results]
+            audit_rubric_ctx: Dict[str, Any] = {
+                "stage_results": stage_summaries,
+                "claims": ctx.claims,
+                "rerun_results": {
+                    "status": rerun_stage.status if rerun_stage else "UNKNOWN",
+                    "errors": rerun_stage.errors if rerun_stage else ["rerun_stage_missing"],
+                    "defects": [d.defect_id for d in rerun_stage.defects] if rerun_stage else [],
+                },
+            }
+            if sec_stage and sec_stage.status == "PASS" and not any(d.blocking for d in sec_stage.defects):
+                audit_rubric_ctx["scanner_report_doc"] = {"status": "PASSED", "defects": []}
+
             rubric_payload, _ = run_rubric_evaluation(
                 workspace_root=self.workspace_root,
                 task_id=ctx.task_id,
                 attempt=ctx.attempt,
+                context=audit_rubric_ctx,
             )
-            if rubric_payload.get("overall_verdict") == "FAIL":
+            if rubric_payload.get("overall_verdict") != "PASS":
+                added_rubric_defect = False
                 for eval_item in rubric_payload.get("evaluations", []):
-                    if eval_item.get("status") == "FAIL":
+                    st = eval_item.get("status")
+                    if st in ("FAIL", "BLOCKED", "NOT_EVALUATED"):
+                        added_rubric_defect = True
                         all_defects.append(
                             Defect(
                                 defect_id=eval_item.get("rule_id", "RUBRIC_DEFECT"),
-                                message=eval_item.get("rationale") or f"Rubric rule {eval_item.get('rule_id')} failed.",
+                                message=eval_item.get("message")
+                                or eval_item.get("rationale")
+                                or f"Rubric rule {eval_item.get('rule_id')} returned status {st}.",
                                 stage="rubric",
                                 severity="CRITICAL",
                                 blocking=True,
                                 repo=eval_item.get("repository"),
                             )
                         )
+                if not added_rubric_defect:
+                    all_defects.append(
+                        Defect(
+                            defect_id="rubric.incomplete_or_failed",
+                            message=f"Rubric overall_verdict is '{rubric_payload.get('overall_verdict')}'.",
+                            stage="rubric",
+                            severity="CRITICAL",
+                            blocking=True,
+                        )
+                    )
         except Exception as r_err:
             all_defects.append(
                 Defect(

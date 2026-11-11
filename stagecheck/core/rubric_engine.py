@@ -2,31 +2,35 @@
 
 Implements:
 - 270-rule catalog parsed from canonical agent instructions across 9 domains (30 rules each).
+- Machine-readable 270-rule Audit Matrix mapping each rule to strategy, inputs, and validation.
 - Exact allocation: 162 Automated, 64 Evidence, 34 Agent-Assisted, 10 Human Waiver.
-- Deterministic structural exemption predicates (PREDICATE_NO_REACT_DEPENDENCY, etc.).
-- Fail-closed validation rejecting arbitrary agent self-exemptions (InvalidRubricExemptionError).
+- Deterministic structural exemption predicates (PREDICATE_NO_GO_MODULE, PREDICATE_NO_BLOCKCHAIN_PROTOCOL, etc.).
+- Fail-closed validation rejecting arbitrary agent self-exemptions and incomplete rubrics.
 - Programmatic execution targeted under 200ms.
 - Synchronization with rubric_evaluation.json and pre_commit_review.json.
 """
 
 from __future__ import annotations
 
+import ast
 import datetime
 import importlib.resources
 import json
 import os
 import re
-import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
-from stagecheck.core.paths import find_workspace_root
 from stagecheck.core.state import load_active_state
-from stagecheck.core.utils import canonical_json_dumps, load_json_file
-from stagecheck.schemas.validator import validate_rubric_evaluation
+from stagecheck.core.utils import canonical_json_dumps, load_json_file, sha256_file, validate_schema
+from stagecheck.schemas import get_schema_path
+from stagecheck.schemas.validator import (
+    validate_active_state,
+    validate_rubric_evaluation,
+)
 
 
 class InvalidRubricExemptionError(Exception):
@@ -37,12 +41,40 @@ class RubricEvaluationError(Exception):
     """Raised when rubric evaluation encounters an unrecoverable failure."""
 
 
+_BLOCKCHAIN_MARKERS = ("multiversx", "mx-chain", "elrond", "dharitri", "drwa")
+_SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules", ".pytest_cache", ".mypy_cache"}
+_PIN_SPEC_RE = re.compile(r"^\s*([A-Za-z0-9_.\-]+)\s*(==|===|>=|<=|>|<|~=|\*|$)(.*)$")
+_SECRET_RE = re.compile(
+    r"(?:AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9_]{20,}|-----BEGIN (?:RSA|EC|OPENSSH|PRIVATE) KEY-----|sk-[A-Za-z0-9]{20,})"
+)
+
+
+def _has_blockchain_protocol(ws: Path, repo: Path) -> bool:
+    """Detect deterministically whether a repository implements blockchain/MultiversX/DRWA protocol logic."""
+    if not repo.is_dir():
+        return False
+    for manifest_name in ("go.mod", "Cargo.toml", "package.json", "requirements.txt", "pyproject.toml"):
+        mf = repo / manifest_name
+        if mf.is_file() and not mf.is_symlink():
+            text = mf.read_text(encoding="utf-8", errors="ignore").lower()
+            if any(m in text for m in _BLOCKCHAIN_MARKERS):
+                return True
+    # Also check shallow source indicators for Go/Rust shard/metachain/vm modules
+    if (repo / "go.mod").is_file() or (repo / "Cargo.toml").is_file():
+        for root_dir, dirs, _ in os.walk(repo):
+            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+            low = [d.lower() for d in dirs]
+            if any(k in low for k in ("metachain", "crossshard", "sharding", "vmhost", "drwa")):
+                return True
+    return False
+
+
 # Deterministic structural exemption predicates (FR-03 / DEC-026)
 EXEMPTION_PREDICATES: Dict[str, Callable[[Path, Path], bool]] = {
     "PREDICATE_NO_REACT_DEPENDENCY": lambda ws, repo: not (repo / "package.json").is_file()
-    or "react" not in (repo / "package.json").read_text(encoding="utf-8", errors="ignore"),
+    or "react" not in (repo / "package.json").read_text(encoding="utf-8", errors="ignore").lower(),
     "PREDICATE_NO_FLASK_DEPENDENCY": lambda ws, repo: not (repo / "requirements.txt").is_file()
-    or "flask" not in (repo / "requirements.txt").read_text(encoding="utf-8", errors="ignore"),
+    or "flask" not in (repo / "requirements.txt").read_text(encoding="utf-8", errors="ignore").lower(),
     "PREDICATE_BACKEND_ONLY_REPO": lambda ws, repo: not any(repo.rglob("*.tsx"))
     and not any(repo.rglob("*.jsx")),
     "PREDICATE_NO_NODE_PACKAGE": lambda ws, repo: not (repo / "package.json").is_file(),
@@ -51,6 +83,7 @@ EXEMPTION_PREDICATES: Dict[str, Callable[[Path, Path], bool]] = {
     "PREDICATE_NO_GO_MODULE": lambda ws, repo: not (repo / "go.mod").is_file(),
     "PREDICATE_NO_RUST_CRATE": lambda ws, repo: not (repo / "Cargo.toml").is_file(),
     "PREDICATE_NO_DOCKER": lambda ws, repo: not (repo / "Dockerfile").is_file(),
+    "PREDICATE_NO_BLOCKCHAIN_PROTOCOL": lambda ws, repo: not _has_blockchain_protocol(ws, repo),
 }
 
 
@@ -107,13 +140,21 @@ class RuleEvaluationResult:
         return d
 
 
-# Global catalog cache
+# Global caches
 _CATALOG_CACHE: Optional[List[RubricRule]] = None
+_MATRIX_CACHE: Optional[List[Dict[str, Any]]] = None
+_MATRIX_BY_ID_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
+_SCHEMA_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _get_cached_schema(name: str) -> Dict[str, Any]:
+    if name not in _SCHEMA_CACHE:
+        _SCHEMA_CACHE[name] = load_json_file(get_schema_path(name))
+    return _SCHEMA_CACHE[name]
 
 
 def get_agent_instructions_dir() -> Path:
     """Locate the canonical agent_instructions directory."""
-    # Try package location first
     try:
         pkg_dir = importlib.resources.files("stagecheck").joinpath("agent_instructions")
         pkg_path = Path(str(pkg_dir))
@@ -122,12 +163,58 @@ def get_agent_instructions_dir() -> Path:
     except Exception:
         pass
 
-    # Fallback relative to file
     local_dir = Path(__file__).resolve().parent.parent / "agent_instructions"
     if local_dir.is_dir():
         return local_dir
 
     raise FileNotFoundError("Could not locate agent_instructions directory containing 270-rule manuals.")
+
+
+def get_rubric_audit_matrix_path() -> Path:
+    """Locate the packaged 270-rule machine-readable audit matrix JSON asset."""
+    try:
+        pkg_file = importlib.resources.files("stagecheck").joinpath("config/defaults/rubric_audit_matrix.json")
+        pkg_path = Path(str(pkg_file))
+        if pkg_path.is_file():
+            return pkg_path
+    except Exception:
+        pass
+
+    local_file = Path(__file__).resolve().parent.parent / "config" / "defaults" / "rubric_audit_matrix.json"
+    if local_file.is_file():
+        return local_file
+
+    raise FileNotFoundError("Could not locate packaged config/defaults/rubric_audit_matrix.json.")
+
+
+def load_270_rule_audit_matrix() -> List[Dict[str, Any]]:
+    """Load and validate the canonical 270-rule machine-readable audit matrix."""
+    global _MATRIX_CACHE, _MATRIX_BY_ID_CACHE
+    if _MATRIX_CACHE is not None:
+        return _MATRIX_CACHE
+
+    matrix_path = get_rubric_audit_matrix_path()
+    data = json.loads(matrix_path.read_text(encoding="utf-8"))
+    if not isinstance(data, list) or len(data) != 270:
+        raise ValueError(
+            f"Audit matrix integrity error: expected 270 entries in '{matrix_path}', found {len(data) if isinstance(data, list) else type(data).__name__}."
+        )
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for entry in data:
+        rid = entry.get("rule_id")
+        if not rid or rid in by_id:
+            raise ValueError(f"Duplicate or missing rule_id in audit matrix: {rid!r}")
+        by_id[rid] = entry
+    _MATRIX_CACHE = data
+    _MATRIX_BY_ID_CACHE = by_id
+    return _MATRIX_CACHE
+
+
+def get_rule_strategy(rule_id: str) -> Optional[Dict[str, Any]]:
+    """Look up the machine-readable strategy specification for a specific rule_id."""
+    if _MATRIX_BY_ID_CACHE is None:
+        load_270_rule_audit_matrix()
+    return (_MATRIX_BY_ID_CACHE or {}).get(rule_id)
 
 
 def load_270_rule_catalog() -> List[RubricRule]:
@@ -145,6 +232,9 @@ def load_270_rule_catalog() -> List[RubricRule]:
         return _CATALOG_CACHE
 
     instr_dir = get_agent_instructions_dir()
+    if _MATRIX_BY_ID_CACHE is None:
+        load_270_rule_audit_matrix()
+    matrix_by_id = _MATRIX_BY_ID_CACHE or {}
 
     manuals = [
         ("COMMON", "00_common.md"),
@@ -165,17 +255,14 @@ def load_270_rule_catalog() -> List[RubricRule]:
         if not filepath.is_file():
             raise FileNotFoundError(f"Missing required rubric manual: '{filename}'.")
 
-        text = filepath.read_text(encoding="utf-8")
-        lines = text.splitlines()
-
-        # Parse rule headers: "### <RULE_ID> <Title>"
+        lines = filepath.read_text(encoding="utf-8").splitlines()
         current_rule_id = ""
         current_title = ""
         current_question = ""
         current_witness = ""
         current_counter = ""
 
-        def flush_rule(r_id, r_title, r_q, r_w, r_c):
+        def flush_rule(r_id: str, r_title: str, r_q: str, r_w: str, r_c: str) -> None:
             if not r_id:
                 return
             catalog.append(
@@ -184,7 +271,7 @@ def load_270_rule_catalog() -> List[RubricRule]:
                     domain=domain_name,
                     title=r_title,
                     question=r_q,
-                    category="AUTOMATED",  # Will be mapped below
+                    category="AUTOMATED",
                     primary_witness=r_w or None,
                     counterexample=r_c or None,
                 )
@@ -192,7 +279,6 @@ def load_270_rule_catalog() -> List[RubricRule]:
 
         for line in lines:
             line_s = line.strip()
-            # Match rule header
             header_match = re.match(r"^###\s+([A-Z0-9_]+-\d{3})\s+(.*)$", line_s)
             if header_match:
                 flush_rule(current_rule_id, current_title, current_question, current_witness, current_counter)
@@ -213,26 +299,8 @@ def load_270_rule_catalog() -> List[RubricRule]:
 
         flush_rule(current_rule_id, current_title, current_question, current_witness, current_counter)
 
-    # Ensure exactly 270 rules were loaded (30 per domain)
     if len(catalog) != 270:
         raise ValueError(f"Rubric catalog integrity error: expected exactly 270 rules, found {len(catalog)}.")
-
-    # Assign exact category allocation:
-    # 162 Automated, 64 Evidence, 34 Agent-Assisted, 10 Human Waiver
-    # BLAST_RADIUS (30): Automated
-    # UPSTREAM_REUSE (30): Automated
-    # FAILURE_CLASS (30): Automated
-    # TEST_ADEQUACY (30): 25 Automated, 5 Evidence
-    # INDEPENDENT_RERUN (30): 25 Automated, 5 Evidence
-    # EVAL_CURATOR (30): 22 Automated, 8 Evidence
-    # CLAIM_SUPPORT (30): 20 Evidence, 10 Agent-Assisted
-    # ORCHESTRATOR (30): 16 Evidence, 14 Agent-Assisted
-    # COMMON (30): 10 Human Waiver, 10 Agent-Assisted, 10 Evidence
-    # Total Automated: 30 + 30 + 30 + 25 + 25 + 22 = 162
-    # Total Evidence: 5 + 5 + 8 + 20 + 16 + 10 = 64
-    # Total Agent-Assisted: 10 + 14 + 10 = 34
-    # Total Human Waiver: 10
-    # Sum = 270
 
     domain_counts: Dict[str, int] = {}
     for rule in catalog:
@@ -258,16 +326,11 @@ def load_270_rule_catalog() -> List[RubricRule]:
             else:
                 rule.category = "EVIDENCE"
 
-        # Assign deterministic structural predicates to rules testing UI/frontend or specific frameworks
-        if domain == "TEST_ADEQUACY" and idx in (17, 18):
-            rule.exemption_predicate = "PREDICATE_NO_REACT_DEPENDENCY"
-            rule.exemption_rationale = "Target repository contains no React UI dependency."
-        elif domain == "FAILURE_CLASS" and idx == 28:
-            rule.exemption_predicate = "PREDICATE_NO_FLASK_DEPENDENCY"
-            rule.exemption_rationale = "Target repository contains no Flask web framework."
-        elif domain == "BLAST_RADIUS" and idx == 29:
-            rule.exemption_predicate = "PREDICATE_BACKEND_ONLY_REPO"
-            rule.exemption_rationale = "Repository is backend-only with no frontend TSX/JSX components."
+        # Bind genuine criterion-matched structural predicates from the canonical audit matrix
+        spec = matrix_by_id.get(rule.rule_id)
+        if spec and spec.get("exemption_predicate"):
+            rule.exemption_predicate = spec["exemption_predicate"]
+            rule.exemption_rationale = spec.get("exemption_rationale")
 
     _CATALOG_CACHE = catalog
     return catalog
@@ -307,25 +370,1382 @@ def validate_rubric_evaluation_payload(evaluation_results: List[Dict[str, Any]])
             )
 
 
+def _safe_load_json(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if not path.is_file() or path.is_symlink():
+        return None, f"Missing artifact '{path.name}'"
+    try:
+        data = load_json_file(path)
+        if not isinstance(data, dict):
+            return None, f"Invalid JSON object in '{path.name}'"
+        return data, None
+    except Exception as err:
+        return None, f"Failed parsing '{path.name}': {err}"
+
+
+def _resolve_predicate_evidence_path(workspace_root: Path, repo_path: Path) -> str:
+    candidates = [
+        repo_path / "package.json",
+        repo_path / "requirements.txt",
+        repo_path / "pyproject.toml",
+        repo_path / "go.mod",
+        repo_path / "Cargo.toml",
+        workspace_root / "controls" / "PRODUCT_REPOSITORIES.json",
+        repo_path,
+    ]
+    for cand in candidates:
+        if cand.exists():
+            try:
+                return str(cand.relative_to(workspace_root))
+            except ValueError:
+                return str(cand)
+    return str(repo_path)
+
+
+def _scan_dependencies(repo_dir: Path) -> List[str]:
+    """Return any unpinned/wildcard dependencies found in repo manifests."""
+    unpinned: List[str] = []
+    req_file = repo_dir / "requirements.txt"
+    if req_file.is_file() and not req_file.is_symlink():
+        for raw in req_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if not line or line.startswith(("-r", "--", "-e")):
+                continue
+            m = _PIN_SPEC_RE.match(line)
+            if m:
+                op = m.group(2)
+                if op != "==":
+                    unpinned.append(f"{repo_dir.name}/{req_file.name}: {line}")
+
+    pkg_file = repo_dir / "package.json"
+    if pkg_file.is_file() and not pkg_file.is_symlink():
+        try:
+            pkg = json.loads(pkg_file.read_text(encoding="utf-8", errors="ignore"))
+            for section in ("dependencies", "devDependencies"):
+                deps = pkg.get(section)
+                if isinstance(deps, dict):
+                    for name, ver in deps.items():
+                        v_str = str(ver).strip()
+                        if v_str in ("*", "latest", "") or v_str.startswith(("^", "~", ">", "<")):
+                            unpinned.append(f"{repo_dir.name}/package.json: {name}@{v_str}")
+        except Exception:
+            unpinned.append(f"{repo_dir.name}/package.json: unparseable manifest")
+    return unpinned
+
+
+def _analyze_python_repo_files(repo_dir: Path, max_files: int = 120) -> Dict[str, Any]:
+    """Fast single-pass AST analysis for repository source & test adequacy signals."""
+    metrics: Dict[str, Any] = {
+        "syntax_errors": [],
+        "resource_leak_files": [],
+        "swallowed_exceptions": [],
+        "unsafe_patterns": [],
+        "eval_imports_in_repo": [],
+        "qual_in_prod": [],
+        "test_count": 0,
+        "test_files": [],
+        "weak_assertions": [],
+        "skipped_tests_in_code": [],
+        "flaky_sleep_detected": [],
+        "has_positive_tests": False,
+        "has_negative_tests": False,
+        "has_malformed_tests": False,
+        "has_duplicate_tests": False,
+        "self_comparison_tautologies": [],
+        "defined_symbols": set(),
+    }
+    if not repo_dir.is_dir():
+        return metrics
+
+    scanned = 0
+    for root_str, dirs, files in os.walk(repo_dir):
+        dirs[:] = [d for d in sorted(dirs) if d not in _SKIP_DIRS]
+        root_p = Path(root_str)
+        for fname in sorted(files):
+            if not fname.endswith(".py"):
+                continue
+            fpath = root_p / fname
+            if fpath.is_symlink() or not fpath.is_file():
+                continue
+            try:
+                if fpath.stat().st_size > 512 * 1024:
+                    continue
+                src = fpath.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+
+            scanned += 1
+            if scanned > max_files:
+                break
+
+            rel = str(fpath.relative_to(repo_dir))
+            is_test = (
+                fname.startswith("test_")
+                or fname.endswith("_test.py")
+                or "tests" in fpath.relative_to(repo_dir).parts
+            )
+
+            try:
+                tree = ast.parse(src, filename=rel)
+            except SyntaxError as err:
+                metrics["syntax_errors"].append(f"{repo_dir.name}/{rel}:{err.lineno}: {err.msg}")
+                continue
+
+            if not is_test and (fname.startswith("qual_") or "TestQual" in src):
+                metrics["qual_in_prod"].append(f"{repo_dir.name}/{rel}")
+
+            if not is_test and ("from evals" in src or "import evals" in src):
+                metrics["eval_imports_in_repo"].append(f"{repo_dir.name}/{rel}")
+
+            with_open_lines: Set[int] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    metrics["defined_symbols"].add(node.name)
+
+                if isinstance(node, ast.With):
+                    for item in node.items:
+                        if isinstance(item.context_expr, ast.Call):
+                            fn = item.context_expr.func
+                            if isinstance(fn, ast.Name) and fn.id == "open":
+                                with_open_lines.add(item.context_expr.lineno)
+
+                if isinstance(node, ast.Call):
+                    fn = node.func
+                    if isinstance(fn, ast.Name) and fn.id == "open" and node.lineno not in with_open_lines:
+                        if not is_test:
+                            metrics["resource_leak_files"].append(f"{repo_dir.name}/{rel}:{node.lineno}")
+                    elif isinstance(fn, ast.Name) and fn.id in ("eval", "exec") and not is_test:
+                        metrics["unsafe_patterns"].append(f"{repo_dir.name}/{rel}:{node.lineno}:{fn.id}()")
+                    elif (
+                        isinstance(fn, ast.Attribute)
+                        and fn.attr == "sleep"
+                        and isinstance(fn.value, ast.Name)
+                        and fn.value.id == "time"
+                        and is_test
+                    ):
+                        metrics["flaky_sleep_detected"].append(f"{repo_dir.name}/{rel}:{node.lineno}")
+
+                if isinstance(node, ast.ExceptHandler) and not is_test:
+                    if len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
+                        metrics["swallowed_exceptions"].append(f"{repo_dir.name}/{rel}:{node.lineno}")
+
+            if is_test:
+                metrics["test_files"].append(f"{repo_dir.name}/{rel}")
+                low_src = src.lower()
+                if any(k in low_src for k in ("malformed", "corrupt", "invalid", "partial", "bad_")):
+                    metrics["has_malformed_tests"] = True
+                if any(k in low_src for k in ("duplicate", "replay", "idempoten")):
+                    metrics["has_duplicate_tests"] = True
+                if any(k in src for k in ("assertRaises", "pytest.raises", "assertNotEqual", "assertFalse", "assertIn", "assertNotIn")):
+                    metrics["has_negative_tests"] = True
+
+                for node in ast.walk(tree):
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+                        metrics["test_count"] += 1
+                        dec_names = " ".join(ast.unparse(d) for d in node.decorator_list) if node.decorator_list else ""
+                        if "skip" in dec_names.lower():
+                            metrics["skipped_tests_in_code"].append(f"{repo_dir.name}/{rel}:{node.name}")
+
+                        has_assertion = False
+                        only_trivial = True
+                        for sub in ast.walk(node):
+                            if isinstance(sub, ast.Assert):
+                                has_assertion = True
+                                test_expr = sub.test
+                                if isinstance(test_expr, ast.Constant) and test_expr.value is True:
+                                    metrics["weak_assertions"].append(f"{repo_dir.name}/{rel}:{sub.lineno}: assert True")
+                                elif isinstance(test_expr, ast.Compare) and len(test_expr.ops) == 1 and isinstance(test_expr.ops[0], ast.Eq):
+                                    left_s = ast.unparse(test_expr.left)
+                                    right_s = ast.unparse(test_expr.comparators[0])
+                                    if left_s == right_s:
+                                        metrics["self_comparison_tautologies"].append(
+                                            f"{repo_dir.name}/{rel}:{sub.lineno}: {left_s} == {right_s}"
+                                        )
+                                else:
+                                    only_trivial = False
+                                    metrics["has_positive_tests"] = True
+                            elif isinstance(sub, ast.Call):
+                                callee = ast.unparse(sub.func)
+                                if "assert" in callee or "pytest.raises" in callee or "fail" in callee:
+                                    has_assertion = True
+                                    only_trivial = False
+                                    metrics["has_positive_tests"] = True
+                                if "skip" in callee.lower() and ("pytest.skip" in callee or "skipTest" in callee):
+                                    metrics["skipped_tests_in_code"].append(f"{repo_dir.name}/{rel}:{sub.lineno}")
+                        if not has_assertion and not dec_names:
+                            metrics["weak_assertions"].append(f"{repo_dir.name}/{rel}:{node.lineno}: {node.name} has zero assertions")
+                        elif has_assertion and only_trivial and f"{repo_dir.name}/{rel}" not in [w.split(":")[0] for w in metrics["weak_assertions"]]:
+                            pass
+
+    return metrics
+
+
+def _collect_rubric_context(
+    workspace_root: Path,
+    task_id: str,
+    attempt: int,
+    repo_dirs: Optional[List[Path]] = None,
+    existing_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Gather comprehensive live workspace, controls, git, AST, and artifact context in a single fast pass."""
+    from stagecheck.core.git import run_safe_git
+    from stagecheck.core.prompt_gate import is_path_in_scope
+    from stagecheck.core.start_manifest import verify_spec_manifest
+
+    root = workspace_root.resolve()
+    if repo_dirs is None:
+        r_base = root / "repos"
+        repo_dirs = [d for d in sorted(r_base.iterdir()) if d.is_dir() and not d.name.startswith(".")] if r_base.is_dir() else []
+
+    attempt_dir = resolve_task_attempt_dir(root, task_id, attempt)
+    p1_dir = attempt_dir / "Phase-1"
+    p2a_dir = attempt_dir / "Phase-2A"
+    p2b_dir = attempt_dir / "Phase-2B"
+    p3_dir = attempt_dir / "Phase-3"
+
+    # Controls & specs
+    active_state, active_state_err = _safe_load_json(root / "controls" / "ACTIVE_STATE.json")
+    if active_state is not None:
+        try:
+            validate_active_state(active_state)
+        except Exception as err:
+            active_state_err = str(err)
+
+    prod_repos, prod_repos_err = _safe_load_json(root / "controls" / "PRODUCT_REPOSITORIES.json")
+    dispositions_doc, _ = _safe_load_json(root / "controls" / "DISPOSITIONS.json")
+    agents_md_path = root / "AGENTS.md"
+    legacy_agents_md_path = root / "controls" / "AGENTS.md"
+    agents_md_ok = (
+        (agents_md_path.is_file() and agents_md_path.stat().st_size > 0)
+        or (legacy_agents_md_path.is_file() and legacy_agents_md_path.stat().st_size > 0)
+    )
+    owner_grants_ok = (root / "controls" / "OWNER_GRANTS.md").is_file()
+    start_manifest_ok = False
+    start_manifest_err: Optional[str] = None
+    manifest_file = root / "specs" / "START_MANIFEST.md"
+    if manifest_file.is_file():
+        try:
+            m_res = verify_spec_manifest(root)
+            start_manifest_ok = bool(m_res.get("valid"))
+            if not start_manifest_ok:
+                problems = (m_res.get("missing") or []) + [
+                    f"tampered:{t.get('file')}" for t in (m_res.get("tampered") or [])
+                ] + (m_res.get("unregistered") or [])
+                start_manifest_err = "; ".join(problems[:3]) or str(m_res.get("error") or "START_MANIFEST verification failed")
+        except Exception as err:
+            start_manifest_err = str(err)
+    else:
+        start_manifest_err = "Missing specs/START_MANIFEST.md"
+
+    # Phase artifacts
+    prompt_md_ok = (p1_dir / "prompt.md").is_file() and (p1_dir / "prompt.md").stat().st_size > 0
+    declared_scope, declared_scope_err = _safe_load_json(p1_dir / "declared_scope.json")
+    if declared_scope is not None:
+        try:
+            validate_schema(declared_scope, _get_cached_schema("declared_scope.schema.json"))
+        except Exception as err:
+            declared_scope_err = str(err)
+    prompt_verified, prompt_verified_err = _safe_load_json(p1_dir / "prompt_verified.json")
+    if prompt_verified is not None and prompt_md_ok and (p1_dir / "declared_scope.json").is_file():
+        exp_p = prompt_verified.get("prompt_sha256")
+        if exp_p and exp_p != sha256_file(p1_dir / "prompt.md"):
+            prompt_verified_err = "prompt.md modified after prompt_verified.json freeze"
+        exp_s = prompt_verified.get("scope_sha256")
+        if exp_s and exp_s != sha256_file(p1_dir / "declared_scope.json"):
+            prompt_verified_err = "declared_scope.json modified after prompt_verified.json freeze"
+
+    pre_commit_status, pre_commit_status_err = _safe_load_json(p2a_dir / "pre_commit_status.json")
+    pre_commit_review, pre_commit_review_err = _safe_load_json(p2a_dir / "pre_commit_review.json")
+    agent_reviews_doc, _ = _safe_load_json(p2a_dir / "agent_reviews.json")
+
+    report_md_ok = (p2b_dir / "report.md").is_file() and (p2b_dir / "report.md").stat().st_size > 0
+    claims_doc, claims_err = _safe_load_json(p2b_dir / "claims.json")
+    if claims_doc is not None and isinstance(claims_doc.get("claims"), list):
+        try:
+            validate_schema(claims_doc, _get_cached_schema("claims.schema.json"))
+        except Exception as err:
+            claims_err = str(err)
+
+    test_execution_doc, _ = _safe_load_json(p3_dir / "test_execution.json")
+    scanner_report_doc, _ = _safe_load_json(p3_dir / "scanner_report.json")
+    verdict_doc, _ = _safe_load_json(p3_dir / "verdict.json")
+    issue_history_file = root / "evidence" / "issue_history.json"
+    task_history_md = root / "evidence" / "tasks" / task_id / f"TASK_{task_id}_ISSUE_HISTORY.md"
+    if issue_history_file.is_file():
+        issue_history_doc, issue_history_err = _safe_load_json(issue_history_file)
+    elif task_history_md.is_file():
+        issue_history_doc, issue_history_err = {"format": "markdown"}, None
+    elif (root / "evidence").is_dir() and int(attempt) == 1:
+        issue_history_doc, issue_history_err = {"issues": []}, None
+    else:
+        issue_history_doc, issue_history_err = None, "Missing artifact 'issue_history.json'"
+    ev_manifest_doc, _ = _safe_load_json(root / "evidence" / "EVIDENCE_MANIFEST.json")
+
+    # Dispositions / Human Waivers for active task
+    approved_waivers: Dict[str, Dict[str, Any]] = {}
+    if isinstance(dispositions_doc, dict):
+        for entry in dispositions_doc.get("dispositions", []):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("status") != "APPROVED" or entry.get("task_id") != task_id:
+                continue
+            if not entry.get("rationale") or not entry.get("authorized_by"):
+                continue
+            target_ids: List[str] = []
+            for key in ("rule_id", "defect_id"):
+                val = entry.get(key)
+                if isinstance(val, str) and val:
+                    target_ids.append(val)
+            waived_list = entry.get("waived_rules")
+            if isinstance(waived_list, list):
+                target_ids.extend(str(x) for x in waived_list if x)
+            for tid in target_ids:
+                approved_waivers[tid] = {
+                    "disposition_id": entry.get("disposition_id"),
+                    "authorized_by": entry.get("authorized_by"),
+                    "rationale": entry.get("rationale"),
+                    "evidence_path": "controls/DISPOSITIONS.json",
+                }
+
+    # Agent-assisted review records from pre_commit_review.json / agent_reviews.json
+    recorded_agent_reviews: Dict[str, Any] = {}
+    for src_doc, src_path in (
+        (pre_commit_review, "Phase-2A/pre_commit_review.json"),
+        (agent_reviews_doc, "Phase-2A/agent_reviews.json"),
+    ):
+        if isinstance(src_doc, dict):
+            mapping = src_doc.get("agent_assisted_reviews") or src_doc.get("reviews")
+            if isinstance(mapping, dict):
+                for rid, rinfo in mapping.items():
+                    if isinstance(rinfo, dict):
+                        entry_copy = dict(rinfo)
+                        entry_copy.setdefault("evidence_path", src_path)
+                        recorded_agent_reviews[rid] = entry_copy
+                    else:
+                        recorded_agent_reviews[rid] = {"status": str(rinfo), "evidence_path": src_path}
+
+    # Touched repos
+    touched_repo_names: Optional[Set[str]] = None
+    if isinstance(pre_commit_status, dict) and isinstance(pre_commit_status.get("touched_repositories"), list):
+        touched_repo_names = set(pre_commit_status["touched_repositories"])
+
+    # Git, secrets, dependencies, AST inspection across repositories
+    uncommitted_diffs: Dict[str, str] = {}
+    untouched_dirty: List[str] = []
+    out_of_scope_files: List[str] = []
+    secrets_found: List[str] = []
+    unpinned_dependencies: List[str] = []
+    rogue_scanner_configs: List[str] = []
+    symlink_escapes: List[str] = []
+    repo_heads: Dict[str, str] = {}
+    removed_assertions: List[str] = []
+    agg_ast: Dict[str, Any] = {
+        "syntax_errors": [],
+        "resource_leak_files": [],
+        "swallowed_exceptions": [],
+        "unsafe_patterns": [],
+        "eval_imports_in_repo": [],
+        "qual_in_prod": [],
+        "test_count": 0,
+        "test_files": [],
+        "weak_assertions": [],
+        "skipped_tests_in_code": [],
+        "flaky_sleep_detected": [],
+        "has_positive_tests": False,
+        "has_negative_tests": False,
+        "has_malformed_tests": False,
+        "has_duplicate_tests": False,
+        "self_comparison_tautologies": [],
+    }
+
+    registered_repos = prod_repos.get("repositories", {}) if isinstance(prod_repos, dict) else {}
+    for r_name, meta in registered_repos.items():
+        r_rel = meta.get("path", f"repos/{r_name}")
+        cand = root / r_rel
+        if cand.is_symlink():
+            symlink_escapes.append(f"{r_rel} (symlinked repository root)")
+
+    for r_dir in repo_dirs:
+        unpinned_dependencies.extend(_scan_dependencies(r_dir))
+        if (r_dir / ".gitleaks.toml").exists():
+            rogue_scanner_configs.append(f"repos/{r_dir.name}/.gitleaks.toml")
+
+        repo_ast = _analyze_python_repo_files(r_dir)
+        for k in (
+            "syntax_errors", "resource_leak_files", "swallowed_exceptions", "unsafe_patterns",
+            "eval_imports_in_repo", "qual_in_prod", "test_files", "weak_assertions",
+            "skipped_tests_in_code", "flaky_sleep_detected", "self_comparison_tautologies",
+        ):
+            agg_ast[k].extend(repo_ast[k])
+        agg_ast["test_count"] += repo_ast["test_count"]
+        for flag in ("has_positive_tests", "has_negative_tests", "has_malformed_tests", "has_duplicate_tests"):
+            agg_ast[flag] = agg_ast[flag] or repo_ast[flag]
+
+        if (r_dir / ".git").exists():
+            try:
+                head_res = run_safe_git(r_dir, ["rev-parse", "HEAD"])
+                if head_res.returncode == 0:
+                    repo_heads[r_dir.name] = head_res.stdout.strip()
+                res = run_safe_git(r_dir, ["status", "--porcelain=v1", "--untracked-files=all"])
+                if res.returncode == 0 and res.stdout.strip():
+                    uncommitted_diffs[r_dir.name] = res.stdout.strip()
+                    if touched_repo_names is not None and r_dir.name not in touched_repo_names:
+                        untouched_dirty.append(r_dir.name)
+                    for line in res.stdout.splitlines():
+                        if not line.strip():
+                            continue
+                        rel_p = line[3:].strip()
+                        if " -> " in rel_p:
+                            rel_p = rel_p.split(" -> ")[1].strip()
+                        ws_rel = f"repos/{r_dir.name}/{rel_p}"
+                        if declared_scope and not is_path_in_scope(ws_rel, declared_scope):
+                            out_of_scope_files.append(ws_rel)
+                        fpath = r_dir / rel_p
+                        if fpath.is_symlink():
+                            try:
+                                fpath.resolve().relative_to(r_dir.resolve())
+                            except ValueError:
+                                symlink_escapes.append(ws_rel)
+                        if fpath.is_file() and not fpath.is_symlink() and fpath.stat().st_size <= 1024 * 1024:
+                            if _SECRET_RE.search(fpath.read_text(encoding="utf-8", errors="ignore")):
+                                secrets_found.append(ws_rel)
+                # Inspect committed task branch diff scope vs baseline_head
+                base_sha = registered_repos.get(r_dir.name, {}).get("baseline_head")
+                cur_sha = repo_heads.get(r_dir.name)
+                if base_sha and cur_sha and base_sha.lower() != cur_sha.lower():
+                    d_names = run_safe_git(r_dir, ["diff", "--name-only", f"{base_sha}..{cur_sha}"])
+                    if d_names.returncode == 0:
+                        for changed_rel in d_names.stdout.splitlines():
+                            changed_rel = changed_rel.strip()
+                            if not changed_rel:
+                                continue
+                            ws_rel = f"repos/{r_dir.name}/{changed_rel}"
+                            if declared_scope and not is_path_in_scope(ws_rel, declared_scope):
+                                if ws_rel not in out_of_scope_files:
+                                    out_of_scope_files.append(ws_rel)
+                    diff_patch = run_safe_git(r_dir, ["diff", "-U0", f"{base_sha}..{cur_sha}"])
+                    if diff_patch.returncode == 0:
+                        for dline in diff_patch.stdout.splitlines():
+                            if dline.startswith("-") and not dline.startswith("---") and ("assert" in dline or "pytest.raises" in dline):
+                                removed_assertions.append(f"{r_dir.name}: {dline[1:].strip()[:80]}")
+            except Exception:
+                pass
+
+    if isinstance(scanner_report_doc, dict):
+        for d in scanner_report_doc.get("defects", []):
+            if d.get("blocking"):
+                secrets_found.append(d.get("message", d.get("defect_id", "secret_detected")))
+        if scanner_report_doc.get("status") == "FAILED" and not secrets_found:
+            secrets_found.append("Phase-3/scanner_report.json status FAILED")
+
+    ctx: Dict[str, Any] = {
+        "_collected": True,
+        "task_id": task_id,
+        "attempt": attempt,
+        "repo_dirs": repo_dirs,
+        "active_state": active_state,
+        "active_state_err": active_state_err,
+        "prod_repos": prod_repos,
+        "prod_repos_err": prod_repos_err,
+        "agents_md_ok": agents_md_ok,
+        "owner_grants_ok": owner_grants_ok,
+        "start_manifest_ok": start_manifest_ok,
+        "start_manifest_err": start_manifest_err,
+        "prompt_md_ok": prompt_md_ok,
+        "declared_scope": declared_scope,
+        "declared_scope_err": declared_scope_err,
+        "prompt_verified": prompt_verified,
+        "prompt_verified_err": prompt_verified_err,
+        "pre_commit_status": pre_commit_status,
+        "pre_commit_status_err": pre_commit_status_err,
+        "pre_commit_review": pre_commit_review,
+        "pre_commit_review_err": pre_commit_review_err,
+        "report_md_ok": report_md_ok,
+        "claims_doc": claims_doc,
+        "claims_err": claims_err,
+        "test_execution_doc": test_execution_doc,
+        "scanner_report_doc": scanner_report_doc,
+        "verdict_doc": verdict_doc,
+        "issue_history_doc": issue_history_doc,
+        "issue_history_err": issue_history_err,
+        "ev_manifest_doc": ev_manifest_doc,
+        "human_waivers": approved_waivers,
+        "agent_reviews": recorded_agent_reviews,
+        "uncommitted_diffs": uncommitted_diffs,
+        "untouched_dirty": untouched_dirty,
+        "out_of_scope_files": out_of_scope_files,
+        "secrets_found": secrets_found,
+        "unpinned_dependencies": unpinned_dependencies,
+        "rogue_scanner_configs": rogue_scanner_configs,
+        "symlink_escapes": symlink_escapes,
+        "repo_heads": repo_heads,
+        "removed_assertions": removed_assertions,
+        "ast_metrics": agg_ast,
+        "flaky_sleep_detected": list(agg_ast["flaky_sleep_detected"]),
+    }
+
+    if existing_context:
+        # Merge list/dict inputs cleanly while keeping explicit caller context authoritative
+        for k, v in existing_context.items():
+            if k == "human_waivers" and isinstance(v, dict):
+                merged = dict(approved_waivers)
+                merged.update(v)
+                ctx[k] = merged
+            elif k == "agent_reviews" and isinstance(v, dict):
+                merged = dict(recorded_agent_reviews)
+                merged.update(v)
+                ctx[k] = merged
+            elif k in ("unpinned_dependencies", "out_of_scope_files", "untouched_dirty", "secrets_found", "flaky_sleep_detected") and isinstance(v, list):
+                ctx[k] = list(ctx[k]) + list(v)
+            else:
+                ctx[k] = v
+
+    return ctx
+
+
+def _evaluate_human_waiver(rule: RubricRule, ctx: Dict[str, Any]) -> RuleEvaluationResult:
+    """Strictly validate human disposition authorization from controls/DISPOSITIONS.json or explicit context."""
+    task_id = ctx.get("task_id", "task-default")
+    if rule.rule_id in ctx.get("failed_human_waivers", []):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id,
+            domain=rule.domain,
+            category=rule.category,
+            status="FAIL",
+            evaluator="human_waiver_evaluator",
+            witness="controls/DISPOSITIONS.json",
+            message=f"Human disposition explicitly rejected for '{rule.rule_id}'.",
+        )
+    waivers = ctx.get("human_waivers", {})
+    if isinstance(waivers, dict) and (rule.rule_id in waivers or "*" in waivers):
+        waiver_info = waivers.get(rule.rule_id) or waivers.get("*") or {}
+        if not isinstance(waiver_info, dict):
+            waiver_info = {}
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id,
+            domain=rule.domain,
+            category=rule.category,
+            status="PASS",
+            evaluator="human_waiver_evaluator",
+            witness=waiver_info.get("evidence_path", "controls/DISPOSITIONS.json"),
+            message=f"Human waiver authorized: {waiver_info.get('rationale', 'Approved by operator')}.",
+        )
+    return RuleEvaluationResult(
+        rule_id=rule.rule_id,
+        domain=rule.domain,
+        category=rule.category,
+        status="BLOCKED",
+        evaluator="human_waiver_evaluator",
+        witness="controls/DISPOSITIONS.json",
+        message=(
+            f"Human disposition required for '{rule.rule_id}' ({rule.title}) "
+            f"but no APPROVED waiver exists for task '{task_id}' in controls/DISPOSITIONS.json."
+        ),
+    )
+
+
+def _evaluate_agent_assisted(rule: RubricRule, ctx: Dict[str, Any]) -> RuleEvaluationResult:
+    """Validate real recorded Agent-Assisted review entries; never auto-pass when missing."""
+    if rule.rule_id in ctx.get("missing_agent_reviews", []):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id,
+            domain=rule.domain,
+            category=rule.category,
+            status="NOT_EVALUATED",
+            evaluator="agent_assisted_evaluator",
+            witness="Phase-2A/pre_commit_review.json",
+            message=f"Agent-assisted review evidence missing for rule '{rule.rule_id}'.",
+        )
+
+    reviews = ctx.get("agent_reviews", {})
+    entry = reviews.get(rule.rule_id) if isinstance(reviews, dict) else None
+    if not entry:
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id,
+            domain=rule.domain,
+            category=rule.category,
+            status="NOT_EVALUATED",
+            evaluator="agent_assisted_evaluator",
+            witness="Phase-2A/pre_commit_review.json",
+            message=f"No recorded Agent 1 semantic review found for '{rule.rule_id}' ({rule.title}).",
+        )
+
+    if isinstance(entry, dict):
+        r_status = str(entry.get("status", "")).upper()
+        rationale = str(entry.get("rationale") or entry.get("summary") or entry.get("message") or "").strip()
+        ev_path = str(entry.get("evidence_path") or entry.get("witness") or "Phase-2A/pre_commit_review.json")
+    else:
+        r_status = str(entry).upper()
+        rationale = "Recorded agent assessment"
+        ev_path = "Phase-2A/pre_commit_review.json"
+
+    if r_status == "NOT_APPLICABLE":
+        raise InvalidRubricExemptionError(
+            f"Illegal agent self-exemption attempted for '{rule.rule_id}': agents cannot mark AGENT_ASSISTED rules NOT_APPLICABLE."
+        )
+    if r_status in ("FAIL", "FAILED", "BLOCKING", "REVISION_REQUIRED", "REJECTED"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id,
+            domain=rule.domain,
+            category=rule.category,
+            status="FAIL",
+            evaluator="agent_assisted_evaluator",
+            witness=ev_path,
+            message=rationale or f"Agent-assisted review reported failure on '{rule.rule_id}'.",
+        )
+    if r_status == "BLOCKED":
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id,
+            domain=rule.domain,
+            category=rule.category,
+            status="BLOCKED",
+            evaluator="agent_assisted_evaluator",
+            witness=ev_path,
+            message=rationale or f"Agent-assisted review blocked on '{rule.rule_id}'.",
+        )
+    if r_status in ("PASS", "PASSED", "APPROVED", "CLEAR") and rationale:
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id,
+            domain=rule.domain,
+            category=rule.category,
+            status="PASS",
+            evaluator="agent_assisted_evaluator",
+            witness=ev_path,
+            message=f"Agent-assisted review verified ({rule.title}): {rationale}",
+        )
+    return RuleEvaluationResult(
+        rule_id=rule.rule_id,
+        domain=rule.domain,
+        category=rule.category,
+        status="NOT_EVALUATED",
+        evaluator="agent_assisted_evaluator",
+        witness=ev_path,
+        message=f"Agent-assisted review entry for '{rule.rule_id}' is incomplete or UNKNOWN.",
+    )
+
+
+def _ev_fail(rule: RubricRule, artifact: str, message: str) -> RuleEvaluationResult:
+    return RuleEvaluationResult(
+        rule_id=rule.rule_id,
+        domain=rule.domain,
+        category=rule.category,
+        status="FAIL",
+        evaluator="phase_evidence_validator",
+        artifact=artifact,
+        witness=artifact,
+        message=message,
+    )
+
+
+def _ev_pass(rule: RubricRule, artifact: str, message: str) -> RuleEvaluationResult:
+    return RuleEvaluationResult(
+        rule_id=rule.rule_id,
+        domain=rule.domain,
+        category=rule.category,
+        status="PASS",
+        evaluator="phase_evidence_validator",
+        artifact=artifact,
+        witness=artifact,
+        message=message,
+    )
+
+
+def _has_distinct_agent_roles(active: Optional[Dict[str, Any]]) -> bool:
+    """Return True if ACTIVE_STATE.json configures distinct producer/reviewer or valid agent identities."""
+    if not isinstance(active, dict):
+        return False
+    a1 = active.get("agent1")
+    a2 = active.get("agent2")
+    if a1 and a2 and a1 != a2:
+        return True
+    agents = active.get("registered_agents")
+    if not agents and isinstance(active.get("protected"), dict):
+        agents = active["protected"].get("registered_agents")
+    if not isinstance(agents, list) or not agents:
+        return False
+    auditors = {a.get("name") for a in agents if isinstance(a, dict) and a.get("role") == "prompt_and_audit" and a.get("name")}
+    coders = {a.get("name") for a in agents if isinstance(a, dict) and a.get("role") == "code_implementation" and a.get("name")}
+    if auditors and coders and auditors != coders:
+        return True
+    is_single = bool(active.get("single_agent_mode")) or (
+        isinstance(active.get("protected"), dict) and bool(active["protected"].get("single_agent_mode"))
+    )
+    if is_single and any(isinstance(a, dict) and a.get("role") == "dual_role" and a.get("name") for a in agents):
+        return True
+    return False
+
+
+def _has_execution_record(ctx: Dict[str, Any]) -> Tuple[bool, bool, str]:
+    """Return (present, passed, artifact_label) for Phase-3/orchestrator test execution."""
+    if isinstance(ctx.get("rerun_results"), dict):
+        rr = ctx["rerun_results"]
+        ok = rr.get("status") in ("PASS", "PASSED", "CLEAR") and not rr.get("errors")
+        return True, ok, "Phase-3/test_execution.json"
+    tex = ctx.get("test_execution_doc")
+    if isinstance(tex, dict):
+        st = str(tex.get("status", "")).upper()
+        ok = st in ("PASS", "PASSED", "CLEAR")
+        if not ok and isinstance(tex.get("repositories"), dict):
+            ok = bool(tex["repositories"]) and all(
+                isinstance(v, dict) and v.get("exit_code", 0) == 0 and str(v.get("status", "")).upper() in ("PASS", "PASSED")
+                for v in tex["repositories"].values()
+            )
+        return True, ok, "Phase-3/test_execution.json"
+    return False, False, "Phase-3/test_execution.json"
+
+
+def _evaluate_evidence_rule(rule: RubricRule, workspace_root: Path, ctx: Dict[str, Any]) -> RuleEvaluationResult:
+    """Validate real workspace/phase evidence artifacts for each of the 64 EVIDENCE rules."""
+    missing_list = ctx.get("missing_evidence", [])
+    if rule.rule_id in missing_list or "*" in missing_list:
+        return _ev_fail(
+            rule,
+            rule.primary_witness or "evidence_artifact",
+            f"Missing required evidence artifact for rule '{rule.rule_id}'.",
+        )
+
+    rid = rule.rule_id
+    dom = rule.domain
+    ast_m = ctx.get("ast_metrics", {})
+    active = ctx.get("active_state")
+    scope = ctx.get("declared_scope")
+    p2a_stat = ctx.get("pre_commit_status")
+    p2a_rev = ctx.get("pre_commit_review")
+    claims_doc = ctx.get("claims_doc") or ctx.get("claims")
+    verdict_doc = ctx.get("verdict_doc")
+    exec_present, exec_ok, exec_art = _has_execution_record(ctx)
+
+    # Pre-check general structural violations where relevant
+    if ctx.get("out_of_scope_files"):
+        out_f = ctx["out_of_scope_files"][0]
+    else:
+        out_f = None
+
+    if dom == "ORCHESTRATOR":
+        if rid == "ORCHESTRATOR-001":
+            if not active or not ctx.get("prod_repos") or not scope:
+                return _ev_fail(rule, "Phase-1/declared_scope.json", "Missing active state, registered repos, or declared_scope.json.")
+            if scope.get("task_id") != ctx.get("task_id"):
+                return _ev_fail(rule, "Phase-1/declared_scope.json", "declared_scope.json task_id does not match active task.")
+            return _ev_pass(rule, "controls/ACTIVE_STATE.json", "Launcher task, repository, and scope bindings verified.")
+        if rid == "ORCHESTRATOR-002":
+            if ctx.get("symlink_escapes"):
+                return _ev_fail(rule, "controls/PRODUCT_REPOSITORIES.json", f"Repository symlink boundary violation: {ctx['symlink_escapes'][0]}")
+            if not ctx.get("prod_repos"):
+                return _ev_fail(rule, "controls/PRODUCT_REPOSITORIES.json", ctx.get("prod_repos_err") or "Missing PRODUCT_REPOSITORIES.json")
+            return _ev_pass(rule, "controls/PRODUCT_REPOSITORIES.json", "Repository roots verified inside governed repos/ tree.")
+        if rid == "ORCHESTRATOR-003":
+            if not p2a_stat:
+                return _ev_fail(rule, "Phase-2A/pre_commit_status.json", ctx.get("pre_commit_status_err") or "Missing Phase-2A/pre_commit_status.json.")
+            if not p2a_stat.get("base_commits"):
+                return _ev_fail(rule, "Phase-2A/pre_commit_status.json", "pre_commit_status.json missing retained base_commits.")
+            return _ev_pass(rule, "Phase-2A/pre_commit_status.json", "Baseline HEAD and base_commits identities retained.")
+        if rid == "ORCHESTRATOR-004":
+            if not scope:
+                return _ev_fail(rule, "Phase-1/declared_scope.json", ctx.get("declared_scope_err") or "Missing declared_scope.json.")
+            if out_f:
+                return _ev_fail(rule, out_f, f"Out-of-scope change detected in inventory: {out_f}")
+            return _ev_pass(rule, "Phase-1/declared_scope.json", "Staged, unstaged, and untracked change inventory contained in scope.")
+        if rid in ("ORCHESTRATOR-005", "ORCHESTRATOR-006", "ORCHESTRATOR-008"):
+            if not ctx.get("start_manifest_ok"):
+                return _ev_fail(rule, "specs/START_MANIFEST.md", f"Manifest verification failed: {ctx.get('start_manifest_err')}")
+            return _ev_pass(rule, "specs/START_MANIFEST.md", f"Control and tool identities verified under START_MANIFEST ({rule.title}).")
+        if rid == "ORCHESTRATOR-007":
+            if not active or ctx.get("active_state_err"):
+                return _ev_fail(rule, "controls/ACTIVE_STATE.json", ctx.get("active_state_err") or "Missing ACTIVE_STATE.json")
+            return _ev_pass(rule, "controls/ACTIVE_STATE.json", "ACTIVE_STATE.json conforms to schema and active task binding.")
+        if rid in ("ORCHESTRATOR-009", "ORCHESTRATOR-010"):
+            if not ctx.get("agents_md_ok"):
+                return _ev_fail(rule, "controls/AGENTS.md", "Missing or empty controls/AGENTS.md governance contract.")
+            return _ev_pass(rule, "controls/AGENTS.md", f"Orchestrator governance contract and manuals verified ({rule.title}).")
+        if rid in ("ORCHESTRATOR-011", "ORCHESTRATOR-012", "ORCHESTRATOR-013"):
+            sr = ctx.get("stage_results")
+            if isinstance(sr, list):
+                if len(sr) < 9:
+                    return _ev_fail(rule, "Phase-3/verdict.json", f"Only {len(sr)}/9 deterministic audit stages executed.")
+                errs = [e for s in sr for e in (s.get("errors") or [])]
+                if errs:
+                    return _ev_fail(rule, "Phase-3/test_execution.json", f"Stage execution errors present: {errs[0]}")
+                return _ev_pass(rule, "Phase-3/verdict.json", f"All 9 deterministic stages verified cleanly ({rule.title}).")
+            if verdict_doc and exec_present:
+                if not exec_ok:
+                    return _ev_fail(rule, exec_art, "Retained execution evidence indicates failed or errored run.")
+                return _ev_pass(rule, "Phase-3/verdict.json", f"Retained Phase-3 audit and execution records consistent ({rule.title}).")
+            return _ev_fail(rule, "Phase-3/verdict.json", "Missing Phase-3 execution and verdict evidence.")
+        if rid == "ORCHESTRATOR-014":
+            if not active or not ctx.get("agents_md_ok"):
+                return _ev_fail(rule, "controls/AGENTS.md", "Missing binding/governance controls.")
+            return _ev_pass(rule, "controls/DISPOSITIONS.json", "Binding descriptors remain owner-governed.")
+        if rid == "ORCHESTRATOR-015":
+            if not _has_distinct_agent_roles(active):
+                return _ev_fail(rule, "controls/ACTIVE_STATE.json", "Distinct agent identities/roles missing in ACTIVE_STATE.json.")
+            return _ev_pass(rule, "controls/ACTIVE_STATE.json", "Agent role selection and separation verified.")
+        if rid == "ORCHESTRATOR-016":
+            if ctx.get("secrets_found"):
+                return _ev_fail(rule, ctx["secrets_found"][0], f"Secret scan blocking finding: {ctx['secrets_found'][0]}")
+            if not ctx.get("rogue_scanner_configs") and (ctx.get("scanner_report_doc") or ctx.get("stage_results")):
+                return _ev_pass(rule, "Phase-3/scanner_report.json", "Preflight, configuration, and secret scan clean prior to acceptance.")
+            if ctx.get("rogue_scanner_configs"):
+                return _ev_fail(rule, ctx["rogue_scanner_configs"][0], "Unauthorized repository .gitleaks.toml override detected.")
+            return _ev_fail(rule, "Phase-3/scanner_report.json", "Missing Phase-3/scanner_report.json secret scan evidence.")
+
+    if dom == "CLAIM_SUPPORT":
+        if not ctx.get("report_md_ok"):
+            return _ev_fail(rule, "Phase-2B/report.md", "Missing or empty delivery report Phase-2B/report.md.")
+        if not claims_doc or ctx.get("claims_err"):
+            return _ev_fail(rule, "Phase-2B/claims.json", ctx.get("claims_err") or "Missing required claim attachment Phase-2B/claims.json.")
+        if rid == "CLAIM_SUPPORT-009" and not ctx.get("start_manifest_ok"):
+            return _ev_fail(rule, "specs/START_MANIFEST.md", f"Manifest mismatch: {ctx.get('start_manifest_err')}")
+        if rid == "CLAIM_SUPPORT-010" and not ctx.get("repo_heads"):
+            return _ev_fail(rule, "controls/PRODUCT_REPOSITORIES.json", "Missing resolved repository HEAD identities for claims.")
+        if rid in ("CLAIM_SUPPORT-011", "CLAIM_SUPPORT-012") and not (exec_present and exec_ok):
+            return _ev_fail(rule, exec_art, "Claims lack passing Phase-3/test_execution.json runtime/test proof.")
+        if rid == "CLAIM_SUPPORT-013":
+            if not _has_distinct_agent_roles(active):
+                return _ev_fail(rule, "controls/ACTIVE_STATE.json", "Independent non-producer actor identity missing.")
+        if rid == "CLAIM_SUPPORT-015" and out_f:
+            return _ev_fail(rule, out_f, f"Completion breadth violated by out-of-scope file: {out_f}")
+        if rid == "CLAIM_SUPPORT-020" and ctx.get("issue_history_err"):
+            return _ev_fail(rule, "evidence/issue_history.json", ctx["issue_history_err"])
+        return _ev_pass(rule, "Phase-2B/claims.json", f"Claim support evidence validated against Phase-2B/claims.json & report.md ({rule.title}).")
+
+    if dom == "COMMON":
+        in_p2a_precommit = (
+            isinstance(active, dict)
+            and active.get("phase") == "PHASE_2A_CODING"
+            and isinstance(p2a_stat, dict)
+            and not ctx.get("pre_commit_status_err")
+            and bool(ctx.get("agent_reviews"))
+        )
+        if rid == "COMMON-021":
+            if not _has_distinct_agent_roles(active):
+                return _ev_fail(rule, "controls/ACTIVE_STATE.json", "Missing distinct agent roles in ACTIVE_STATE.json.")
+            if p2a_rev:
+                return _ev_pass(rule, "Phase-2A/pre_commit_review.json", "Response role identity verified.")
+            if in_p2a_precommit:
+                return _ev_pass(rule, "Phase-2A/pre_commit_status.json", "Pre-commit request and reviewer identities verified.")
+            return _ev_fail(rule, "Phase-2A/pre_commit_review.json", ctx.get("pre_commit_review_err") or "Missing pre_commit_review.json.")
+        if rid == "COMMON-022":
+            if p2a_rev:
+                if p2a_rev.get("status") == "APPROVED" and p2a_rev.get("new_issues_found"):
+                    return _ev_fail(rule, "Phase-2A/pre_commit_review.json", "Review APPROVED while unresolved new_issues_found exist.")
+                return _ev_pass(rule, "Phase-2A/pre_commit_review.json", "Zero unresolved omissions under approved status.")
+            if in_p2a_precommit:
+                return _ev_pass(rule, "Phase-2A/pre_commit_status.json", "Initial pre-commit review cycle has zero unrecorded omissions.")
+            return _ev_fail(rule, "Phase-2A/pre_commit_review.json", "Missing pre_commit_review.json to verify unresolved omissions.")
+        if rid == "COMMON-023":
+            if not scope or ctx.get("declared_scope_err"):
+                return _ev_fail(rule, "Phase-1/declared_scope.json", ctx.get("declared_scope_err") or "Missing declared_scope.json.")
+            if not claims_doc or ctx.get("claims_err"):
+                return _ev_fail(rule, "Phase-2B/claims.json", ctx.get("claims_err") or "Missing Phase-2B/claims.json citations.")
+            return _ev_pass(rule, "Phase-2B/claims.json", "Citation resolution integrity verified without promoted faults.")
+        if rid == "COMMON-024":
+            if not exec_present:
+                return _ev_fail(rule, exec_art, "Missing execution evidence separating faults from product defects.")
+            if not exec_ok:
+                return _ev_fail(rule, exec_art, "Execution errors or test failures recorded.")
+            return _ev_pass(rule, exec_art, "Execution status and defect reporting separated cleanly.")
+        if rid == "COMMON-025":
+            if not ctx.get("start_manifest_ok"):
+                return _ev_fail(rule, "specs/START_MANIFEST.md", f"Context continuity breach: {ctx.get('start_manifest_err')}")
+            if not ctx.get("prompt_verified") or ctx.get("prompt_verified_err"):
+                return _ev_fail(rule, "Phase-1/prompt_verified.json", ctx.get("prompt_verified_err") or "Missing prompt_verified.json.")
+            return _ev_pass(rule, "Phase-1/prompt_verified.json", "Manifest and prompt hashes match current workspace bytes.")
+        if rid == "COMMON-026":
+            if not scope or ctx.get("declared_scope_err"):
+                return _ev_fail(rule, "Phase-1/declared_scope.json", ctx.get("declared_scope_err") or "Missing declared_scope.json.")
+            if out_f or ctx.get("untouched_dirty"):
+                return _ev_fail(rule, out_f or "git_status", "Work escaped configured scope boundaries.")
+            return _ev_pass(rule, "Phase-1/declared_scope.json", "Review and modifications bounded to declared scope.")
+        if rid == "COMMON-027":
+            if not p2a_stat or not ctx.get("prod_repos"):
+                return _ev_fail(rule, "Phase-2A/pre_commit_status.json", "Missing concrete repository/touched enumeration.")
+            return _ev_pass(rule, "Phase-2A/pre_commit_status.json", "Concrete repository and touched-surface enumeration verified.")
+        if rid == "COMMON-028":
+            if ctx.get("symlink_escapes") or ast_m.get("test_count", 0) == 0 or not ast_m.get("has_negative_tests"):
+                return _ev_fail(rule, "Phase-1/declared_scope.json", "Missing negative boundary tests or path-escape counterexample violation.")
+            return _ev_pass(rule, "Phase-1/declared_scope.json", "In-scope counterexample and negative guard checks verified.")
+        if rid == "COMMON-029":
+            if not ctx.get("agents_md_ok"):
+                return _ev_fail(rule, "controls/AGENTS.md", "Missing AGENTS.md governance contract.")
+            return _ev_pass(rule, "controls/DISPOSITIONS.json", "Promotion and binding remain strictly owner-governed.")
+        if rid == "COMMON-030":
+            if not (exec_present or verdict_doc):
+                return _ev_fail(rule, "Phase-3/verdict.json", "Missing Phase-3 verdict/execution evidence for consistency verification.")
+            if verdict_doc and verdict_doc.get("result") in ("CLEAR", "PASSED") and verdict_doc.get("counts", {}).get("blocking", 0) > 0:
+                return _ev_fail(rule, "Phase-3/verdict.json", "Inconsistent verdict: CLEAR/PASSED with nonzero blocking defects.")
+            return _ev_pass(rule, "Phase-3/verdict.json", "Findings, omissions, and verdict status verified consistent.")
+
+    if dom == "TEST_ADEQUACY":
+        if not exec_present:
+            return _ev_fail(rule, exec_art, f"Missing execution evidence in Phase-3/test_execution.json for '{rule.title}'.")
+        if rid == "TEST_ADEQUACY-027":
+            if ctx.get("unpinned_dependencies") or not ctx.get("start_manifest_ok"):
+                return _ev_fail(rule, "specs/START_MANIFEST.md", "Environment manifest or dependency pinning invalid.")
+        if rid == "TEST_ADEQUACY-028" and ast_m.get("syntax_errors"):
+            return _ev_fail(rule, ast_m["syntax_errors"][0], f"Test/source syntax failure: {ast_m['syntax_errors'][0]}")
+        if not exec_ok:
+            return _ev_fail(rule, exec_art, f"Test execution reported failures or unexecuted suites for '{rule.title}'.")
+        return _ev_pass(rule, exec_art, f"Test execution evidence verified for '{rule.title}'.")
+
+    if dom == "INDEPENDENT_RERUN":
+        if rid in ("INDEPENDENT_RERUN-026", "INDEPENDENT_RERUN-027", "INDEPENDENT_RERUN-029"):
+            if not exec_present or not exec_ok:
+                return _ev_fail(rule, exec_art, f"Missing or failing rerun execution evidence for '{rule.title}'.")
+            if rid == "INDEPENDENT_RERUN-027" and not (ctx.get("report_md_ok") or p2a_rev):
+                return _ev_fail(rule, "Phase-2B/report.md", "Missing report/review record alongside rerun evidence.")
+            return _ev_pass(rule, exec_art, f"Rerun evidence validated for '{rule.title}'.")
+        if rid == "INDEPENDENT_RERUN-028":
+            has_p2a_order = bool(p2a_rev) or (
+                isinstance(active, dict)
+                and active.get("phase") == "PHASE_2A_CODING"
+                and isinstance(p2a_stat, dict)
+                and not ctx.get("pre_commit_status_err")
+            )
+            if not active or "GATE_1" not in active.get("cleared_gates", {}) or not has_p2a_order:
+                return _ev_fail(rule, "controls/ACTIVE_STATE.json", "Prior Gate-1 / Phase-2A review ordering incomplete.")
+            return _ev_pass(rule, "controls/ACTIVE_STATE.json", "Phase ordering prerequisites verified.")
+        # INDEPENDENT_RERUN-030
+        if not (verdict_doc or isinstance(ctx.get("stage_results"), list)) or not ctx.get("agents_md_ok"):
+            return _ev_fail(rule, "Phase-3/verdict.json", "Missing verdict/control evidence separating rerun from owner acceptance.")
+        return _ev_pass(rule, "Phase-3/verdict.json", "Rerun verification separated cleanly from Gate-4 owner acceptance.")
+
+    # EVAL_CURATOR-023..030
+    if ast_m.get("eval_imports_in_repo"):
+        return _ev_fail(rule, ast_m["eval_imports_in_repo"][0], "Product repo imports evals/ fixtures directly.")
+    if rid in ("EVAL_CURATOR-024", "EVAL_CURATOR-028", "EVAL_CURATOR-029"):
+        if not ctx.get("start_manifest_ok"):
+            return _ev_fail(rule, "specs/START_MANIFEST.md", f"Manifest integrity error: {ctx.get('start_manifest_err')}")
+        if ctx.get("out_of_scope_files"):
+            return _ev_fail(rule, ctx["out_of_scope_files"][0], "Scope/control isolation boundary violated.")
+        return _ev_pass(rule, "specs/START_MANIFEST.md", f"Eval/control isolation and manifest authority verified ({rule.title}).")
+    if not exec_present or not exec_ok:
+        return _ev_fail(rule, exec_art, f"Missing or failing evaluation execution evidence for '{rule.title}'.")
+    return _ev_pass(rule, exec_art, f"Evaluation curator evidence verified ({rule.title}).")
+
+
+def _eval_blast_radius(rule: RubricRule, ctx: Dict[str, Any], evaluator_name: str) -> RuleEvaluationResult:
+    if ctx.get("out_of_scope_files"):
+        offender = ctx["out_of_scope_files"][0]
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=offender,
+            message=f"Out-of-scope file modified ({rule.title}): {offender}.",
+        )
+    if ctx.get("untouched_dirty"):
+        dirty = ctx["untouched_dirty"][0]
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=dirty,
+            message=f"Untouched repository '{dirty}' contains uncommitted modifications.",
+        )
+    if ctx.get("dag_order_violation"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness="dag_order_violation",
+            message=f"Dependency topological violation ({rule.title}): {ctx['dag_order_violation']}",
+        )
+    if ctx.get("symlink_escapes"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ctx["symlink_escapes"][0],
+            message=f"Symlink boundary escape detected: {ctx['symlink_escapes'][0]}",
+        )
+    ast_m = ctx.get("ast_metrics", {})
+    if rule.rule_id in ("BLAST_RADIUS-002", "BLAST_RADIUS-003", "BLAST_RADIUS-004", "BLAST_RADIUS-005") and ast_m.get("syntax_errors"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ast_m["syntax_errors"][0],
+            message=f"AST parse failure prevents call-graph analysis: {ast_m['syntax_errors'][0]}",
+        )
+    if rule.rule_id in ("BLAST_RADIUS-006", "BLAST_RADIUS-007", "BLAST_RADIUS-008") and ctx.get("rogue_scanner_configs"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ctx["rogue_scanner_configs"][0],
+            message=f"Unauthorized config override detected: {ctx['rogue_scanner_configs'][0]}",
+        )
+    if rule.rule_id in ("BLAST_RADIUS-009", "BLAST_RADIUS-010", "BLAST_RADIUS-022", "BLAST_RADIUS-023") and ast_m.get("resource_leak_files"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ast_m["resource_leak_files"][0],
+            message=f"Unguarded file handle open() outside context manager: {ast_m['resource_leak_files'][0]}",
+        )
+    if rule.rule_id in ("BLAST_RADIUS-017", "BLAST_RADIUS-018", "BLAST_RADIUS-019") and ast_m.get("swallowed_exceptions"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ast_m["swallowed_exceptions"][0],
+            message=f"Silent exception suppression detected: {ast_m['swallowed_exceptions'][0]}",
+        )
+    if rule.rule_id in ("BLAST_RADIUS-026",) and ast_m.get("eval_imports_in_repo"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ast_m["eval_imports_in_repo"][0],
+            message=f"Production repo imports simulator/eval fixture: {ast_m['eval_imports_in_repo'][0]}",
+        )
+    if rule.rule_id in ("BLAST_RADIUS-027", "BLAST_RADIUS-028", "BLAST_RADIUS-029", "BLAST_RADIUS-030"):
+        if not ctx.get("declared_scope") and ctx.get("uncommitted_diffs"):
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+                evaluator=evaluator_name, witness="Phase-1/declared_scope.json",
+                message="Modified working tree lacks Phase-1/declared_scope.json inventory boundary.",
+            )
+    if rule.rule_id == "BLAST_RADIUS-001":
+        witness = "scope_containment_verified"
+    else:
+        witness = "Phase-1/declared_scope.json" if ctx.get("declared_scope") else "controls/PRODUCT_REPOSITORIES.json"
+    return RuleEvaluationResult(
+        rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="PASS",
+        evaluator=evaluator_name, witness=witness,
+        message=f"Blast radius containment and AST invariants verified ({rule.title}).",
+    )
+
+
+def _eval_upstream_reuse(rule: RubricRule, ctx: Dict[str, Any], evaluator_name: str) -> RuleEvaluationResult:
+    unpinned = ctx.get("unpinned_dependencies", [])
+    if unpinned:
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=unpinned[0],
+            message=f"Unpinned wildcard dependency detected: {unpinned[0]}.",
+        )
+    if ctx.get("rogue_scanner_configs"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ctx["rogue_scanner_configs"][0],
+            message=f"Unauthorized local override replacing packaged scanner config: {ctx['rogue_scanner_configs'][0]}.",
+        )
+    ast_m = ctx.get("ast_metrics", {})
+    if ast_m.get("unsafe_patterns"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ast_m["unsafe_patterns"][0],
+            message=f"Unsafe dynamic execution pattern prohibited by upstream security reuse rules: {ast_m['unsafe_patterns'][0]}.",
+        )
+    if not ctx.get("prod_repos"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="NOT_EVALUATED",
+            evaluator=evaluator_name, witness="controls/PRODUCT_REPOSITORIES.json",
+            message="Missing PRODUCT_REPOSITORIES.json baseline lock to verify upstream reuse.",
+        )
+    return RuleEvaluationResult(
+        rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="PASS",
+        evaluator=evaluator_name, witness="controls/PRODUCT_REPOSITORIES.json",
+        message=f"Upstream dependency pinning and reuse discipline verified ({rule.title}).",
+    )
+
+
+def _eval_failure_class(rule: RubricRule, ctx: Dict[str, Any], evaluator_name: str) -> RuleEvaluationResult:
+    secrets = ctx.get("secrets_found", [])
+    if secrets:
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=secrets[0],
+            message=f"Credential or secret exposure detected: {secrets[0]}.",
+        )
+    if ctx.get("issue_history_err"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness="evidence/issue_history.json",
+            message=f"Failure register integrity error: {ctx['issue_history_err']}.",
+        )
+    ast_m = ctx.get("ast_metrics", {})
+    if ast_m.get("resource_leak_files"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ast_m["resource_leak_files"][0],
+            message=f"Unclosed file handle leak risk: {ast_m['resource_leak_files'][0]}.",
+        )
+    if ast_m.get("swallowed_exceptions"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ast_m["swallowed_exceptions"][0],
+            message=f"Silent exception swallowing hides failure cause: {ast_m['swallowed_exceptions'][0]}.",
+        )
+    active = ctx.get("active_state")
+    if isinstance(active, dict) and active.get("circuit_breaker_tripped"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="BLOCKED",
+            evaluator=evaluator_name, witness="controls/ACTIVE_STATE.json",
+            message="Circuit breaker tripped on repeated failure cause; human reset required.",
+        )
+    if not active:
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="NOT_EVALUATED",
+            evaluator=evaluator_name, witness="controls/ACTIVE_STATE.json",
+            message="Missing controls/ACTIVE_STATE.json to evaluate failure history state.",
+        )
+    return RuleEvaluationResult(
+        rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="PASS",
+        evaluator=evaluator_name, witness="controls/ACTIVE_STATE.json",
+        message=f"Zero secrets, clean resource/exception hygiene, and valid failure register ({rule.title}).",
+    )
+
+
+def _eval_test_adequacy(rule: RubricRule, ctx: Dict[str, Any], evaluator_name: str) -> RuleEvaluationResult:
+    if ctx.get("missing_tests"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ctx["missing_tests"][0],
+            message=f"Missing required test coverage: {ctx['missing_tests'][0]}.",
+        )
+    if ctx.get("flaky_sleep_detected"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ctx["flaky_sleep_detected"][0],
+            message=f"Non-deterministic time.sleep() detected in tests: {ctx['flaky_sleep_detected'][0]}.",
+        )
+    if rule.rule_id == "TEST_ADEQUACY-025":
+        if ctx.get("unpinned_dependencies"):
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+                evaluator=evaluator_name, witness=ctx["unpinned_dependencies"][0],
+                message=f"Toolchain/dependency manifest unpinned: {ctx['unpinned_dependencies'][0]}.",
+            )
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="PASS",
+            evaluator=evaluator_name, witness="requirements.txt",
+            message="Toolchain and manifest dependency pins verified.",
+        )
+
+    ast_m = ctx.get("ast_metrics", {})
+    if ast_m.get("syntax_errors"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ast_m["syntax_errors"][0],
+            message=f"Python syntax error detected: {ast_m['syntax_errors'][0]}.",
+        )
+    if ast_m.get("test_count", 0) == 0:
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="NOT_EVALUATED",
+            evaluator=evaluator_name, witness="repos/*",
+            message=f"No test files discovered in repository to evaluate '{rule.title}'.",
+        )
+    if rule.rule_id in ("TEST_ADEQUACY-004", "TEST_ADEQUACY-005") and ast_m.get("self_comparison_tautologies"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ast_m["self_comparison_tautologies"][0],
+            message=f"Self-comparison tautology in test oracle: {ast_m['self_comparison_tautologies'][0]}.",
+        )
+    if rule.rule_id == "TEST_ADEQUACY-006" and ast_m.get("weak_assertions"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ast_m["weak_assertions"][0],
+            message=f"Weak or missing assertion in test suite: {ast_m['weak_assertions'][0]}.",
+        )
+    if rule.rule_id == "TEST_ADEQUACY-007" and ctx.get("removed_assertions"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ctx["removed_assertions"][0],
+            message=f"Required assertion removed in commit diff: {ctx['removed_assertions'][0]}.",
+        )
+    if rule.rule_id == "TEST_ADEQUACY-009" and ast_m.get("qual_in_prod"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ast_m["qual_in_prod"][0],
+            message=f"Qualification code leaked into production module: {ast_m['qual_in_prod'][0]}.",
+        )
+    if rule.rule_id == "TEST_ADEQUACY-010" and ast_m.get("skipped_tests_in_code"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ast_m["skipped_tests_in_code"][0],
+            message=f"Skipped test marker detected: {ast_m['skipped_tests_in_code'][0]}.",
+        )
+    if rule.rule_id == "TEST_ADEQUACY-016" and not ast_m.get("has_positive_tests"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ast_m["test_files"][0],
+            message="Positive test suite lacks concrete output/state assertions.",
+        )
+    if rule.rule_id == "TEST_ADEQUACY-017" and not ast_m.get("has_negative_tests"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ast_m["test_files"][0],
+            message="Test suite lacks negative/denial assertions (assertRaises/pytest.raises/assertNotEqual).",
+        )
+    if rule.rule_id == "TEST_ADEQUACY-018" and not ast_m.get("has_malformed_tests"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ast_m["test_files"][0],
+            message="Test suite lacks malformed/invalid input boundary coverage.",
+        )
+    if rule.rule_id == "TEST_ADEQUACY-019" and not ast_m.get("has_duplicate_tests"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=ast_m["test_files"][0],
+            message="Test suite lacks duplicate/replay/idempotency case coverage.",
+        )
+    return RuleEvaluationResult(
+        rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="PASS",
+        evaluator=evaluator_name, witness=ast_m["test_files"][0],
+        message=f"Test adequacy AST and suite checks verified ({rule.title}).",
+    )
+
+
+def _eval_independent_rerun(rule: RubricRule, ctx: Dict[str, Any], evaluator_name: str) -> RuleEvaluationResult:
+    active = ctx.get("active_state")
+    if rule.rule_id in (
+        "INDEPENDENT_RERUN-001", "INDEPENDENT_RERUN-002", "INDEPENDENT_RERUN-003", "INDEPENDENT_RERUN-004",
+        "INDEPENDENT_RERUN-005", "INDEPENDENT_RERUN-006", "INDEPENDENT_RERUN-007",
+    ):
+        if not _has_distinct_agent_roles(active):
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+                evaluator=evaluator_name, witness="controls/ACTIVE_STATE.json",
+                message="Producer and reviewer identities must be configured and distinct.",
+            )
+        if not ctx.get("agents_md_ok"):
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+                evaluator=evaluator_name, witness="controls/AGENTS.md",
+                message="Missing controls/AGENTS.md grant and role boundary contract.",
+            )
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="PASS",
+            evaluator=evaluator_name, witness="controls/ACTIVE_STATE.json",
+            message=f"Independent reviewer identity and authority verified ({rule.title}).",
+        )
+
+    if rule.rule_id in (
+        "INDEPENDENT_RERUN-010", "INDEPENDENT_RERUN-011", "INDEPENDENT_RERUN-012",
+        "INDEPENDENT_RERUN-015", "INDEPENDENT_RERUN-016", "INDEPENDENT_RERUN-024",
+    ):
+        if not ctx.get("start_manifest_ok"):
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+                evaluator=evaluator_name, witness="specs/START_MANIFEST.md",
+                message=f"Input hash/manifest mismatch: {ctx.get('start_manifest_err')}.",
+            )
+        if ctx.get("out_of_scope_files") or ctx.get("untouched_dirty"):
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+                evaluator=evaluator_name, witness=(ctx.get("out_of_scope_files") or ctx.get("untouched_dirty"))[0],
+                message="Dirty or out-of-scope worktree state invalidates clean rerun.",
+            )
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="PASS",
+            evaluator=evaluator_name, witness="specs/START_MANIFEST.md",
+            message=f"Rerun worktree, HEAD, dirty state, and manifest inputs verified ({rule.title}).",
+        )
+
+    exec_present, exec_ok, exec_art = _has_execution_record(ctx)
+    if not exec_present:
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="NOT_EVALUATED",
+            evaluator=evaluator_name, witness=exec_art,
+            message=f"Rerun execution has not occurred yet for '{rule.title}'.",
+        )
+    if not exec_ok:
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=exec_art,
+            message=f"Independent rerun execution failed or recorded errors for '{rule.title}'.",
+        )
+    return RuleEvaluationResult(
+        rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="PASS",
+        evaluator=evaluator_name, witness=exec_art,
+        message=f"Independent rerun execution parity verified ({rule.title}).",
+    )
+
+
+def _eval_eval_curator(rule: RubricRule, ctx: Dict[str, Any], evaluator_name: str) -> RuleEvaluationResult:
+    if ctx.get("benchmark_sla_breach"):
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness="benchmark_sla_breach",
+            message=f"Benchmark SLA breach detected: {ctx['benchmark_sla_breach']}.",
+        )
+    ast_m = ctx.get("ast_metrics", {})
+    if rule.rule_id in ("EVAL_CURATOR-001", "EVAL_CURATOR-019"):
+        if not ctx.get("start_manifest_ok"):
+            return _ev_fail(rule, "specs/START_MANIFEST.md", f"Manifest integrity error: {ctx.get('start_manifest_err')}")
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="PASS",
+            evaluator=evaluator_name, witness="controls/DISPOSITIONS.json",
+            message=f"Owner disposition and label authority verified ({rule.title}).",
+        )
+    if rule.rule_id in ("EVAL_CURATOR-002", "EVAL_CURATOR-017"):
+        if not ctx.get("start_manifest_ok") or not ctx.get("repo_heads"):
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+                evaluator=evaluator_name, witness="specs/START_MANIFEST.md",
+                message="Pinned source or manifest identity missing/mismatched.",
+            )
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="PASS",
+            evaluator=evaluator_name, witness="specs/START_MANIFEST.md",
+            message=f"Candidate source and tool manifest bytes verified ({rule.title}).",
+        )
+    if rule.rule_id in ("EVAL_CURATOR-011", "EVAL_CURATOR-012"):
+        if ast_m.get("eval_imports_in_repo"):
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+                evaluator=evaluator_name, witness=ast_m["eval_imports_in_repo"][0],
+                message=f"Held-out eval import leak in repo: {ast_m['eval_imports_in_repo'][0]}.",
+            )
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="PASS",
+            evaluator=evaluator_name, witness="evals/",
+            message="Held-out/eval separation from tuned product code verified.",
+        )
+    if rule.rule_id in ("EVAL_CURATOR-020", "EVAL_CURATOR-021"):
+        if ctx.get("removed_assertions") or ast_m.get("skipped_tests_in_code") or ast_m.get("weak_assertions"):
+            witness = (ctx.get("removed_assertions") or ast_m.get("skipped_tests_in_code") or ast_m.get("weak_assertions"))[0]
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+                evaluator=evaluator_name, witness=witness,
+                message=f"Assertion/check relaxation detected: {witness}.",
+            )
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="PASS",
+            evaluator=evaluator_name, witness="repos/*",
+            message="Zero assertion removals or silent check relaxations detected.",
+        )
+    if rule.rule_id == "EVAL_CURATOR-022":
+        if ctx.get("out_of_scope_files") or ctx.get("untouched_dirty"):
+            witness = (ctx.get("out_of_scope_files") or ctx.get("untouched_dirty"))[0]
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+                evaluator=evaluator_name, witness=witness,
+                message=f"Scope containment violated beyond minimal change boundary: {witness}.",
+            )
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="PASS",
+            evaluator=evaluator_name, witness="Phase-1/declared_scope.json",
+            message="Minimal declared scope change boundary respected.",
+        )
+
+    exec_present, exec_ok, exec_art = _has_execution_record(ctx)
+    if not exec_present:
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="NOT_EVALUATED",
+            evaluator=evaluator_name, witness=exec_art,
+            message=f"Evaluation execution evidence absent for '{rule.title}'.",
+        )
+    if not exec_ok:
+        return RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=evaluator_name, witness=exec_art,
+            message=f"Evaluation execution regression or failure detected for '{rule.title}'.",
+        )
+    return RuleEvaluationResult(
+        rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="PASS",
+        evaluator=evaluator_name, witness=exec_art,
+        message=f"Eval curator regression and typed outcome checks verified ({rule.title}).",
+    )
+
+
 def evaluate_rubric_rule(
     rule: RubricRule,
     workspace_root: Path,
     repo_path: Path,
     context: Optional[Dict[str, Any]] = None,
 ) -> RuleEvaluationResult:
-    """Evaluate an individual rubric rule against repository and evidence topology (Gap A)."""
+    """Evaluate an individual rubric rule against repository and evidence topology."""
     try:
-        # 1. Check structural exemption predicate
+        # 1. Check genuine criterion-matched structural exemption predicate
         if rule.exemption_predicate:
             pred_fn = EXEMPTION_PREDICATES.get(rule.exemption_predicate)
             if pred_fn and pred_fn(workspace_root, repo_path):
-                evidence_file = repo_path / "package.json"
-                if not evidence_file.is_file():
-                    evidence_file = repo_path / "requirements.txt"
-                if not evidence_file.is_file():
-                    evidence_file = repo_path
-
-                rel_ev = str(evidence_file.relative_to(workspace_root)) if evidence_file.exists() else str(repo_path.relative_to(workspace_root))
+                rel_ev = _resolve_predicate_evidence_path(workspace_root, repo_path)
                 return RuleEvaluationResult(
                     rule_id=rule.rule_id,
                     domain=rule.domain,
@@ -349,300 +1769,71 @@ def evaluate_rubric_rule(
                 message=f"No evaluator registered for unrecognized domain '{rule.domain}'.",
             )
 
-        ctx = context or {}
+        ctx = context if (context and context.get("_collected")) else _collect_rubric_context(
+            workspace_root=workspace_root,
+            task_id=(context or {}).get("task_id") or load_active_state(workspace_root).get("task_id", "task-default"),
+            attempt=int((context or {}).get("attempt") or load_active_state(workspace_root).get("attempt_index", 1)),
+            repo_dirs=[repo_path] if repo_path.is_dir() else None,
+            existing_context=context,
+        )
 
-        # 3. Explicit context-based overrides for fine-grained rule simulation & testing (GAP-01/02)
+        # 3. Explicit context overrides
         if rule.rule_id in ctx.get("blocked_rules", []):
             return RuleEvaluationResult(
-                rule_id=rule.rule_id,
-                domain=rule.domain,
-                category=rule.category,
-                status="BLOCKED",
+                rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="BLOCKED",
                 evaluator=evaluator_name,
                 message=f"Rule '{rule.rule_id}' blocked by governance policy or unverified prerequisite.",
             )
         if rule.rule_id in ctx.get("unevaluated_rules", []):
             return RuleEvaluationResult(
-                rule_id=rule.rule_id,
-                domain=rule.domain,
-                category=rule.category,
-                status="NOT_EVALUATED",
+                rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="NOT_EVALUATED",
                 evaluator=evaluator_name,
                 message=f"Rule '{rule.rule_id}' not evaluated: verification deferred.",
             )
 
-        # 4. Handle category-specific evaluation invariants (Spec 02 / GAP-02)
+        # 4. Category-strict dispatch (never auto-pass when required authorization, review, or evidence is absent)
         if rule.category == "HUMAN_WAIVER":
-            waivers = ctx.get("human_waivers", {})
-            if rule.rule_id in waivers or "*" in waivers:
-                waiver_info = waivers.get(rule.rule_id, {}) if isinstance(waivers, dict) else {}
-                return RuleEvaluationResult(
-                    rule_id=rule.rule_id,
-                    domain=rule.domain,
-                    category=rule.category,
-                    status="PASS",
-                    evaluator="human_waiver_evaluator",
-                    witness=waiver_info.get("evidence_path", "controls/DISPOSITIONS.json"),
-                    message=f"Human waiver authorized: {waiver_info.get('rationale', 'Approved by operator')}.",
-                )
-            if ctx.get("require_explicit_waivers", False):
-                return RuleEvaluationResult(
-                    rule_id=rule.rule_id,
-                    domain=rule.domain,
-                    category=rule.category,
-                    status="BLOCKED",
-                    evaluator="human_waiver_evaluator",
-                    message=f"Human waiver required for rule '{rule.rule_id}' but not authorized in DISPOSITIONS.json.",
-                )
-
+            return _evaluate_human_waiver(rule, ctx)
         if rule.category == "AGENT_ASSISTED":
-            if rule.rule_id in ctx.get("missing_agent_reviews", []):
-                return RuleEvaluationResult(
-                    rule_id=rule.rule_id,
-                    domain=rule.domain,
-                    category=rule.category,
-                    status="NOT_EVALUATED",
-                    evaluator="agent_assisted_evaluator",
-                    message=f"Agent-assisted review evidence missing for rule '{rule.rule_id}'.",
-                )
-
+            return _evaluate_agent_assisted(rule, ctx)
         if rule.category == "EVIDENCE":
-            missing_evidence_list = ctx.get("missing_evidence", [])
-            if rule.rule_id in missing_evidence_list or "*" in missing_evidence_list:
-                return RuleEvaluationResult(
-                    rule_id=rule.rule_id,
-                    domain=rule.domain,
-                    category=rule.category,
-                    status="FAIL",
-                    evaluator="phase_evidence_validator",
-                    message=f"Missing required evidence artifact for rule '{rule.rule_id}'.",
-                    artifact=rule.primary_witness or "evidence_artifact",
-                )
+            return _evaluate_evidence_rule(rule, workspace_root, ctx)
 
-        # 5. Domain-specific rule evaluation
-        untouched_dirty = ctx.get("untouched_dirty", [])
-        secrets_found = ctx.get("secrets_found", [])
-        out_of_scope_files = ctx.get("out_of_scope_files", [])
-
+        # 5. Automated domain-specific rule evaluators
         if rule.domain == "BLAST_RADIUS":
-            if untouched_dirty:
-                return RuleEvaluationResult(
-                    rule_id=rule.rule_id,
-                    domain=rule.domain,
-                    category=rule.category,
-                    status="FAIL",
-                    evaluator=evaluator_name,
-                    witness=untouched_dirty[0],
-                    message=f"Untouched repository '{untouched_dirty[0]}' contains uncommitted modifications.",
-                )
-            if out_of_scope_files:
-                return RuleEvaluationResult(
-                    rule_id=rule.rule_id,
-                    domain=rule.domain,
-                    category=rule.category,
-                    status="FAIL",
-                    evaluator=evaluator_name,
-                    witness=out_of_scope_files[0],
-                    message=f"Out of scope file modified: '{out_of_scope_files[0]}'.",
-                )
-            return RuleEvaluationResult(
-                rule_id=rule.rule_id,
-                domain=rule.domain,
-                category=rule.category,
-                status="PASS",
-                evaluator=evaluator_name,
-                witness="scope_containment_verified",
-                message="Modifications strictly contained in declared scope.",
-            )
-
-        if rule.domain == "FAILURE_CLASS":
-            if secrets_found:
-                return RuleEvaluationResult(
-                    rule_id=rule.rule_id,
-                    domain=rule.domain,
-                    category=rule.category,
-                    status="FAIL",
-                    evaluator=evaluator_name,
-                    witness=secrets_found[0],
-                    message=f"Secret or forbidden credential detected: '{secrets_found[0]}'.",
-                )
-            return RuleEvaluationResult(
-                rule_id=rule.rule_id,
-                domain=rule.domain,
-                category=rule.category,
-                status="PASS",
-                evaluator=evaluator_name,
-                witness="zero_secrets_detected",
-                message="No secret leaks or credentials detected.",
-            )
-
+            return _eval_blast_radius(rule, ctx, evaluator_name)
         if rule.domain == "UPSTREAM_REUSE":
-            bad_deps = ctx.get("unpinned_dependencies", [])
-            if bad_deps:
-                return RuleEvaluationResult(
-                    rule_id=rule.rule_id,
-                    domain=rule.domain,
-                    category=rule.category,
-                    status="FAIL",
-                    evaluator=evaluator_name,
-                    witness=bad_deps[0],
-                    message=f"Unpinned wildcard dependency detected: '{bad_deps[0]}'.",
-                )
-            return RuleEvaluationResult(
-                rule_id=rule.rule_id,
-                domain=rule.domain,
-                category=rule.category,
-                status="PASS",
-                evaluator=evaluator_name,
-                witness="dependencies_pinned",
-                message="All upstream package dependencies are pinned to discrete versions.",
-            )
-
+            return _eval_upstream_reuse(rule, ctx, evaluator_name)
+        if rule.domain == "FAILURE_CLASS":
+            return _eval_failure_class(rule, ctx, evaluator_name)
         if rule.domain == "TEST_ADEQUACY":
-            missing_tests = ctx.get("missing_tests", [])
-            if missing_tests:
-                return RuleEvaluationResult(
-                    rule_id=rule.rule_id,
-                    domain=rule.domain,
-                    category=rule.category,
-                    status="FAIL",
-                    evaluator=evaluator_name,
-                    witness=missing_tests[0],
-                    message="Code modifications lack corresponding unit or integration tests.",
-                )
-            return RuleEvaluationResult(
-                rule_id=rule.rule_id,
-                domain=rule.domain,
-                category=rule.category,
-                status="PASS",
-                evaluator=evaluator_name,
-                witness="test_adequacy_satisfied",
-                message="Test coverage exists for modified units.",
-            )
-
+            return _eval_test_adequacy(rule, ctx, evaluator_name)
         if rule.domain == "INDEPENDENT_RERUN":
-            flaky_sleep = ctx.get("flaky_sleep_detected", [])
-            if flaky_sleep:
-                return RuleEvaluationResult(
-                    rule_id=rule.rule_id,
-                    domain=rule.domain,
-                    category=rule.category,
-                    status="FAIL",
-                    evaluator=evaluator_name,
-                    witness=flaky_sleep[0],
-                    message="Flaky sleep or non-deterministic timing pattern detected.",
-                )
-            return RuleEvaluationResult(
-                rule_id=rule.rule_id,
-                domain=rule.domain,
-                category=rule.category,
-                status="PASS",
-                evaluator=evaluator_name,
-                witness="deterministic_execution",
-                message="Execution environment and test rerun are deterministic.",
-            )
-
+            return _eval_independent_rerun(rule, ctx, evaluator_name)
         if rule.domain == "EVAL_CURATOR":
-            sla_breach = ctx.get("benchmark_sla_breach", [])
-            if sla_breach:
-                return RuleEvaluationResult(
-                    rule_id=rule.rule_id,
-                    domain=rule.domain,
-                    category=rule.category,
-                    status="FAIL",
-                    evaluator=evaluator_name,
-                    witness=sla_breach[0],
-                    message="Benchmark SLA violated: memory RSS exceeded or mocked timer detected.",
-                )
-            return RuleEvaluationResult(
-                rule_id=rule.rule_id,
-                domain=rule.domain,
-                category=rule.category,
-                status="PASS",
-                evaluator=evaluator_name,
-                witness="benchmark_sla_verified",
-                message="Benchmark SLA and qualification invariants satisfied.",
-            )
+            return _eval_eval_curator(rule, ctx, evaluator_name)
 
-        if rule.domain == "CLAIM_SUPPORT":
-            unsupported = ctx.get("unsupported_claims", [])
-            if unsupported:
-                return RuleEvaluationResult(
-                    rule_id=rule.rule_id,
-                    domain=rule.domain,
-                    category=rule.category,
-                    status="FAIL",
-                    evaluator=evaluator_name,
-                    witness=unsupported[0],
-                    message="Claim cited in delivery report is unbacked by repository evidence.",
-                )
-            return RuleEvaluationResult(
-                rule_id=rule.rule_id,
-                domain=rule.domain,
-                category=rule.category,
-                status="PASS",
-                evaluator=evaluator_name,
-                witness="claims_entailed",
-                message="Claims are backed by verifiable evidence.",
-            )
-
-        if rule.domain == "ORCHESTRATOR":
-            dag_violations = ctx.get("dag_order_violation", [])
-            if dag_violations:
-                return RuleEvaluationResult(
-                    rule_id=rule.rule_id,
-                    domain=rule.domain,
-                    category=rule.category,
-                    status="FAIL",
-                    evaluator=evaluator_name,
-                    witness=dag_violations[0],
-                    message="Task dependency ordering or DAG schedule violated.",
-                )
-            return RuleEvaluationResult(
-                rule_id=rule.rule_id,
-                domain=rule.domain,
-                category=rule.category,
-                status="PASS",
-                evaluator=evaluator_name,
-                witness="orchestration_invariants_met",
-                message="Task roadmap and turn-taking orchestration invariants satisfied.",
-            )
-
-        # COMMON domain
-        common_violations = ctx.get("common_discipline_violation", [])
-        if common_violations:
-            return RuleEvaluationResult(
-                rule_id=rule.rule_id,
-                domain=rule.domain,
-                category=rule.category,
-                status="FAIL",
-                evaluator=evaluator_name,
-                witness=common_violations[0],
-                message="Common discipline or governance contract violated.",
-            )
         return RuleEvaluationResult(
-            rule_id=rule.rule_id,
-            domain=rule.domain,
-            category=rule.category,
-            status="PASS",
-            evaluator=evaluator_name,
-            witness="admitted_input_ledger",
-            message="Common discipline and governance invariants met.",
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="NOT_EVALUATED",
+            evaluator="unsupported_fallback",
+            message=f"Rule '{rule.rule_id}' has no registered domain evaluator.",
         )
 
+    except InvalidRubricExemptionError:
+        raise
     except Exception as err:
         return RuleEvaluationResult(
             rule_id=rule.rule_id,
             domain=rule.domain,
             category=rule.category,
             status="FAIL",
-            evaluator=EVALUATOR_MAP.get(rule.domain, "error_handler"),
-            message=f"Evaluation execution failure: {err}",
+            evaluator=EVALUATOR_MAP.get(rule.domain, "error_fallback"),
+            message=f"Evaluation execution failure for rule '{rule.rule_id}': {err}",
         )
 
 
 def aggregate_rubric_results(
-    evaluations: List[Union[RuleEvaluationResult, Dict[str, Any]]],
+    evaluations: List[Union[RuleEvaluationResult, Dict[str, Any]]]
 ) -> Tuple[str, Dict[str, int], Dict[str, Any]]:
     """Deterministically aggregate rule evaluations into domain summaries and overall verdict (Spec 02 / GAP-01 / GAP-03).
 
@@ -662,8 +1853,6 @@ def aggregate_rubric_results(
     not_evaluated = sum(1 for e in eval_dicts if e.get("status") == "NOT_EVALUATED")
     blocked = sum(1 for e in eval_dicts if e.get("status") == "BLOCKED")
 
-    # Consistent verdict policy (GAP-01):
-    # A single FAIL, BLOCKED, or NOT_EVALUATED rule prevents an overall PASS
     if failed > 0 or blocked > 0 or not_evaluated > 0:
         overall_verdict = "FAIL"
     elif total_rules > 0 and (passed + na == total_rules):
@@ -680,7 +1869,6 @@ def aggregate_rubric_results(
         "blocked": blocked,
     }
 
-    # Aggregate by domain (GAP-03)
     domain_groups: Dict[str, List[Dict[str, Any]]] = {}
     for e in eval_dicts:
         domain = e.get("domain", "COMMON")
@@ -742,88 +1930,19 @@ def run_rubric_evaluation(
 
     catalog = load_270_rule_catalog()
 
-    # Discover all registered repositories & gather live context (fast <200ms SLA)
     repos_dir = root / "repos"
     repo_dirs: List[Path] = []
     if repos_dir.is_dir():
         repo_dirs = [d for d in sorted(repos_dir.iterdir()) if d.is_dir() and not d.name.startswith(".")]
     target_repo = repo_dirs[0] if repo_dirs else repos_dir
 
-    # Load declared scope & pre-commit touched repositories if present
-    attempt_dir = resolve_task_attempt_dir(root, resolved_task, resolved_attempt)
-    declared_scope: Dict[str, Any] = {}
-    scope_file = attempt_dir / "Phase-1" / "declared_scope.json"
-    if scope_file.is_file():
-        try:
-            declared_scope = json.loads(scope_file.read_text(encoding="utf-8"))
-        except Exception:
-            declared_scope = {}
-
-    touched_repo_names: Optional[Set[str]] = None
-    status_file = attempt_dir / "Phase-2A" / "pre_commit_status.json"
-    if status_file.is_file():
-        try:
-            status_doc = json.loads(status_file.read_text(encoding="utf-8"))
-            if isinstance(status_doc.get("touched_repositories"), list):
-                touched_repo_names = set(status_doc["touched_repositories"])
-        except Exception:
-            pass
-
-    uncommitted_diffs: Dict[str, str] = {}
-    untouched_dirty: List[str] = []
-    out_of_scope_files: List[str] = []
-    secrets_found: List[str] = []
-
-    from stagecheck.core.git import run_safe_git
-    from stagecheck.core.prompt_gate import is_path_in_scope
-
-    _SECRET_RE = re.compile(
-        r"(?:AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9_]{20,}|-----BEGIN (?:RSA|EC|OPENSSH|PRIVATE) KEY-----|sk-[A-Za-z0-9]{20,})"
+    live_context = _collect_rubric_context(
+        workspace_root=root,
+        task_id=resolved_task,
+        attempt=resolved_attempt,
+        repo_dirs=repo_dirs,
+        existing_context=context,
     )
-
-    for r_dir in repo_dirs:
-        if (r_dir / ".git").exists():
-            try:
-                res = run_safe_git(r_dir, ["status", "--porcelain=v1", "--untracked-files=all"])
-                if res.returncode == 0 and res.stdout.strip():
-                    uncommitted_diffs[r_dir.name] = res.stdout.strip()
-                    if touched_repo_names is not None and r_dir.name not in touched_repo_names:
-                        untouched_dirty.append(r_dir.name)
-                    for line in res.stdout.splitlines():
-                        if not line.strip():
-                            continue
-                        rel_p = line[3:].strip()
-                        if " -> " in rel_p:
-                            rel_p = rel_p.split(" -> ")[1].strip()
-                        ws_rel = f"repos/{r_dir.name}/{rel_p}"
-                        if declared_scope and not is_path_in_scope(ws_rel, declared_scope):
-                            out_of_scope_files.append(ws_rel)
-                        fpath = r_dir / rel_p
-                        if fpath.is_file() and not fpath.is_symlink() and fpath.stat().st_size <= 1024 * 1024:
-                            if _SECRET_RE.search(fpath.read_text(encoding="utf-8", errors="ignore")):
-                                secrets_found.append(ws_rel)
-            except Exception:
-                pass
-
-    # Include any Phase-3 scanner defects if already recorded
-    scanner_rep = attempt_dir / "Phase-3" / "scanner_report.json"
-    if scanner_rep.is_file():
-        try:
-            s_doc = json.loads(scanner_rep.read_text(encoding="utf-8"))
-            for d in s_doc.get("defects", []):
-                if d.get("blocking"):
-                    secrets_found.append(d.get("message", d.get("defect_id", "secret_detected")))
-        except Exception:
-            pass
-
-    live_context = {
-        "uncommitted_diffs": uncommitted_diffs,
-        "untouched_dirty": untouched_dirty,
-        "out_of_scope_files": out_of_scope_files,
-        "secrets_found": secrets_found,
-    }
-    if context:
-        live_context.update(context)
 
     evaluations: List[RuleEvaluationResult] = []
 
@@ -842,21 +1961,19 @@ def run_rubric_evaluation(
                 finally:
                     rule.exemption_predicate = saved_pred
                 evaluations.append(res)
-                if fail_fast and res.status == "FAIL":
+                if fail_fast and res.status in ("FAIL", "BLOCKED"):
                     break
                 continue
 
         res = evaluate_rubric_rule(rule, root, target_repo, live_context)
         evaluations.append(res)
-        if fail_fast and res.status == "FAIL":
+        if fail_fast and res.status in ("FAIL", "BLOCKED"):
             break
 
-    # Validate output payload against illegal exemptions (FR-03 / DEC-026)
     eval_dicts = [e.to_dict() for e in evaluations]
     validate_rubric_evaluation_payload(eval_dicts)
 
     overall_verdict, counts, domains_map = aggregate_rubric_results(evaluations)
-
     elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
     payload: Dict[str, Any] = {
@@ -872,9 +1989,7 @@ def run_rubric_evaluation(
         "evaluations": eval_dicts,
     }
 
-    # Validate schema
     validate_rubric_evaluation(payload)
-
     return payload, elapsed_ms
 
 
@@ -904,18 +2019,21 @@ def update_rubric_artifacts(
                 "passed": rubric_payload["counts"]["passed"],
                 "failed": rubric_payload["counts"]["failed"],
                 "not_applicable": rubric_payload["counts"]["not_applicable"],
+                "not_evaluated": rubric_payload["counts"].get("not_evaluated", 0),
+                "blocked": rubric_payload["counts"].get("blocked", 0),
                 "evaluation_file": str(rubric_file.relative_to(root)),
             }
-            if rubric_payload["overall_verdict"] == "FAIL":
+            if rubric_payload["overall_verdict"] != "PASS":
                 rev_data["status"] = "REVISION_REQUIRED"
-                # Add failed rules to new_issues_found
-                failed_rules = [e for e in rubric_payload["evaluations"] if e.get("status") == "FAIL"]
-                for f_rule in failed_rules:
+                blocking_rules = [
+                    e for e in rubric_payload["evaluations"] if e.get("status") in ("FAIL", "BLOCKED", "NOT_EVALUATED")
+                ]
+                for f_rule in blocking_rules:
                     rev_data.setdefault("new_issues_found", []).append({
                         "defect_id": f_rule["rule_id"],
                         "severity": "BLOCKING",
                         "location": f_rule.get("witness", "codebase"),
-                        "description": f_rule.get("message", "Rubric rule violated."),
+                        "description": f_rule.get("message", f"Rubric rule ended with status {f_rule.get('status')}."),
                     })
             review_file.write_text(canonical_json_dumps(rev_data), encoding="utf-8")
             updated_review = review_file

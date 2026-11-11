@@ -465,6 +465,15 @@ def record_pre_commit_review(
         "code_quality_observations": code_quality_observations,
     }
 
+    existing_review_file = phase2a_dir / "pre_commit_review.json"
+    if existing_review_file.is_file():
+        try:
+            existing_rev = json.loads(existing_review_file.read_text(encoding="utf-8"))
+            if isinstance(existing_rev, dict) and isinstance(existing_rev.get("agent_assisted_reviews"), dict):
+                review_data["agent_assisted_reviews"] = existing_rev["agent_assisted_reviews"]
+        except Exception:
+            pass
+
     # Validate against schema
     schema_path = get_schema_path("pre_commit_review.schema.json")
     with schema_path.open("r", encoding="utf-8") as f:

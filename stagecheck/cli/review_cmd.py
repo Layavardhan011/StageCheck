@@ -216,16 +216,20 @@ def run_review_precommit(
     update_rubric_artifacts(workspace_root, rubric_payload)
     counts = rubric_payload["counts"]
     failed_count = counts["failed"]
+    blocked_count = counts.get("blocked", 0)
+    not_eval_count = counts.get("not_evaluated", 0)
+    non_passing_count = failed_count + blocked_count + not_eval_count
 
-    if failed_count > 0:
+    if rubric_payload.get("overall_verdict") != "PASS" or non_passing_count > 0:
         new_issues = []
         for r_entry in rubric_payload.get("evaluations", []):
-            if r_entry.get("status") == "FAIL":
+            r_status = r_entry.get("status")
+            if r_status in ("FAIL", "BLOCKED", "NOT_EVALUATED"):
                 new_issues.append({
                     "defect_id": r_entry["rule_id"],
                     "severity": "BLOCKING",
                     "location": r_entry.get("witness", "codebase"),
-                    "description": r_entry.get("message", "Rubric rule failure."),
+                    "description": r_entry.get("message", f"Rubric rule non-passing ({r_status})."),
                 })
         record_pre_commit_review(
             workspace_root=workspace_root,
@@ -233,11 +237,17 @@ def run_review_precommit(
             attempt=attempt,
             cycle=cycle,
             status="REVISION_REQUIRED",
-            summary=f"Review rejected: {failed_count} rubric defects identified.",
+            summary=(
+                f"Review rejected: {non_passing_count} non-passing rubric rules "
+                f"(failed={failed_count}, blocked={blocked_count}, not_evaluated={not_eval_count})."
+            ),
             base_commits=base_commits,
             new_issues=new_issues,
         )
-        print(f"RESULT: REVISION_REQUIRED ({failed_count} blocking defects). Remediation guidance written to response.json.")
+        print(
+            f"RESULT: REVISION_REQUIRED ({non_passing_count} blocking/incomplete rubric rules). "
+            "Remediation guidance written to response.json."
+        )
         return 1
     else:
         record_pre_commit_review(
