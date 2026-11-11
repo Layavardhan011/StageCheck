@@ -369,6 +369,21 @@ class SupervisorEngine:
         att = attempt or int(state.get("attempt_index", 1))
         phase = state.get("phase", "IDLE")
 
+        # 0. Mandatory Bubblewrap isolation deployment preflight before autonomous task progression (GAP-03)
+        from stagecheck.core.isolation import run_bwrap_deployment_preflight
+
+        preflight = run_bwrap_deployment_preflight(workspace_root=self.root, raise_on_failure=False)
+        if not preflight.passed:
+            return SupervisorStepResult(
+                task_id=task,
+                attempt=att,
+                current_phase=phase,
+                action_taken="ISOLATION_PREFLIGHT_FAILED",
+                status="HALTED",
+                message=f"Mandatory Bubblewrap isolation preflight failed: {preflight.reason}",
+                details=preflight.to_dict(),
+            )
+
         # 1. Watchdog evaluation
         tripped, halt_msg, wd_meta = evaluate_watchdog(
             self.root, timeout_seconds=self.watchdog_timeout

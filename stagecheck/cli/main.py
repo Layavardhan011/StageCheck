@@ -193,7 +193,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # 20. supervisor (FR-04 / FR-05 / Spec 03 / ARCH-01)
     p_super = subparsers.add_parser("supervisor", help="Interactive live supervisor, debounce, and watchdog orchestrator.")
-    p_super.add_argument("supervisor_action", nargs="?", choices=["check-task", "check-stability", "check-watchdog"], help="Optional supervisor sub-action.")
+    p_super.add_argument("supervisor_action", nargs="?", choices=["check-task", "check-stability", "check-watchdog", "preflight"], help="Optional supervisor sub-action.")
     p_super.add_argument("--watch", action="store_true", help="Run continuous supervisor loop.")
     p_super.add_argument("--once", action="store_true", help="Execute single supervisor step.")
     p_super.add_argument("--task", "--task-id", dest="task", help="Target task identifier.")

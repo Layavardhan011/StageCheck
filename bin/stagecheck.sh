@@ -3,4 +3,7 @@
 set -eu
 export PYTHONDONTWRITEBYTECODE=1
 stagecheck_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+if [ -d "$stagecheck_dir/stagecheck" ]; then
+    PYTHONPATH="$stagecheck_dir${PYTHONPATH:+:$PYTHONPATH}" python3 -m stagecheck.core.isolation --preflight --workspace "$PWD" >/dev/null
+fi
 exec python3 "$stagecheck_dir/bin/orchestrate.py" "$@"

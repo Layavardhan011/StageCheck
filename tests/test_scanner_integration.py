@@ -160,7 +160,12 @@ class TestSecretScannerIntegration(unittest.TestCase):
         orchestrator = AuditOrchestrator(self.workspace_root)
         ctx = orchestrator.discover_context(self.task_id, self.attempt)
 
-        with patch("shutil.which", return_value=None):
+        import shutil
+        orig_which = shutil.which
+        with patch(
+            "shutil.which",
+            side_effect=lambda cmd, *a, **kw: None if cmd == "gitleaks" else orig_which(cmd, *a, **kw),
+        ):
             passed, verdict = orchestrator.run_all_stages(ctx)
             self.assertFalse(passed)
             self.assertEqual(verdict["result"], "BLOCKED")

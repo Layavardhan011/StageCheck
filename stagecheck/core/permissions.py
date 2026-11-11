@@ -28,14 +28,22 @@ class VerifierIsolationError(Exception):
     """Raised when verifier files, controls, or sealed evidence are compromised or OS isolation is missing."""
 
 
-def assert_os_sandbox_boundary(unshare_net: bool = True) -> None:
-    """Verify kernel-level same-UID sandbox isolation (Bubblewrap namespaces) is operational."""
-    from stagecheck.core.isolation import probe_bwrap_sandbox
+def assert_os_sandbox_boundary(
+    unshare_net: bool = True,
+    workspace_root: Optional[Union[str, Path]] = None,
+) -> None:
+    """Verify kernel-level same-UID sandbox isolation (Bubblewrap namespaces + RO contracts) is operational."""
+    from stagecheck.core.isolation import run_bwrap_deployment_preflight
 
-    probe = probe_bwrap_sandbox(unshare_net=unshare_net)
-    if not probe.get("available"):
+    ws = Path(workspace_root).resolve() if workspace_root else None
+    preflight = run_bwrap_deployment_preflight(
+        workspace_root=ws,
+        require_network_isolation=unshare_net,
+        raise_on_failure=False,
+    )
+    if not preflight.passed:
         raise VerifierIsolationError(
-            f"OS-enforced same-UID sandbox boundary unavailable: {probe.get('reason')}"
+            f"OS-enforced same-UID sandbox boundary unavailable: {preflight.reason}"
         )
 
 

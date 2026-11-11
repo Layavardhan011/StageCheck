@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from stagecheck.core.isolation import find_workspace_root_for_cwd, run_bwrap_deployment_preflight
 from stagecheck.core.paths import find_workspace_root
 from stagecheck.core.supervisor import (
     PromptDebouncer,
@@ -37,6 +38,17 @@ def run_supervisor_cmd(
     output_json: bool = False,
 ) -> int:
     """Execute supervisor commands and workflows."""
+    if action == "preflight":
+        ws_opt = Path(workspace).resolve() if workspace else find_workspace_root_for_cwd(Path.cwd())
+        preflight = run_bwrap_deployment_preflight(workspace_root=ws_opt, raise_on_failure=False)
+        if output_json:
+            print(json.dumps(preflight.to_dict(), indent=2))
+        elif preflight.passed:
+            print(f"[ISOLATION PREFLIGHT: PASS] {preflight.reason}")
+        else:
+            print(f"ERROR: [isolation.preflight_failed] {preflight.reason}", file=sys.stderr)
+        return 0 if preflight.passed else 126
+
     try:
         ws_root = Path(workspace).resolve() if workspace else find_workspace_root()
     except Exception as err:

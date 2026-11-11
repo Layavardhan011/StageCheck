@@ -185,6 +185,11 @@ class AuditOrchestrator:
 
     def run_all_stages(self, ctx: AuditContext) -> Tuple[bool, Dict[str, Any]]:
         """Run all nine stages in sequence, evaluate dispositions, and format verdict."""
+        from stagecheck.core.isolation import run_bwrap_deployment_preflight
+
+        # Fail closed before running any audit stage or rerun if OS isolation preflight fails (GAP-03)
+        run_bwrap_deployment_preflight(workspace_root=ctx.workspace_root, raise_on_failure=True)
+
         stage_runners = [
             ("preflight", run_stage1_preflight),
             ("scope_paths", run_stage2_scope_paths),

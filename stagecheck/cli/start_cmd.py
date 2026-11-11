@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from stagecheck.core.isolation import SandboxUnavailableError, run_bwrap_deployment_preflight
 from stagecheck.core.locking import acquire_runtime_lock
 from stagecheck.core.paths import find_workspace_root, resolve_task_dir
 from stagecheck.core.permissions import controlled_write_transaction
@@ -32,6 +33,7 @@ def run_start(workspace: Optional[Path] = None, task: Optional[str] = None) -> i
 
     try:
         task_dir = resolve_task_dir(ws_root, task)
+        run_bwrap_deployment_preflight(workspace_root=ws_root, raise_on_failure=True)
         with acquire_runtime_lock(controls_dir):
             state = load_active_state(ws_root)
             phase = str(state.get("phase", "NOT_STARTED"))
@@ -71,6 +73,9 @@ def run_start(workspace: Optional[Path] = None, task: Optional[str] = None) -> i
 
         print(f"SUCCESS: Task '{task}' started in attempt 1 (PHASE_1_PLANNING).")
         return 0
+    except SandboxUnavailableError as err:
+        print(f"ERROR: [isolation.preflight_failed] {err}", file=sys.stderr)
+        return err.exit_code
     except Exception as err:
         print(f"ERROR: [start.failed] {err}", file=sys.stderr)
         return 1

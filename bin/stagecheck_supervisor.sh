@@ -23,6 +23,10 @@ echo -e "Workspace:    ${WORKSPACE_ROOT}"
 echo -e "Active Task:  ${BOLD}${TASK_ID}${NC}"
 echo -e "--------------------------------------------------------------------------------"
 
+# Preflight: Verify mandatory Bubblewrap kernel namespace & filesystem isolation (GAP-03)
+echo -e "${BLUE}[PREFLIGHT] Verifying Bubblewrap OS namespace isolation...${NC}"
+stagecheck supervisor preflight --workspace "${WORKSPACE_ROOT}"
+
 # Step 1: Wait for prompt.md and check stability (30s quiet or 300s hard ceiling)
 echo -e "${BLUE}[STEP 1/4] Waiting for Agent 1 to draft Phase-1/prompt.md...${NC}"
 echo -e "${YELLOW}>> Developer: Please ask Agent 1 to write the architectural prompt.${NC}"

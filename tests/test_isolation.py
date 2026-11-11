@@ -183,6 +183,130 @@ class TestSameUidIsolation(unittest.TestCase):
             with self.assertRaises(SandboxUnavailableError):
                 prepare_isolated_command([sys.executable, "-c", "print('ok')"], policy=policy, mandatory=True)
 
+    def test_gap03_deployment_preflight_checks_all_isolation_invariants(self) -> None:
+        """Verify run_bwrap_deployment_preflight checks namespaces, RO governance/package, credentials, and network (GAP-03)."""
+        import json
+        from stagecheck.core.isolation import run_bwrap_deployment_preflight
+        from stagecheck.cli.main import main
+
+        res = run_bwrap_deployment_preflight(workspace_root=self.ws, working_directory=self.repo_dir)
+        self.assertTrue(res.passed, f"Expected host preflight to pass: {res.reason}")
+        self.assertEqual(
+            set(res.checks.keys()),
+            {
+                "bwrap_binary_trusted",
+                "namespaces_isolated",
+                "root_readonly",
+                "governance_readonly",
+                "package_readonly",
+                "credentials_masked",
+                "network_unshared",
+            },
+        )
+        self.assertTrue(all(res.checks.values()), f"Expected all preflight checks True: {res.checks}")
+
+        # Verify CLI supervisor preflight --json exits 0
+        import io
+        from contextlib import redirect_stdout
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main(["supervisor", "preflight", "--workspace", str(self.ws), "--json"])
+        self.assertEqual(rc, 0)
+        parsed = json.loads(buf.getvalue())
+        self.assertTrue(parsed["passed"])
+
+    def test_gap03_preflight_rejects_missing_untrusted_and_unsupported_namespaces(self) -> None:
+        """Verify preflight fails closed on missing, world-writable, /tmp/repo-local bwrap, and unsupported namespaces (GAP-03)."""
+        from stagecheck.core.isolation import run_bwrap_deployment_preflight, validate_bwrap_binary
+
+        # 1. Missing bwrap binary
+        with patch("stagecheck.core.isolation.resolve_bwrap_binary", return_value=None):
+            with self.assertRaises(SandboxUnavailableError) as err_missing:
+                run_bwrap_deployment_preflight(workspace_root=self.ws, raise_on_failure=True)
+            self.assertEqual(err_missing.exception.exit_code, 126)
+
+        # 2. Untrusted bwrap binary in /tmp or workspace/repo or non-executable or symlink to /tmp
+        fake_in_ws = self.repo_dir / "bwrap"
+        fake_in_ws.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        os.chmod(fake_in_ws, 0o755)
+        ok_ws, msg_ws = validate_bwrap_binary(bwrap_path=fake_in_ws, workspace_root=self.ws)
+        self.assertIsNone(ok_ws)
+        self.assertIn("Untrusted bwrap binary location", msg_ws or "")
+
+        fake_tmp = self.ws / "tmp_bwrap"
+        fake_tmp.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        os.chmod(fake_tmp, 0o644)
+        ok_nonexec, _ = validate_bwrap_binary(bwrap_path=fake_tmp)
+        self.assertIsNone(ok_nonexec)
+
+        # World-writable bwrap outside /tmp (use symlink/mock stat check in non-tmp path via validate logic on /tmp)
+        with tempfile.TemporaryDirectory() as td:
+            rogue = Path(td) / "bwrap"
+            rogue.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(rogue, 0o777)
+            ok_rogue, msg_rogue = validate_bwrap_binary(bwrap_path=rogue)
+            self.assertIsNone(ok_rogue)
+            self.assertIn("world-writable", (msg_rogue or "").lower())
+
+        # 3. Unsupported namespaces (subprocess fails with EPERM) -> fail closed with exact reason
+        fake_proc = subprocess.CompletedProcess(
+            args=["bwrap"], returncode=1, stdout="", stderr="bwrap: No permissions to create a new namespace (EPERM)"
+        )
+        with patch("stagecheck.core.isolation.validate_bwrap_binary", return_value=("/usr/bin/bwrap", None)):
+            with patch("stagecheck.core.isolation._REAL_SUBPROCESS_RUN", return_value=fake_proc):
+                res_ns = run_bwrap_deployment_preflight(workspace_root=self.ws, raise_on_failure=False)
+                self.assertFalse(res_ns.passed)
+                self.assertIn("EPERM", res_ns.reason)
+
+    def test_gap03_start_supervisor_and_orchestrator_block_without_preflight(self) -> None:
+        """Verify stagecheck start, SupervisorEngine.step, and AuditOrchestrator fail closed if preflight fails (GAP-03)."""
+        from stagecheck.cli.main import main
+        from stagecheck.core.isolation import IsolationPreflightResult
+        from stagecheck.core.orchestrator import AuditContext, AuditOrchestrator
+        from stagecheck.core.supervisor import SupervisorEngine
+
+        failed_preflight = IsolationPreflightResult(
+            passed=False,
+            bwrap_path=None,
+            checks={"bwrap_binary_trusted": False},
+            failures=["Kernel user namespaces disabled by sysctl"],
+            reason="Kernel user namespaces disabled by sysctl",
+        )
+
+        # 1. stagecheck supervisor preflight exits 126
+        with patch("stagecheck.cli.supervisor_cmd.run_bwrap_deployment_preflight", return_value=failed_preflight):
+            rc_pre = main(["supervisor", "preflight", "--workspace", str(self.ws)])
+            self.assertEqual(rc_pre, 126)
+
+        # 2. stagecheck start blocks task initialization before mutating workspace
+        (self.controls_dir / "STAGECHECK_ROOT.json").write_text('{"schema_version":"2.0"}\n', encoding="utf-8")
+        with patch("stagecheck.cli.start_cmd.run_bwrap_deployment_preflight", side_effect=SandboxUnavailableError("bwrap unavailable")):
+            rc_start = main(["start", "--task", "task-blocked", "--workspace", str(self.ws)])
+            self.assertEqual(rc_start, 126)
+            self.assertFalse((self.ws / "evidence" / "tasks" / "task-blocked").exists())
+
+        # 3. SupervisorEngine.step halts fail-closed
+        sup = SupervisorEngine(self.ws)
+        with patch("stagecheck.core.isolation.run_bwrap_deployment_preflight", return_value=failed_preflight):
+            step_res = sup.step(task_id="task-blocked", attempt=1)
+            self.assertEqual(step_res.status, "HALTED")
+            self.assertEqual(step_res.action_taken, "ISOLATION_PREFLIGHT_FAILED")
+            self.assertIn("user namespaces disabled", step_res.message)
+
+        # 4. AuditOrchestrator.run_all_stages raises SandboxUnavailableError before running stages
+        orch = AuditOrchestrator(self.ws)
+        ctx = AuditContext(
+            workspace_root=self.ws,
+            task_id="task-blocked",
+            attempt=1,
+            touched_repos=["app"],
+            all_registered_repos=["app"],
+        )
+        with patch("stagecheck.core.isolation.run_bwrap_deployment_preflight", side_effect=SandboxUnavailableError("no bwrap")):
+            with self.assertRaises(SandboxUnavailableError):
+                orch.run_all_stages(ctx)
+
 
 if __name__ == "__main__":
     unittest.main()
