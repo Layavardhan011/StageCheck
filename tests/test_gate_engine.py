@@ -256,16 +256,20 @@ class TestGateEngine(unittest.TestCase):
         self.assertFalse(rep_partial.passed)
 
         # 5. Passing verdict WITH COMPLETE 270/270 PASS Phase-3/rubric_evaluation.json -> PASS
-        full_evals = [
-            {
+        from stagecheck.core.rubric_engine import get_rule_strategy
+
+        full_evals = []
+        for r in catalog:
+            spec = get_rule_strategy(r.rule_id) or {}
+            full_evals.append({
                 "rule_id": r.rule_id,
                 "domain": r.domain,
                 "category": r.category,
                 "status": "PASS",
+                "evaluator": spec.get("evaluator_implementation", "phase_evidence_validator"),
+                "evaluation_strategy": spec.get("evaluation_strategy", ""),
                 "message": "Verified passing criterion.",
-            }
-            for r in catalog
-        ]
+            })
         domain_counts = {}
         for r in catalog:
             d = domain_counts.setdefault(r.domain, {"total": 0, "passed": 0, "failed": 0, "not_applicable": 0, "verdict": "PASS"})

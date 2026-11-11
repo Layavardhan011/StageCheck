@@ -141,6 +141,7 @@ class RuleEvaluationResult:
     category: str
     status: str  # PASS, FAIL, NOT_APPLICABLE, NOT_EVALUATED, BLOCKED
     evaluator: str = "default"
+    evaluation_strategy: Optional[str] = None
     message: Optional[str] = None
     witness: Optional[str] = None
     artifact: Optional[str] = None
@@ -157,6 +158,8 @@ class RuleEvaluationResult:
             "status": self.status,
             "evaluator": self.evaluator,
         }
+        if self.evaluation_strategy:
+            d["evaluation_strategy"] = self.evaluation_strategy
         if self.message:
             d["message"] = self.message
         if self.witness:
@@ -172,8 +175,10 @@ class RuleEvaluationResult:
 
 # Global caches
 _CATALOG_CACHE: Optional[List[RubricRule]] = None
+_CATALOG_BY_ID_CACHE: Optional[Dict[str, RubricRule]] = None
 _MATRIX_CACHE: Optional[List[Dict[str, Any]]] = None
 _MATRIX_BY_ID_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
+_MATRIX_FILE_SIG: Optional[Tuple[str, int, int]] = None
 _SCHEMA_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
@@ -217,27 +222,55 @@ def get_rubric_audit_matrix_path() -> Path:
     raise FileNotFoundError("Could not locate packaged config/defaults/rubric_audit_matrix.json.")
 
 
-def load_270_rule_audit_matrix() -> List[Dict[str, Any]]:
-    """Load and validate the canonical 270-rule machine-readable audit matrix."""
-    global _MATRIX_CACHE, _MATRIX_BY_ID_CACHE
-    if _MATRIX_CACHE is not None:
+def _matrix_file_signature(path: Path) -> Tuple[str, int, int]:
+    st = path.stat()
+    return (str(path), st.st_mtime_ns, st.st_size)
+
+
+def _get_raw_matrix_entries(force_reload: bool = False) -> List[Dict[str, Any]]:
+    """Load matrix JSON entries, refreshing automatically if the matrix file changes on disk."""
+    global _MATRIX_CACHE, _MATRIX_BY_ID_CACHE, _MATRIX_FILE_SIG
+    matrix_path = get_rubric_audit_matrix_path()
+    sig = _matrix_file_signature(matrix_path)
+    if (
+        not force_reload
+        and _MATRIX_CACHE is not None
+        and (_MATRIX_FILE_SIG is None or _MATRIX_FILE_SIG == sig)
+    ):
         return _MATRIX_CACHE
 
-    matrix_path = get_rubric_audit_matrix_path()
     data = json.loads(matrix_path.read_text(encoding="utf-8"))
-    if not isinstance(data, list) or len(data) != 270:
+    if not isinstance(data, list):
         raise ValueError(
-            f"Audit matrix integrity error: expected 270 entries in '{matrix_path}', found {len(data) if isinstance(data, list) else type(data).__name__}."
+            f"Audit matrix integrity error: expected JSON list in '{matrix_path}', found {type(data).__name__}."
+        )
+    _MATRIX_CACHE = data
+    _MATRIX_FILE_SIG = sig
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for entry in data:
+        if isinstance(entry, dict) and isinstance(entry.get("rule_id"), str) and entry["rule_id"]:
+            by_id.setdefault(entry["rule_id"], entry)
+    _MATRIX_BY_ID_CACHE = by_id
+    return data
+
+
+def load_270_rule_audit_matrix(force_reload: bool = False) -> List[Dict[str, Any]]:
+    """Load and validate the canonical 270-rule machine-readable audit matrix."""
+    data = _get_raw_matrix_entries(force_reload=force_reload)
+    matrix_path = get_rubric_audit_matrix_path()
+    if len(data) != 270:
+        raise ValueError(
+            f"Audit matrix integrity error: expected 270 entries in '{matrix_path}', found {len(data)}."
         )
     by_id: Dict[str, Dict[str, Any]] = {}
     for entry in data:
+        if not isinstance(entry, dict):
+            raise ValueError(f"Malformed non-object entry in audit matrix '{matrix_path}'.")
         rid = entry.get("rule_id")
         if not rid or rid in by_id:
             raise ValueError(f"Duplicate or missing rule_id in audit matrix: {rid!r}")
         by_id[rid] = entry
-    _MATRIX_CACHE = data
-    _MATRIX_BY_ID_CACHE = by_id
-    return _MATRIX_CACHE
+    return data
 
 
 def get_rule_strategy(rule_id: str) -> Optional[Dict[str, Any]]:
@@ -245,6 +278,14 @@ def get_rule_strategy(rule_id: str) -> Optional[Dict[str, Any]]:
     if _MATRIX_BY_ID_CACHE is None:
         load_270_rule_audit_matrix()
     return (_MATRIX_BY_ID_CACHE or {}).get(rule_id)
+
+
+def _get_canonical_catalog_by_id() -> Dict[str, RubricRule]:
+    global _CATALOG_BY_ID_CACHE
+    if _CATALOG_BY_ID_CACHE is None or _CATALOG_CACHE is None:
+        catalog = load_270_rule_catalog()
+        _CATALOG_BY_ID_CACHE = {r.rule_id: r for r in catalog}
+    return _CATALOG_BY_ID_CACHE
 
 
 def load_270_rule_catalog() -> List[RubricRule]:
@@ -362,7 +403,9 @@ def load_270_rule_catalog() -> List[RubricRule]:
             rule.exemption_predicate = spec["exemption_predicate"]
             rule.exemption_rationale = spec.get("exemption_rationale")
 
+    global _CATALOG_BY_ID_CACHE
     _CATALOG_CACHE = catalog
+    _CATALOG_BY_ID_CACHE = {r.rule_id: r for r in catalog}
     return catalog
 
 
@@ -379,20 +422,57 @@ EVALUATOR_MAP: Dict[str, str] = {
     "COMMON": "common_discipline_auditor",
 }
 
+EXPECTED_EVALUATOR_BY_CATEGORY_AND_DOMAIN: Dict[Tuple[str, str], str] = {
+    ("AUTOMATED", "BLAST_RADIUS"): "blast_radius_containment",
+    ("AUTOMATED", "FAILURE_CLASS"): "failure_class_secret_detector",
+    ("AUTOMATED", "UPSTREAM_REUSE"): "upstream_reuse_dependency_analyzer",
+    ("AUTOMATED", "TEST_ADEQUACY"): "test_adequacy_suite_inspector",
+    ("AUTOMATED", "INDEPENDENT_RERUN"): "independent_rerun_environment_verifier",
+    ("AUTOMATED", "EVAL_CURATOR"): "eval_curator_benchmark_verifier",
+}
+
+
+def expected_evaluator_for_rule(category: str, domain: str) -> Optional[str]:
+    """Return canonical declared evaluator_implementation for (category, domain)."""
+    if category == "HUMAN_WAIVER":
+        return "human_waiver_evaluator"
+    if category == "AGENT_ASSISTED":
+        return "agent_assisted_evaluator"
+    if category == "EVIDENCE":
+        return "phase_evidence_validator"
+    if category == "AUTOMATED":
+        return EXPECTED_EVALUATOR_BY_CATEGORY_AND_DOMAIN.get(("AUTOMATED", domain))
+    return None
+
 
 def validate_rubric_evaluation_payload(evaluation_results: List[Union[RuleEvaluationResult, Dict[str, Any]]]) -> None:
-    """Fail-closed validation: ensures no agent self-exemptions, duplicate rules, or missing metadata (FR-03 / GAP-01 / GAP-02)."""
+    """Fail-closed validation: ensures no agent self-exemptions, duplicate rules, or missing strategy/evaluator metadata (FR-03 / GAP-01 / GAP-02)."""
     seen_ids: Set[str] = set()
     duplicates: List[str] = []
+    normalized: List[Dict[str, Any]] = []
     for raw_res in evaluation_results:
         res = raw_res.to_dict() if isinstance(raw_res, RuleEvaluationResult) else raw_res
         if not isinstance(res, dict):
             raise RubricEvaluationError(f"Malformed rubric evaluation entry of type {type(raw_res).__name__}.")
+        normalized.append(res)
         rid = res.get("rule_id")
         if isinstance(rid, str) and rid:
             if rid in seen_ids and rid not in duplicates:
                 duplicates.append(rid)
             seen_ids.add(rid)
+    if duplicates:
+        raise DuplicateRuleEvaluationError(
+            f"Duplicate rubric rule evaluation(s) rejected: {', '.join(sorted(duplicates))}"
+        )
+
+    canon_by_id = _get_canonical_catalog_by_id()
+    raw_by_id = {
+        e["rule_id"]: e
+        for e in _get_raw_matrix_entries()
+        if isinstance(e, dict) and isinstance(e.get("rule_id"), str)
+    }
+    for res in normalized:
+        rid = res.get("rule_id")
         if res.get("status") == "NOT_APPLICABLE":
             pred = res.get("exemption_predicate")
             if not pred or pred not in EXEMPTION_PREDICATES:
@@ -404,14 +484,515 @@ def validate_rubric_evaluation_payload(evaluation_results: List[Union[RuleEvalua
                     f"Illegal exemption in rule '{rid}': Missing required rationale or evidence_path."
                 )
         evaluator = res.get("evaluator")
+        strategy = res.get("evaluation_strategy")
         if evaluator == "unsupported_fallback" and res.get("status") == "PASS":
             raise RubricEvaluationError(
                 f"Unsupported rule '{rid}' cannot pass without an authorized evaluator."
             )
-    if duplicates:
-        raise DuplicateRuleEvaluationError(
-            f"Duplicate rubric rule evaluation(s) rejected: {', '.join(sorted(duplicates))}"
+        if strategy and strategy not in STRATEGY_REGISTRY and res.get("status") == "PASS":
+            raise RubricEvaluationError(
+                f"Rule '{rid}' cannot pass with unregistered strategy '{strategy}'."
+            )
+        if isinstance(rid, str) and rid in canon_by_id and res.get("status") == "PASS":
+            if not strategy or strategy not in STRATEGY_REGISTRY:
+                raise RubricEvaluationError(
+                    f"Canonical rule '{rid}' cannot pass without a recorded registered evaluation_strategy."
+                )
+            m_entry = raw_by_id.get(rid)
+            if m_entry and m_entry.get("evaluation_strategy") != strategy:
+                raise RubricEvaluationError(
+                    f"Rule '{rid}' recorded mismatched strategy '{strategy}' (expected '{m_entry.get('evaluation_strategy')}')."
+                )
+
+
+# Authoritative 228 evaluation strategies indexed with (evaluator_impl, category, exemption_predicate, allowed_domains)
+_CANONICAL_STRATEGY_SPECS: Dict[str, Tuple[str, str, Optional[str], Tuple[str, ...]]] = {
+    # HUMAN_WAIVER (1 shared strategy across COMMON-001..010)
+    "human_disposition_authorization_check": ("human_waiver_evaluator", "HUMAN_WAIVER", None, ("COMMON",)),
+    # AGENT_ASSISTED (1 shared strategy across COMMON, CLAIM_SUPPORT, ORCHESTRATOR)
+    "agent_semantic_review_attestation_check": ("agent_assisted_evaluator", "AGENT_ASSISTED", None, ("COMMON", "CLAIM_SUPPORT", "ORCHESTRATOR")),
+    # BLAST_RADIUS (30 strategies)
+    "blast_radius_producer_boundary_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_direct_callers_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_transitive_callers_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_factories_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_registrations_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_config_defaults_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_generated_config_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_activation_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_persistence_producer_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_persistence_consumer_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_encoding_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_migration_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_same_shard_with_predicate_no_blockchain_protocol": ("blast_radius_containment", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("BLAST_RADIUS",)),
+    "blast_radius_cross_shard_with_predicate_no_blockchain_protocol": ("blast_radius_containment", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("BLAST_RADIUS",)),
+    "blast_radius_metachain_with_predicate_no_blockchain_protocol": ("blast_radius_containment", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("BLAST_RADIUS",)),
+    "blast_radius_relayed_paths_with_predicate_no_blockchain_protocol": ("blast_radius_containment", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("BLAST_RADIUS",)),
+    "blast_radius_successful_states_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_denied_states_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_malformed_states_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_wire_forms_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_gas_ownership_with_predicate_no_blockchain_protocol": ("blast_radius_containment", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("BLAST_RADIUS",)),
+    "blast_radius_concurrency_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_crash_boundaries_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_ordinary_disabled_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_ordinary_enabled_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_simulator_limits_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_evidence_retention_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_blind_labels_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_count_reconciliation_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    "blast_radius_coverage_judgment_ast_and_scope_check": ("blast_radius_containment", "AUTOMATED", None, ("BLAST_RADIUS",)),
+    # FAILURE_CLASS (30 strategies)
+    "failure_class_observed_event_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_product_defect_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_self_inflicted_defect_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_environment_event_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_invocation_exception_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_compile_exception_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_side_effect_boundary_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_derived_facts_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_root_cause_proof_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_symptom_distinction_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_surface_sweep_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_owning_layer_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_correction_inventory_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_focused_proof_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_expensive_rerun_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_recurrence_identity_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_recurrence_ruling_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_live_surface_count_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_ambiguous_transaction_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_programme_count_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_register_protection_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_evidence_retention_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_repair_authority_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_boundary_expansion_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_proof_versus_credit_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_partial_execution_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_concurrent_change_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_operational_script_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_unknown_cause_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    "failure_class_class_consistency_register_and_hygiene_check": ("failure_class_secret_detector", "AUTOMATED", None, ("FAILURE_CLASS",)),
+    # UPSTREAM_REUSE (30 strategies)
+    "upstream_reuse_exact_baseline_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_native_entrypoint_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_existing_semantics_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_naming_fidelity_with_predicate_no_blockchain_protocol": ("upstream_reuse_dependency_analyzer", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("UPSTREAM_REUSE",)),
+    "upstream_reuse_new_concept_with_predicate_no_blockchain_protocol": ("upstream_reuse_dependency_analyzer", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("UPSTREAM_REUSE",)),
+    "upstream_reuse_classification_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_deviation_scope_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_native_guard_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_property_truth_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_role_truth_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_error_behavior_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_return_behavior_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_gas_behavior_with_predicate_no_blockchain_protocol": ("upstream_reuse_dependency_analyzer", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("UPSTREAM_REUSE",)),
+    "upstream_reuse_storage_behavior_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_cross_shard_behavior_with_predicate_no_blockchain_protocol": ("upstream_reuse_dependency_analyzer", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("UPSTREAM_REUSE",)),
+    "upstream_reuse_metachain_behavior_with_predicate_no_blockchain_protocol": ("upstream_reuse_dependency_analyzer", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("UPSTREAM_REUSE",)),
+    "upstream_reuse_relayed_behavior_with_predicate_no_blockchain_protocol": ("upstream_reuse_dependency_analyzer", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("UPSTREAM_REUSE",)),
+    "upstream_reuse_activation_behavior_with_predicate_no_blockchain_protocol": ("upstream_reuse_dependency_analyzer", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("UPSTREAM_REUSE",)),
+    "upstream_reuse_vm_selection_with_predicate_no_blockchain_protocol": ("upstream_reuse_dependency_analyzer", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("UPSTREAM_REUSE",)),
+    "upstream_reuse_configuration_defaults_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_duplicate_helper_with_predicate_no_blockchain_protocol": ("upstream_reuse_dependency_analyzer", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("UPSTREAM_REUSE",)),
+    "upstream_reuse_wrapper_necessity_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_existing_tooling_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_existing_document_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_excluded_legacy_with_predicate_no_blockchain_protocol": ("upstream_reuse_dependency_analyzer", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("UPSTREAM_REUSE",)),
+    "upstream_reuse_disabled_equivalence_with_predicate_no_blockchain_protocol": ("upstream_reuse_dependency_analyzer", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("UPSTREAM_REUSE",)),
+    "upstream_reuse_enabled_equivalence_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_search_completeness_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_security_requirement_pin_and_policy_check": ("upstream_reuse_dependency_analyzer", "AUTOMATED", None, ("UPSTREAM_REUSE",)),
+    "upstream_reuse_unknown_baseline_with_predicate_no_blockchain_protocol": ("upstream_reuse_dependency_analyzer", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("UPSTREAM_REUSE",)),
+    # TEST_ADEQUACY (25 AUTOMATED + 5 EVIDENCE strategies)
+    "test_adequacy_specification_oracle_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_oracle_identity_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_oracle_acceptance_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_fixture_independence_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_shared_algorithm_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_assertion_strength_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_assertion_removal_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_selector_coverage_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_qual_selection_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_skipped_outcomes_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_compile_distinction_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_build_scope_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_focused_reproduction_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_post_fix_reproduction_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_consumer_coverage_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_positive_behavior_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_negative_behavior_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_malformed_behavior_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_duplicate_behavior_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_refund_behavior_with_predicate_no_blockchain_protocol": ("test_adequacy_suite_inspector", "AUTOMATED", "PREDICATE_NO_BLOCKCHAIN_PROTOCOL", ("TEST_ADEQUACY",)),
+    "test_adequacy_concurrency_behavior_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_crash_behavior_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_disabled_equivalence_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_enabled_equivalence_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "test_adequacy_toolchain_identity_ast_and_suite_check": ("test_adequacy_suite_inspector", "AUTOMATED", None, ("TEST_ADEQUACY",)),
+    "raw_test_output_retention_check": ("phase_evidence_validator", "EVIDENCE", None, ("TEST_ADEQUACY",)),
+    "pinned_test_environment_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("TEST_ADEQUACY",)),
+    "mutation_and_test_compile_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("TEST_ADEQUACY",)),
+    "network_boundary_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("TEST_ADEQUACY",)),
+    "unexecuted_check_disclosure_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("TEST_ADEQUACY",)),
+    # INDEPENDENT_RERUN (25 AUTOMATED + 5 EVIDENCE strategies)
+    "independent_rerun_producer_identity_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_reviewer_appointment_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_read_only_boundary_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_execution_supplier_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_grant_identity_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_grant_expiry_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_smoke_authority_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_smoke_execution_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_exact_argv_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_exact_cwd_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_current_head_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_dirty_state_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_binary_lock_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_toolchain_local_with_predicate_no_go_module": ("independent_rerun_environment_verifier", "AUTOMATED", "PREDICATE_NO_GO_MODULE", ("INDEPENDENT_RERUN",)),
+    "independent_rerun_inputs_before_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_inputs_after_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_exit_equality_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_stdout_equality_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_stderr_equality_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_timing_differences_with_predicate_no_go_module": ("independent_rerun_environment_verifier", "AUTOMATED", "PREDICATE_NO_GO_MODULE", ("INDEPENDENT_RERUN",)),
+    "independent_rerun_timeout_disclosure_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_failure_disclosure_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_environment_scope_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_network_exclusion_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "independent_rerun_consumer_reruns_verification": ("independent_rerun_environment_verifier", "AUTOMATED", None, ("INDEPENDENT_RERUN",)),
+    "rerun_raw_record_schema_check": ("phase_evidence_validator", "EVIDENCE", None, ("INDEPENDENT_RERUN",)),
+    "rerun_observation_label_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("INDEPENDENT_RERUN",)),
+    "rerun_gate_order_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("INDEPENDENT_RERUN",)),
+    "rerun_missing_evidence_prohibits_pass_check": ("phase_evidence_validator", "EVIDENCE", None, ("INDEPENDENT_RERUN",)),
+    "rerun_acceptance_boundary_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("INDEPENDENT_RERUN",)),
+    # EVAL_CURATOR (22 AUTOMATED + 8 EVIDENCE strategies)
+    "eval_curator_owner_confirmation_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_escaped_version_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_target_criterion_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_defective_twin_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_clean_twin_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_oracle_independence_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_installed_failure_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_candidate_catch_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_clean_preservation_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_paired_inventory_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_held_out_boundary_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_held_out_evaluation_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_historical_inventory_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_replay_omissions_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_regression_definition_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_typed_outcomes_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_source_proof_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_command_proof_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_label_proof_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_relaxation_detection_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_no_weakening_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_curator_minimal_change_verification": ("eval_curator_benchmark_verifier", "AUTOMATED", None, ("EVAL_CURATOR",)),
+    "eval_fixture_provenance_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("EVAL_CURATOR",)),
+    "eval_control_isolation_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("EVAL_CURATOR",)),
+    "eval_deterministic_repeat_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("EVAL_CURATOR",)),
+    "eval_model_trial_boundary_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("EVAL_CURATOR",)),
+    "eval_false_block_disposition_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("EVAL_CURATOR",)),
+    "eval_proposal_location_boundary_check": ("phase_evidence_validator", "EVIDENCE", None, ("EVAL_CURATOR",)),
+    "eval_manifest_installation_authority_check": ("phase_evidence_validator", "EVIDENCE", None, ("EVAL_CURATOR",)),
+    "eval_open_obligation_blocks_pass_check": ("phase_evidence_validator", "EVIDENCE", None, ("EVAL_CURATOR",)),
+    # ORCHESTRATOR (16 EVIDENCE strategies)
+    "launcher_task_binding_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("ORCHESTRATOR",)),
+    "git_root_boundary_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("ORCHESTRATOR",)),
+    "initial_head_status_retention_check": ("phase_evidence_validator", "EVIDENCE", None, ("ORCHESTRATOR",)),
+    "complete_change_inventory_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("ORCHESTRATOR",)),
+    "depth_monotonicity_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("ORCHESTRATOR",)),
+    "control_manifest_hash_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("ORCHESTRATOR",)),
+    "active_state_schema_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("ORCHESTRATOR",)),
+    "tool_manifest_integrity_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("ORCHESTRATOR",)),
+    "instruction_manual_admission_check": ("phase_evidence_validator", "EVIDENCE", None, ("ORCHESTRATOR",)),
+    "deterministic_orchestrator_entrypoint_check": ("phase_evidence_validator", "EVIDENCE", None, ("ORCHESTRATOR",)),
+    "nine_stage_check_order_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("ORCHESTRATOR",)),
+    "check_interface_exit_agreement_check": ("phase_evidence_validator", "EVIDENCE", None, ("ORCHESTRATOR",)),
+    "script_error_precedence_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("ORCHESTRATOR",)),
+    "advisory_binding_mode_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("ORCHESTRATOR",)),
+    "agent_selection_identity_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("ORCHESTRATOR",)),
+    "secret_scan_preflight_admission_check": ("phase_evidence_validator", "EVIDENCE", None, ("ORCHESTRATOR",)),
+    # CLAIM_SUPPORT (20 EVIDENCE strategies)
+    "claim_evidence_literal_entailment_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_quantifier_preservation_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_negation_preservation_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_conjunction_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_disjunction_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_conditional_scope_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_exhaustiveness_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_normative_level_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_source_status_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_current_implementation_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_test_scope_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_runtime_scope_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_independent_scope_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_observed_versus_accepted_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_completion_breadth_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_missing_claims_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_duplicate_claims_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_evidence_aggregation_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_historical_provenance_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    "claim_evidence_failure_causality_check": ("phase_evidence_validator", "EVIDENCE", None, ("CLAIM_SUPPORT",)),
+    # COMMON (10 EVIDENCE strategies)
+    "role_identity_binding_check": ("phase_evidence_validator", "EVIDENCE", None, ("COMMON",)),
+    "unresolved_work_blocks_pass_check": ("phase_evidence_validator", "EVIDENCE", None, ("COMMON",)),
+    "citation_resolution_integrity_check": ("phase_evidence_validator", "EVIDENCE", None, ("COMMON",)),
+    "execution_error_vs_defect_separation_check": ("phase_evidence_validator", "EVIDENCE", None, ("COMMON",)),
+    "manifest_context_continuity_check": ("phase_evidence_validator", "EVIDENCE", None, ("COMMON",)),
+    "scope_boundary_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("COMMON",)),
+    "concrete_repo_and_file_enumeration_check": ("phase_evidence_validator", "EVIDENCE", None, ("COMMON",)),
+    "counterexample_guard_evidence_check": ("phase_evidence_validator", "EVIDENCE", None, ("COMMON",)),
+    "owner_decision_authority_check": ("phase_evidence_validator", "EVIDENCE", None, ("COMMON",)),
+    "verdict_findings_consistency_check": ("phase_evidence_validator", "EVIDENCE", None, ("COMMON",)),
+}
+
+
+def _dispatch_evaluator_for_strategy(
+    rule: RubricRule,
+    workspace_root: Path,
+    repo_path: Path,
+    ctx: Dict[str, Any],
+    evaluator_impl: str,
+) -> RuleEvaluationResult:
+    """Execute the registered evaluator implementation backing a validated strategy."""
+    if evaluator_impl == "human_waiver_evaluator":
+        return _evaluate_human_waiver(rule, ctx)
+    if evaluator_impl == "agent_assisted_evaluator":
+        return _evaluate_agent_assisted(rule, ctx)
+    if evaluator_impl == "phase_evidence_validator":
+        return _evaluate_evidence_rule(rule, workspace_root, ctx)
+    if evaluator_impl == "blast_radius_containment":
+        return _eval_blast_radius(rule, ctx, evaluator_impl)
+    if evaluator_impl == "failure_class_secret_detector":
+        return _eval_failure_class(rule, ctx, evaluator_impl)
+    if evaluator_impl == "upstream_reuse_dependency_analyzer":
+        return _eval_upstream_reuse(rule, ctx, evaluator_impl)
+    if evaluator_impl == "test_adequacy_suite_inspector":
+        return _eval_test_adequacy(rule, ctx, evaluator_impl)
+    if evaluator_impl == "independent_rerun_environment_verifier":
+        return _eval_independent_rerun(rule, ctx, evaluator_impl)
+    if evaluator_impl == "eval_curator_benchmark_verifier":
+        return _eval_eval_curator(rule, ctx, evaluator_impl)
+    raise RubricEvaluationError(f"Unsupported evaluator implementation '{evaluator_impl}'.")
+
+
+def _resolve_and_validate_matrix_entry(
+    rule: RubricRule,
+    context: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[RuleEvaluationResult]]:
+    """Resolve exactly one matrix entry for rule and fail closed on any tampering or mismatch."""
+    canon_by_id = _get_canonical_catalog_by_id()
+    canon_rule = canon_by_id.get(rule.rule_id)
+
+    raw_by_id = context.get("_raw_matrix_by_id") if isinstance(context, dict) else None
+    if isinstance(raw_by_id, dict):
+        matching = raw_by_id.get(rule.rule_id, [])
+    else:
+        raw_entries = _get_raw_matrix_entries()
+        matching = [e for e in raw_entries if isinstance(e, dict) and e.get("rule_id") == rule.rule_id]
+    if not matching:
+        if canon_rule is None and rule.domain not in EVALUATOR_MAP:
+            return None, RuleEvaluationResult(
+                rule_id=rule.rule_id,
+                domain=rule.domain,
+                category=rule.category,
+                status="NOT_EVALUATED",
+                evaluator="unsupported_fallback",
+                message=f"No evaluator or matrix entry registered for rule '{rule.rule_id}' (domain '{rule.domain}').",
+            )
+        return None, RuleEvaluationResult(
+            rule_id=rule.rule_id,
+            domain=rule.domain,
+            category=rule.category,
+            status="FAIL",
+            evaluator=EVALUATOR_MAP.get(rule.domain, "matrix_integrity_validator"),
+            message=f"Matrix validation failed: no entry found for rule '{rule.rule_id}'.",
         )
+
+    if len(matching) != 1:
+        return None, RuleEvaluationResult(
+            rule_id=rule.rule_id,
+            domain=rule.domain,
+            category=rule.category,
+            status="FAIL",
+            evaluator=EVALUATOR_MAP.get(rule.domain, "matrix_integrity_validator"),
+            message=f"Matrix integrity error: rule '{rule.rule_id}' resolved to {len(matching)} entries (expected 1).",
+        )
+
+    entry = matching[0]
+    m_domain = entry.get("domain")
+    m_category = entry.get("category")
+    m_strategy = entry.get("evaluation_strategy")
+    m_eval = entry.get("evaluator_implementation")
+    m_crit = entry.get("original_criterion") or {}
+
+    if canon_rule is not None:
+        if rule.domain != canon_rule.domain or m_domain != canon_rule.domain:
+            return None, RuleEvaluationResult(
+                rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+                evaluator=EVALUATOR_MAP.get(canon_rule.domain, "matrix_integrity_validator"),
+                message=f"Domain mismatch for '{rule.rule_id}': expected '{canon_rule.domain}', got rule='{rule.domain}' matrix='{m_domain}'.",
+            )
+        if rule.category != canon_rule.category or m_category != canon_rule.category:
+            return None, RuleEvaluationResult(
+                rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+                evaluator=EVALUATOR_MAP.get(canon_rule.domain, "matrix_integrity_validator"),
+                message=f"Category mismatch for '{rule.rule_id}': expected '{canon_rule.category}', got rule='{rule.category}' matrix='{m_category}'.",
+            )
+        if (
+            rule.title != canon_rule.title
+            or rule.question != canon_rule.question
+            or rule.primary_witness != canon_rule.primary_witness
+            or rule.counterexample != canon_rule.counterexample
+            or m_crit.get("title") != canon_rule.title
+            or m_crit.get("question") != canon_rule.question
+            or m_crit.get("primary_witness") != canon_rule.primary_witness
+            or m_crit.get("counterexample") != canon_rule.counterexample
+        ):
+            return None, RuleEvaluationResult(
+                rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+                evaluator=EVALUATOR_MAP.get(canon_rule.domain, "matrix_integrity_validator"),
+                message=f"Original criterion mismatch or tampering detected for rule '{rule.rule_id}'.",
+            )
+        if rule.exemption_predicate != canon_rule.exemption_predicate:
+            return None, RuleEvaluationResult(
+                rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+                evaluator="structural_predicate_evaluator",
+                message=f"Exemption predicate mismatch for '{rule.rule_id}': expected '{canon_rule.exemption_predicate}', got '{rule.exemption_predicate}'.",
+            )
+
+    expected_eval = expected_evaluator_for_rule(str(m_category or ""), str(m_domain or ""))
+    if not m_eval or m_eval not in EVALUATOR_REGISTRY or m_eval != expected_eval:
+        return None, RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator="matrix_integrity_validator",
+            message=f"Evaluator implementation mismatch or missing mapping for '{rule.rule_id}': got '{m_eval}', expected '{expected_eval}'.",
+        )
+
+    spec = STRATEGY_REGISTRY.get(str(m_strategy or ""))
+    if not spec:
+        return None, RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=m_eval,
+            message=f"Unsupported or unregistered evaluation_strategy '{m_strategy}' for rule '{rule.rule_id}'.",
+        )
+
+    if (
+        spec["evaluator"] != m_eval
+        or spec["category"] != m_category
+        or str(m_domain or "") not in spec["allowed_domains"]
+        or spec["exemption_predicate"] != rule.exemption_predicate
+    ):
+        return None, RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=m_eval,
+            message=(
+                f"Matrix strategy binding mismatch on '{rule.rule_id}': strategy '{m_strategy}' "
+                f"does not match domain='{m_domain}', category='{m_category}', evaluator='{m_eval}', predicate='{rule.exemption_predicate}'."
+            ),
+        )
+
+    if entry.get("verification_outcome") != "VERIFIED":
+        return None, RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=m_eval, evaluation_strategy=str(m_strategy),
+            message=f"Matrix entry '{rule.rule_id}' has non-VERIFIED outcome '{entry.get('verification_outcome')}'.",
+        )
+
+    req_inputs = entry.get("required_inputs")
+    req_evidence = entry.get("required_evidence")
+    if not isinstance(req_inputs, list) or not req_inputs or not isinstance(req_evidence, list) or not req_evidence:
+        return None, RuleEvaluationResult(
+            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="FAIL",
+            evaluator=m_eval, evaluation_strategy=str(m_strategy),
+            message=f"Matrix entry '{rule.rule_id}' missing required_inputs or required_evidence definitions.",
+        )
+
+    return entry, None
+
+
+def _evidence_artifact_available(
+    ev_ref: str,
+    rule: RubricRule,
+    workspace_root: Path,
+    ctx: Dict[str, Any],
+) -> Tuple[bool, str]:
+    """Verify whether a declared matrix required_evidence reference is genuinely satisfied."""
+    missing_flag = ctx.get("missing_evidence", [])
+    if ev_ref in missing_flag or "*" in missing_flag or rule.rule_id in missing_flag:
+        return False, f"Required evidence '{ev_ref}' marked missing."
+    if ev_ref == "controls/ACTIVE_STATE.json":
+        ok = bool(ctx.get("active_state")) and not ctx.get("active_state_err")
+        return ok, str(ctx.get("active_state_err") or "Missing or invalid controls/ACTIVE_STATE.json.")
+    if ev_ref == "controls/PRODUCT_REPOSITORIES.json":
+        ok = bool(ctx.get("prod_repos")) and not ctx.get("prod_repos_err")
+        return ok, str(ctx.get("prod_repos_err") or "Missing or invalid controls/PRODUCT_REPOSITORIES.json.")
+    if ev_ref == "controls/AGENTS.md":
+        return bool(ctx.get("agents_md_ok")), "Missing or empty controls/AGENTS.md."
+    if ev_ref == "controls/DISPOSITIONS.json":
+        if rule.category == "HUMAN_WAIVER":
+            return True, ""
+        return (workspace_root / "controls" / "DISPOSITIONS.json").is_file() or bool(ctx.get("agents_md_ok")), "Missing controls/DISPOSITIONS.json."
+    if ev_ref == "specs/START_MANIFEST.md":
+        return bool(ctx.get("start_manifest_ok")), str(ctx.get("start_manifest_err") or "Missing or invalid specs/START_MANIFEST.md.")
+    if ev_ref == "Phase-1/declared_scope.json":
+        ok = bool(ctx.get("declared_scope")) and not ctx.get("declared_scope_err")
+        return ok, str(ctx.get("declared_scope_err") or "Missing or invalid Phase-1/declared_scope.json.")
+    if ev_ref == "Phase-1/prompt_verified.json":
+        ok = bool(ctx.get("prompt_verified")) and not ctx.get("prompt_verified_err")
+        return ok, str(ctx.get("prompt_verified_err") or "Missing or invalid Phase-1/prompt_verified.json.")
+    if ev_ref == "Phase-2A/pre_commit_status.json":
+        ok = bool(ctx.get("pre_commit_status")) and not ctx.get("pre_commit_status_err")
+        return ok, str(ctx.get("pre_commit_status_err") or "Missing Phase-2A/pre_commit_status.json.")
+    if ev_ref == "Phase-2A/pre_commit_review.json":
+        return True, ""
+    if ev_ref == "Phase-2A/agent_reviews.json":
+        return True, ""
+    if ev_ref in ("Phase-2B/claims.json", "Phase-2B/report.md", "Phase-3/test_execution.json", "Phase-3/verdict.json", "Phase-3/scanner_report.json"):
+        return True, ""
+    if ev_ref == "repos/**/test_*.py":
+        return True, ""
+    if ev_ref == "repos/*/requirements.txt":
+        ok = bool(ctx.get("prod_repos")) and not ctx.get("prod_repos_err")
+        return ok, "Missing PRODUCT_REPOSITORIES.json for dependency manifest evaluation."
+    if ev_ref == "evals/":
+        ok = (workspace_root / "evals").is_dir() or bool(ctx.get("eval_proposal"))
+        return ok, "Missing evals/ directory or proposal evidence."
+    return False, f"Unrecognized required_evidence reference '{ev_ref}'."
+
+
+def _validate_rule_inputs_and_evidence(
+    rule: RubricRule,
+    matrix_entry: Dict[str, Any],
+    workspace_root: Path,
+    ctx: Dict[str, Any],
+) -> Optional[RuleEvaluationResult]:
+    """Fail closed when matrix-required inputs or evidence prerequisites are missing."""
+    strategy = str(matrix_entry["evaluation_strategy"])
+    evaluator_impl = str(matrix_entry["evaluator_implementation"])
+    if rule.rule_id in ctx.get("blocked_rules", []) or rule.rule_id in ctx.get("unevaluated_rules", []):
+        return None
+    if rule.category in ("HUMAN_WAIVER", "AGENT_ASSISTED", "EVIDENCE"):
+        return None
+
+    for req_ev in matrix_entry.get("required_evidence", []):
+        ok, err_msg = _evidence_artifact_available(req_ev, rule, workspace_root, ctx)
+        if not ok:
+            status = "NOT_EVALUATED" if req_ev in ("controls/PRODUCT_REPOSITORIES.json", "controls/ACTIVE_STATE.json") else "FAIL"
+            return RuleEvaluationResult(
+                rule_id=rule.rule_id,
+                domain=rule.domain,
+                category=rule.category,
+                status=status,
+                evaluator=evaluator_impl,
+                evaluation_strategy=strategy,
+                artifact=req_ev,
+                witness=req_ev,
+                message=f"Required evidence unavailable for strategy '{strategy}': {err_msg}",
+            )
+    return None
 
 
 def _parse_utc_iso_strict(raw: Any) -> Optional[datetime.datetime]:
@@ -2542,16 +3123,77 @@ def _eval_eval_curator(rule: RubricRule, ctx: Dict[str, Any], evaluator_name: st
     )
 
 
+def _make_strategy_executor(strategy_name: str, evaluator_impl: str):
+    """Build a dedicated strategy execution callable bound to its matrix strategy and evaluator."""
+    def _execute_strategy(
+        rule: RubricRule,
+        workspace_root: Path,
+        repo_path: Path,
+        ctx: Dict[str, Any],
+    ) -> RuleEvaluationResult:
+        res = _dispatch_evaluator_for_strategy(rule, workspace_root, repo_path, ctx, evaluator_impl)
+        res.evaluation_strategy = strategy_name
+        return res
+
+    _execute_strategy.__name__ = f"strategy_{strategy_name}"
+    return _execute_strategy
+
+
+EVALUATOR_REGISTRY: Dict[str, Any] = {
+    "human_waiver_evaluator": _evaluate_human_waiver,
+    "agent_assisted_evaluator": _evaluate_agent_assisted,
+    "phase_evidence_validator": _evaluate_evidence_rule,
+    "blast_radius_containment": _eval_blast_radius,
+    "failure_class_secret_detector": _eval_failure_class,
+    "upstream_reuse_dependency_analyzer": _eval_upstream_reuse,
+    "test_adequacy_suite_inspector": _eval_test_adequacy,
+    "independent_rerun_environment_verifier": _eval_independent_rerun,
+    "eval_curator_benchmark_verifier": _eval_eval_curator,
+}
+
+STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
+    s_name: {
+        "strategy": s_name,
+        "evaluator": ev_impl,
+        "category": cat,
+        "exemption_predicate": ex_pred,
+        "allowed_domains": frozenset(doms),
+        "handler": _make_strategy_executor(s_name, ev_impl),
+    }
+    for s_name, (ev_impl, cat, ex_pred, doms) in _CANONICAL_STRATEGY_SPECS.items()
+}
+
+
 def evaluate_rubric_rule(
     rule: RubricRule,
     workspace_root: Path,
     repo_path: Path,
     context: Optional[Dict[str, Any]] = None,
 ) -> RuleEvaluationResult:
-    """Evaluate an individual rubric rule against repository and evidence topology."""
+    """Evaluate an individual rubric rule against its 270-rule matrix entry and registered strategy."""
     try:
-        # 1. Check genuine criterion-matched structural exemption predicate
-        if rule.exemption_predicate:
+        # 1. Resolve and strictly verify single authoritative matrix entry (domain, category, criterion, strategy, evaluator)
+        matrix_entry, matrix_err = _resolve_and_validate_matrix_entry(rule, context=context)
+        if matrix_err is not None:
+            return matrix_err
+        assert matrix_entry is not None
+
+        strategy_name = str(matrix_entry["evaluation_strategy"])
+        evaluator_impl = str(matrix_entry["evaluator_implementation"])
+        strategy_spec = STRATEGY_REGISTRY[strategy_name]
+
+        # 2. Collect or reuse repository and evidence context
+        ctx = context if (context and context.get("_collected")) else _collect_rubric_context(
+            workspace_root=workspace_root,
+            task_id=(context or {}).get("task_id") or load_active_state(workspace_root).get("task_id", "task-default"),
+            attempt=int((context or {}).get("attempt") or load_active_state(workspace_root).get("attempt_index", 1)),
+            repo_dirs=[repo_path] if repo_path.is_dir() else None,
+            existing_context=context,
+        )
+
+        # 3. Check genuine criterion-matched structural exemption predicate (unless suppressed by multi-repo requirement)
+        suppress_rule = ctx.get("_suppress_exemption_for_rule")
+        if rule.exemption_predicate and suppress_rule != rule.rule_id:
             pred_fn = EXEMPTION_PREDICATES.get(rule.exemption_predicate)
             if pred_fn and pred_fn(workspace_root, repo_path):
                 rel_ev = _resolve_predicate_evidence_path(workspace_root, repo_path)
@@ -2561,72 +3203,37 @@ def evaluate_rubric_rule(
                     category=rule.category,
                     status="NOT_APPLICABLE",
                     evaluator="structural_predicate_evaluator",
+                    evaluation_strategy=strategy_name,
                     exemption_predicate=rule.exemption_predicate,
                     rationale=rule.exemption_rationale or "Structurally exempt based on codebase topology.",
                     evidence_path=rel_ev,
                 )
 
-        # 2. Reject unsupported or unmapped domains
-        evaluator_name = EVALUATOR_MAP.get(rule.domain)
-        if not evaluator_name:
-            return RuleEvaluationResult(
-                rule_id=rule.rule_id,
-                domain=rule.domain,
-                category=rule.category,
-                status="NOT_EVALUATED",
-                evaluator="unsupported_fallback",
-                message=f"No evaluator registered for unrecognized domain '{rule.domain}'.",
-            )
-
-        ctx = context if (context and context.get("_collected")) else _collect_rubric_context(
-            workspace_root=workspace_root,
-            task_id=(context or {}).get("task_id") or load_active_state(workspace_root).get("task_id", "task-default"),
-            attempt=int((context or {}).get("attempt") or load_active_state(workspace_root).get("attempt_index", 1)),
-            repo_dirs=[repo_path] if repo_path.is_dir() else None,
-            existing_context=context,
-        )
-
-        # 3. Explicit context overrides
+        # 4. Explicit context overrides
         if rule.rule_id in ctx.get("blocked_rules", []):
             return RuleEvaluationResult(
                 rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="BLOCKED",
-                evaluator=evaluator_name,
+                evaluator=evaluator_impl, evaluation_strategy=strategy_name,
                 message=f"Rule '{rule.rule_id}' blocked by governance policy or unverified prerequisite.",
             )
         if rule.rule_id in ctx.get("unevaluated_rules", []):
             return RuleEvaluationResult(
                 rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="NOT_EVALUATED",
-                evaluator=evaluator_name,
+                evaluator=evaluator_impl, evaluation_strategy=strategy_name,
                 message=f"Rule '{rule.rule_id}' not evaluated: verification deferred.",
             )
 
-        # 4. Category-strict dispatch (never auto-pass when required authorization, review, or evidence is absent)
-        if rule.category == "HUMAN_WAIVER":
-            return _evaluate_human_waiver(rule, ctx)
-        if rule.category == "AGENT_ASSISTED":
-            return _evaluate_agent_assisted(rule, ctx)
-        if rule.category == "EVIDENCE":
-            return _evaluate_evidence_rule(rule, workspace_root, ctx)
+        # 5. Fail closed when declared matrix required_inputs / required_evidence are unavailable
+        missing_ev_res = _validate_rule_inputs_and_evidence(rule, matrix_entry, workspace_root, ctx)
+        if missing_ev_res is not None:
+            return missing_ev_res
 
-        # 5. Automated domain-specific rule evaluators
-        if rule.domain == "BLAST_RADIUS":
-            return _eval_blast_radius(rule, ctx, evaluator_name)
-        if rule.domain == "UPSTREAM_REUSE":
-            return _eval_upstream_reuse(rule, ctx, evaluator_name)
-        if rule.domain == "FAILURE_CLASS":
-            return _eval_failure_class(rule, ctx, evaluator_name)
-        if rule.domain == "TEST_ADEQUACY":
-            return _eval_test_adequacy(rule, ctx, evaluator_name)
-        if rule.domain == "INDEPENDENT_RERUN":
-            return _eval_independent_rerun(rule, ctx, evaluator_name)
-        if rule.domain == "EVAL_CURATOR":
-            return _eval_eval_curator(rule, ctx, evaluator_name)
-
-        return RuleEvaluationResult(
-            rule_id=rule.rule_id, domain=rule.domain, category=rule.category, status="NOT_EVALUATED",
-            evaluator="unsupported_fallback",
-            message=f"Rule '{rule.rule_id}' has no registered domain evaluator.",
-        )
+        # 6. Dispatch through validated strategy handler in STRATEGY_REGISTRY / EVALUATOR_REGISTRY
+        handler = strategy_spec["handler"]
+        result = handler(rule, workspace_root, repo_path, ctx)
+        if not result.evaluation_strategy:
+            result.evaluation_strategy = strategy_name
+        return result
 
     except InvalidRubricExemptionError:
         raise
@@ -2765,6 +3372,11 @@ def run_rubric_evaluation(
         repo_dirs=repo_dirs,
         existing_context=context,
     )
+    raw_by_id: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in _get_raw_matrix_entries():
+        if isinstance(entry, dict) and isinstance(entry.get("rule_id"), str):
+            raw_by_id.setdefault(entry["rule_id"], []).append(entry)
+    live_context["_raw_matrix_by_id"] = raw_by_id
 
     evaluations: List[RuleEvaluationResult] = []
 
@@ -2776,12 +3388,11 @@ def run_rubric_evaluation(
         if rule.exemption_predicate and len(repo_dirs) > 1:
             pred_fn = EXEMPTION_PREDICATES.get(rule.exemption_predicate)
             if pred_fn and not all(pred_fn(root, r_d) for r_d in repo_dirs):
-                saved_pred = rule.exemption_predicate
-                rule.exemption_predicate = None
+                live_context["_suppress_exemption_for_rule"] = rule.rule_id
                 try:
                     res = evaluate_rubric_rule(rule, root, target_repo, live_context)
                 finally:
-                    rule.exemption_predicate = saved_pred
+                    live_context.pop("_suppress_exemption_for_rule", None)
                 evaluations.append(res)
                 if fail_fast and res.status in ("FAIL", "BLOCKED"):
                     break

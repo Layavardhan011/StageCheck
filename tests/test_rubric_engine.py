@@ -430,77 +430,69 @@ class TestRubricEngine(unittest.TestCase):
             ])
 
     def test_missing_evidence_cannot_result_in_unjustified_pass(self) -> None:
-        """Verify evidence-dependent rules fail safely when evidence is missing (Gap A)."""
-        from stagecheck.core.rubric_engine import RubricRule, evaluate_rubric_rule
-        evidence_rule = RubricRule(
-            rule_id="CLAIM_SUPPORT-001",
-            domain="CLAIM_SUPPORT",
-            title="Verifiable Evidence Entailment",
-            question="Is evidence present?",
-            category="EVIDENCE",
-            primary_witness="Phase-2B/claims.json",
-        )
+        """Verify evidence-dependent rules fail safely when evidence is missing (Gap A / GAP-01)."""
+        from stagecheck.core.rubric_engine import evaluate_rubric_rule
+        evidence_rule = next(r for r in load_270_rule_catalog() if r.rule_id == "CLAIM_SUPPORT-001")
         # Context indicates missing evidence artifact
         ctx = {"missing_evidence": ["CLAIM_SUPPORT-001"]}
         res = evaluate_rubric_rule(evidence_rule, self.workspace, self.repo_dir, context=ctx)
         self.assertEqual(res.status, "FAIL")
         self.assertEqual(res.evaluator, "phase_evidence_validator")
+        self.assertEqual(res.evaluation_strategy, "claim_evidence_literal_entailment_check")
         self.assertIn("Missing required evidence", res.message)
 
     def test_rule_specific_failure_is_reported_correctly(self) -> None:
-        """Verify domain-specific evaluators report failures with witnesses and messages (Gap A)."""
-        from stagecheck.core.rubric_engine import RubricRule, evaluate_rubric_rule
+        """Verify domain-specific evaluators report failures with witnesses and messages (Gap A / GAP-01)."""
+        from stagecheck.core.rubric_engine import evaluate_rubric_rule
         # Test UPSTREAM_REUSE failure with unpinned dependencies
-        upstream_rule = RubricRule(
-            rule_id="UPSTREAM_REUSE-001",
-            domain="UPSTREAM_REUSE",
-            title="Discrete Version Pinning",
-            question="Are dependencies pinned?",
-            category="AUTOMATED",
-        )
+        upstream_rule = next(r for r in load_270_rule_catalog() if r.rule_id == "UPSTREAM_REUSE-001")
         ctx = {"unpinned_dependencies": ["fastapi>=0.0.0"]}
         res = evaluate_rubric_rule(upstream_rule, self.workspace, self.repo_dir, context=ctx)
         self.assertEqual(res.status, "FAIL")
         self.assertEqual(res.evaluator, "upstream_reuse_dependency_analyzer")
+        self.assertEqual(res.evaluation_strategy, "upstream_reuse_exact_baseline_pin_and_policy_check")
         self.assertEqual(res.witness, "fastapi>=0.0.0")
         self.assertIn("Unpinned wildcard dependency detected", res.message)
 
     def test_valid_rule_specific_pass_is_reported_correctly(self) -> None:
-        """Verify passing rules report their explicit evaluator and witness metadata (Gap A)."""
-        from stagecheck.core.rubric_engine import RubricRule, evaluate_rubric_rule
-        blast_rule = RubricRule(
-            rule_id="BLAST_RADIUS-001",
-            domain="BLAST_RADIUS",
-            title="Scope Containment Verification",
-            question="Are changes within scope?",
-            category="AUTOMATED",
+        """Verify passing rules report their explicit evaluator, strategy, and witness metadata (Gap A / GAP-01)."""
+        from stagecheck.core.rubric_engine import evaluate_rubric_rule
+        from stagecheck.core.utils import canonical_json_dumps
+
+        p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "declared_scope.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "allowed_paths": ["repos/backend/**"],
+                "read_only_paths": [],
+                "forbidden_paths": [".git/**", "controls/**"],
+            }),
+            encoding="utf-8",
         )
+        blast_rule = next(r for r in load_270_rule_catalog() if r.rule_id == "BLAST_RADIUS-001")
         res = evaluate_rubric_rule(blast_rule, self.workspace, self.repo_dir, context={})
         self.assertEqual(res.status, "PASS")
         self.assertEqual(res.evaluator, "blast_radius_containment")
+        self.assertEqual(res.evaluation_strategy, "blast_radius_producer_boundary_ast_and_scope_check")
         self.assertEqual(res.witness, "scope_containment_verified")
 
     def test_evaluation_errors_handled_safely(self) -> None:
-        """Verify evaluation exceptions fail closed with FAIL status rather than crashing or passing (Gap A)."""
-        from stagecheck.core.rubric_engine import RubricRule, evaluate_rubric_rule
-        # Simulate rule evaluation fault with faulty predicate
-        faulty_rule = RubricRule(
-            rule_id="TEST_FAULT-001",
-            domain="FAILURE_CLASS",
-            title="Fault Rule",
-            question="Will it fail safely?",
-            category="AUTOMATED",
-            exemption_predicate="FAULTY_PREDICATE",
+        """Verify evaluation exceptions fail closed with FAIL status rather than crashing or passing (Gap A / GAP-01)."""
+        from stagecheck.core.rubric_engine import EXEMPTION_PREDICATES, evaluate_rubric_rule
+
+        canonical_rule = next(r for r in load_270_rule_catalog() if r.rule_id == "BLAST_RADIUS-013")
+        orig_pred = EXEMPTION_PREDICATES["PREDICATE_NO_BLOCKCHAIN_PROTOCOL"]
+        EXEMPTION_PREDICATES["PREDICATE_NO_BLOCKCHAIN_PROTOCOL"] = (
+            lambda ws, r: (_ for _ in ()).throw(RuntimeError("Simulated fault"))
         )
-        # Register temporary faulty predicate
-        from stagecheck.core.rubric_engine import EXEMPTION_PREDICATES
-        EXEMPTION_PREDICATES["FAULTY_PREDICATE"] = lambda ws, r: (_ for _ in ()).throw(RuntimeError("Simulated fault"))
         try:
-            res = evaluate_rubric_rule(faulty_rule, self.workspace, self.repo_dir)
+            res = evaluate_rubric_rule(canonical_rule, self.workspace, self.repo_dir)
             self.assertEqual(res.status, "FAIL")
             self.assertIn("Evaluation execution failure", res.message)
         finally:
-            del EXEMPTION_PREDICATES["FAULTY_PREDICATE"]
+            EXEMPTION_PREDICATES["PREDICATE_NO_BLOCKCHAIN_PROTOCOL"] = orig_pred
 
     def test_rubric_coverage_is_measurable(self) -> None:
         """Verify catalog maps 100% of 270 rules across the 9 formal domain evaluators (Gap A)."""
@@ -1024,6 +1016,139 @@ class TestRubricEngine(unittest.TestCase):
         rep2a = check_gate_preconditions(self.workspace, GateId.GATE_2A, self.task_id, self.attempt)
         self.assertFalse(rep2a.passed)
         self.assertTrue(any("PARTIAL" in r or "270" in r for r in rep2a.failure_reasons))
+
+    def test_gap01_270_rule_matrix_enforcement_and_tamper_rejection(self) -> None:
+        """Verify all 228 strategies and 9 evaluators execute at runtime and fail closed on mismatches/tampering (GAP-01)."""
+        from dataclasses import replace
+        from stagecheck.core.rubric_engine import (
+            EVALUATOR_REGISTRY,
+            RubricEvaluationError,
+            STRATEGY_REGISTRY,
+            evaluate_rubric_rule,
+            get_rule_strategy,
+            load_270_rule_audit_matrix,
+        )
+
+        matrix = load_270_rule_audit_matrix()
+        catalog = load_270_rule_catalog()
+        self.assertEqual(len(matrix), 270)
+        self.assertEqual(len(EVALUATOR_REGISTRY), 9)
+        self.assertEqual(len(STRATEGY_REGISTRY), 228)
+
+        # 1. All 270 rules resolve to one matrix entry and valid strategy/evaluator in registries
+        cat_counts: dict[str, int] = {}
+        for r in catalog:
+            cat_counts[r.category] = cat_counts.get(r.category, 0) + 1
+            entry = get_rule_strategy(r.rule_id)
+            self.assertIsNotNone(entry)
+            assert entry is not None
+            self.assertIn(entry["evaluator_implementation"], EVALUATOR_REGISTRY)
+            self.assertIn(entry["evaluation_strategy"], STRATEGY_REGISTRY)
+        self.assertEqual(
+            cat_counts,
+            {"AUTOMATED": 162, "EVIDENCE": 64, "AGENT_ASSISTED": 34, "HUMAN_WAIVER": 10},
+        )
+
+        # 2. Full compliant run records every rule's actual evaluation_strategy across all 228 strategies
+        self._seed_full_compliant_workspace()
+        payload, elapsed_ms = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
+        self.assertLess(elapsed_ms, 200.0)
+        self.assertEqual(payload["overall_verdict"], "PASS")
+        recorded_strategies = {e.get("evaluation_strategy") for e in payload["evaluations"]}
+        self.assertEqual(recorded_strategies, set(STRATEGY_REGISTRY.keys()))
+
+        # 3. Mismatched category, domain, criterion, and predicate fail closed
+        target_rule = next(r for r in catalog if r.rule_id == "BLAST_RADIUS-001")
+        bad_cat = replace(target_rule, category="EVIDENCE")
+        res_cat = evaluate_rubric_rule(bad_cat, self.workspace, self.repo_dir)
+        self.assertEqual(res_cat.status, "FAIL")
+        self.assertIn("Category mismatch", res_cat.message or "")
+
+        bad_dom = replace(target_rule, domain="FAILURE_CLASS")
+        res_dom = evaluate_rubric_rule(bad_dom, self.workspace, self.repo_dir)
+        self.assertEqual(res_dom.status, "FAIL")
+        self.assertIn("Domain mismatch", res_dom.message or "")
+
+        bad_crit = replace(target_rule, title="Tampered Criterion Title")
+        res_crit = evaluate_rubric_rule(bad_crit, self.workspace, self.repo_dir)
+        self.assertEqual(res_crit.status, "FAIL")
+        self.assertIn("Original criterion mismatch", res_crit.message or "")
+
+        bad_pred = replace(target_rule, exemption_predicate="PREDICATE_NO_REACT_DEPENDENCY")
+        res_pred = evaluate_rubric_rule(bad_pred, self.workspace, self.repo_dir)
+        self.assertEqual(res_pred.status, "FAIL")
+        self.assertIn("Exemption predicate mismatch", res_pred.message or "")
+
+        # 4. Matrix tampering (mismatched strategy, evaluator, duplicate entry) fails closed
+        tampered_strat_ctx = {
+            "_raw_matrix_by_id": {
+                target_rule.rule_id: [
+                    {
+                        **get_rule_strategy(target_rule.rule_id),
+                        "evaluation_strategy": "non_existent_bogus_strategy",
+                    }
+                ]
+            }
+        }
+        res_strat = evaluate_rubric_rule(target_rule, self.workspace, self.repo_dir, context=tampered_strat_ctx)
+        self.assertEqual(res_strat.status, "FAIL")
+        self.assertIn("unregistered evaluation_strategy", res_strat.message or "")
+
+        tampered_eval_ctx = {
+            "_raw_matrix_by_id": {
+                target_rule.rule_id: [
+                    {
+                        **get_rule_strategy(target_rule.rule_id),
+                        "evaluator_implementation": "tampered_evaluator",
+                    }
+                ]
+            }
+        }
+        res_ev_tamper = evaluate_rubric_rule(target_rule, self.workspace, self.repo_dir, context=tampered_eval_ctx)
+        self.assertEqual(res_ev_tamper.status, "FAIL")
+        self.assertIn("Evaluator implementation mismatch", res_ev_tamper.message or "")
+
+        dup_matrix_ctx = {
+            "_raw_matrix_by_id": {
+                target_rule.rule_id: [
+                    get_rule_strategy(target_rule.rule_id),
+                    get_rule_strategy(target_rule.rule_id),
+                ]
+            }
+        }
+        res_dup_m = evaluate_rubric_rule(target_rule, self.workspace, self.repo_dir, context=dup_matrix_ctx)
+        self.assertEqual(res_dup_m.status, "FAIL")
+        self.assertIn("resolved to 2 entries", res_dup_m.message or "")
+
+        # 5. Missing required_evidence fails closed even when code hygiene is clean
+        p1_scope = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1" / "declared_scope.json"
+        p1_scope.unlink()
+        res_no_scope = evaluate_rubric_rule(target_rule, self.workspace, self.repo_dir)
+        self.assertEqual(res_no_scope.status, "FAIL")
+        self.assertIn("Required evidence unavailable", res_no_scope.message or "")
+
+        # 6. Payload validation rejects PASS without registered/matching evaluation_strategy
+        with self.assertRaises(RubricEvaluationError):
+            validate_rubric_evaluation_payload([
+                {
+                    "rule_id": "BLAST_RADIUS-001",
+                    "domain": "BLAST_RADIUS",
+                    "category": "AUTOMATED",
+                    "status": "PASS",
+                    "evaluator": "blast_radius_containment",
+                }
+            ])
+        with self.assertRaises(RubricEvaluationError):
+            validate_rubric_evaluation_payload([
+                {
+                    "rule_id": "BLAST_RADIUS-001",
+                    "domain": "BLAST_RADIUS",
+                    "category": "AUTOMATED",
+                    "status": "PASS",
+                    "evaluator": "blast_radius_containment",
+                    "evaluation_strategy": "failure_class_observed_event_register_and_hygiene_check",
+                }
+            ])
 
 
 if __name__ == "__main__":
