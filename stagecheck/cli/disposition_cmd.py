@@ -235,6 +235,18 @@ def run_disposition(
             return 1
 
     if norm_action == "abort":
+        auth_clean = str(authorized_by or "").strip()
+        if not auth_clean:
+            print(
+                "ERROR: [disposition.missing_auth] --authorized-by is required for '--action abort'.",
+                file=sys.stderr,
+            )
+            return 1
+        from stagecheck.core.dispositions import (
+            UnauthorizedDispositionError,
+            is_human_identity,
+            parse_owner_grants,
+        )
         from stagecheck.core.locking import acquire_runtime_lock
         from stagecheck.core.paths import validate_task_id
         from stagecheck.core.permissions import controlled_write_transaction
@@ -247,6 +259,24 @@ def run_disposition(
         controls_dir = workspace_root / "controls"
         with acquire_runtime_lock(controls_dir):
             state = load_active_state(workspace_root)
+            if not is_human_identity(auth_clean, state):
+                print(
+                    f"ERROR: [disposition.unauthorized] Identity '{auth_clean}' is not a valid human operator identity.",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                grants = parse_owner_grants(workspace_root)
+            except UnauthorizedDispositionError as err:
+                print(f"ERROR: [disposition.unauthorized] {err}", file=sys.stderr)
+                return 1
+            perms = grants.get(auth_clean, set())
+            if not ({"OWNER", "CIRCUIT_BREAKER_RESET", "GATE_OVERRIDE", "TASK_ABORT"} & perms):
+                print(
+                    f"ERROR: [disposition.unauthorized] Operator '{auth_clean}' lacks abort grant in controls/OWNER_GRANTS.md.",
+                    file=sys.stderr,
+                )
+                return 1
             if state.get("task_id") != task:
                 print(
                     f"ERROR: [disposition.task_mismatch] Active task is '{state.get('task_id')}', not '{task}'.",
@@ -258,7 +288,7 @@ def run_disposition(
                 state["status"] = "FAILED_EXHAUSTED"
                 state["turn"] = "IDLE"
                 save_active_state(workspace_root, state)
-        print(f"SUCCESS: Task '{task}' aborted by operator.")
+        print(f"SUCCESS: Task '{task}' aborted by operator '{auth_clean}'.")
         return 0
 
     print(f"ERROR: [disposition.invalid_action] Unsupported action '{action}'. Choose from: waive, resume, retry, abort.", file=sys.stderr)

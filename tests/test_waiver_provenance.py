@@ -292,6 +292,44 @@ class TestHumanWaiverProvenance(unittest.TestCase):
         self.assertFalse(ok_fin)
         self.assertIn("finalized", msg_fin.lower())
 
+    def test_disposition_abort_requires_authorized_owner_even_with_yes(self) -> None:
+        """Verify '--action abort --yes' cannot bypass --authorized-by / OWNER_GRANTS.md."""
+        from stagecheck.cli.disposition_cmd import run_disposition
+        from stagecheck.core.state import load_active_state
+
+        # Missing --authorized-by with --yes must fail
+        rc_missing = run_disposition(
+            action="abort",
+            task=self.task_id,
+            authorized_by="",
+            yes=True,
+            workspace=str(self.ws),
+        )
+        self.assertEqual(rc_missing, 1)
+        self.assertNotEqual(load_active_state(self.ws).get("phase"), "ABORTED")
+
+        # Unlisted / unauthorized operator with --yes must fail
+        rc_unauth = run_disposition(
+            action="abort",
+            task=self.task_id,
+            authorized_by="attacker@evil.local",
+            yes=True,
+            workspace=str(self.ws),
+        )
+        self.assertEqual(rc_unauth, 1)
+        self.assertNotEqual(load_active_state(self.ws).get("phase"), "ABORTED")
+
+        # Valid owner in OWNER_GRANTS.md succeeds
+        rc_ok = run_disposition(
+            action="abort",
+            task=self.task_id,
+            authorized_by="owner@stagecheck.local",
+            yes=True,
+            workspace=str(self.ws),
+        )
+        self.assertEqual(rc_ok, 0)
+        self.assertEqual(load_active_state(self.ws).get("phase"), "ABORTED")
+
 
 if __name__ == "__main__":
     unittest.main()
