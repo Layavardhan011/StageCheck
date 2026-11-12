@@ -936,17 +936,21 @@ def resume_after_disposition(
                 state["halt_reason"] = None
                 reason = f"Resumed from watchdog inactivity timeout into '{target_phase}'."
             else:
-                # Load latest verdict to evaluate remaining defects (fail closed if missing/invalid)
+                # Load latest verdict to evaluate remaining defects (fail closed if missing/invalid/symlinked)
                 attempt = state.get("attempt_index", 1)
                 task_dir = _resolve_task_evidence_dir(workspace_root, task_id)
-                verdict_file = (
-                    task_dir
-                    / f"attempt_{attempt}"
-                    / "Phase-3"
-                    / "verdict.json"
-                )
-                if not verdict_file.is_file():
-                    verdict_file = task_dir / "verdict.json"
+                try:
+                    verdict_file = safe_resolve(
+                        f"attempt_{attempt}/Phase-3/verdict.json",
+                        task_dir,
+                        allow_symlinks=False,
+                    )
+                    if not verdict_file.is_file():
+                        verdict_file = safe_resolve("verdict.json", task_dir, allow_symlinks=False)
+                except StageCheckPathError as err:
+                    raise DispositionError(
+                        f"Unsafe or symlinked verdict path for task '{task_id}': {err}"
+                    ) from err
 
                 if verdict_file.is_symlink() or not verdict_file.is_file():
                     raise DispositionError(
@@ -958,6 +962,18 @@ def resume_after_disposition(
                         raise ValueError("verdict.json root must be a JSON object.")
                 except Exception as err:
                     raise DispositionError(f"Failed to parse verdict file '{verdict_file}': {err}") from err
+
+                v_task = verdict.get("task_id")
+                if v_task is not None and v_task != task_id:
+                    raise DispositionError(
+                        f"Verdict task_id mismatch for '{verdict_file}': expected '{task_id}', got {v_task!r}."
+                    )
+                v_iter = verdict.get("iteration") if "iteration" in verdict else verdict.get("attempt")
+                if v_iter is not None:
+                    if isinstance(v_iter, bool) or not isinstance(v_iter, int) or int(v_iter) != int(attempt):
+                        raise DispositionError(
+                            f"Verdict iteration/attempt mismatch for '{verdict_file}': expected {attempt}, got {v_iter!r}."
+                        )
 
                 dispositions_doc = load_dispositions(workspace_root)
                 all_disps = dispositions_doc.get("dispositions", [])

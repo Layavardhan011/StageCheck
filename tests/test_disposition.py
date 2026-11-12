@@ -266,6 +266,43 @@ class TestDispositions(unittest.TestCase):
 
         self.assertFalse((self.workspace_root / "escaped").exists())
 
+    def test_resume_rejects_symlinked_phase3_dir_and_verdict_mismatch(self):
+        """Verify resume_after_disposition rejects symlinked Phase-3 dir and mismatched task_id/iteration."""
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.state import load_active_state, save_active_state
+
+        with controlled_write_transaction(self.workspace_root / "controls"):
+            s = load_active_state(self.workspace_root)
+            s["phase"] = "AWAITING_HUMAN_DISPOSITION"
+            save_active_state(self.workspace_root, s)
+
+        attempt_dir = self.workspace_root / "evidence" / "tasks" / self.task_id / "attempt_1"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        outside = self.workspace_root / "outside_p3"
+        outside.mkdir(parents=True, exist_ok=True)
+        (outside / "verdict.json").write_text(json.dumps({"defects": []}), encoding="utf-8")
+
+        p3_dir = attempt_dir / "Phase-3"
+        p3_dir.symlink_to(outside)
+        with self.assertRaises(DispositionError):
+            resume_after_disposition(self.workspace_root, self.task_id)
+
+        p3_dir.unlink()
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        (p3_dir / "verdict.json").write_text(
+            json.dumps({"task_id": "other-task", "iteration": 1, "defects": []}),
+            encoding="utf-8",
+        )
+        with self.assertRaises(DispositionError):
+            resume_after_disposition(self.workspace_root, self.task_id)
+
+        (p3_dir / "verdict.json").write_text(
+            json.dumps({"task_id": self.task_id, "iteration": 99, "defects": []}),
+            encoding="utf-8",
+        )
+        with self.assertRaises(DispositionError):
+            resume_after_disposition(self.workspace_root, self.task_id)
+
 
 if __name__ == "__main__":
     unittest.main()
