@@ -266,6 +266,8 @@ class TestGitDiscovery(unittest.TestCase):
             ("attributesfile", "[core]\n  attributesfile = /tmp/attrs\n"),
             ("excludesfile", "[core]\n  excludesfile = /tmp/excl\n"),
             ("uploadpack-hook", "[uploadpack]\n  packObjectsHook = /bin/evil\n"),
+            ("inline-second-section", "[core] [include] path = /tmp/evil.cfg\n"),
+            ("inline-second-sshcommand", "[user] [core] sshCommand = /tmp/evil.sh\n"),
         ]
         for label, snippet in bypasses:
             with self.subTest(case=label):
@@ -281,6 +283,15 @@ class TestGitDiscovery(unittest.TestCase):
                 subdir.mkdir(parents=True, exist_ok=True)
                 with self.assertRaises(GitError):
                     assert_safe_repo_git_config(subdir)
+
+        # Also verify extensions.worktreeConfig + .git/config.worktree is inspected
+        wt_repo = self.workspace / "repos" / "bypass-worktree-cfg"
+        self._init_git_repo(wt_repo, initial_commit=True)
+        cfg_wt = wt_repo / ".git" / "config"
+        cfg_wt.write_text(cfg_wt.read_text(encoding="utf-8") + "\n[extensions]\n  worktreeConfig = true\n", encoding="utf-8")
+        (wt_repo / ".git" / "config.worktree").write_text("[core]\n  sshCommand = /tmp/evil.sh\n", encoding="utf-8")
+        with self.assertRaises(GitError):
+            assert_safe_repo_git_config(wt_repo)
 
     def test_remote_name_dash_prefix_and_quotepath_nul_framing(self) -> None:
         """Regression test for dash-prefixed remote names and C-quoted/special filenames."""

@@ -142,6 +142,7 @@ def _resolve_git_config_files(repo_path: Path) -> List[Path]:
     if git_entry.is_dir():
         git_dirs.append(git_entry)
         _append_safe_cfg(configs, git_entry / "config")
+        _append_safe_cfg(configs, git_entry / "config.worktree")
     elif git_entry.is_file():
         try:
             text = git_entry.read_text(encoding="utf-8", errors="replace").strip()
@@ -156,6 +157,7 @@ def _resolve_git_config_files(repo_path: Path) -> List[Path]:
                 )
             git_dirs.append(git_dir)
             _append_safe_cfg(configs, git_dir / "config")
+            _append_safe_cfg(configs, git_dir / "config.worktree")
             commondir_file = git_dir / "commondir"
             if commondir_file.is_symlink():
                 raise GitError(
@@ -166,8 +168,9 @@ def _resolve_git_config_files(repo_path: Path) -> List[Path]:
                 common_dir = (git_dir / raw_common).resolve() if not os.path.isabs(raw_common) else Path(raw_common).resolve()
                 git_dirs.append(common_dir)
                 _append_safe_cfg(configs, common_dir / "config")
+                _append_safe_cfg(configs, common_dir / "config.worktree")
 
-    # Inspect embedded submodule git configs (.git/modules/**/config)
+    # Inspect embedded submodule git configs (.git/modules/**/config and config.worktree)
     for gd in git_dirs:
         modules_dir = gd / "modules"
         if modules_dir.is_symlink():
@@ -184,6 +187,8 @@ def _resolve_git_config_files(repo_path: Path) -> List[Path]:
                         )
                 if "config" in files:
                     _append_safe_cfg(configs, Path(walk_root) / "config")
+                if "config.worktree" in files:
+                    _append_safe_cfg(configs, Path(walk_root) / "config.worktree")
 
     return configs
 
@@ -254,8 +259,8 @@ def _iter_git_config_entries(
             continue
 
         remainder = stripped
-        if stripped.startswith("["):
-            match = _GIT_SECTION_HEADER_RE.match(stripped)
+        while remainder.startswith("["):
+            match = _GIT_SECTION_HEADER_RE.match(remainder)
             if not match:
                 raise GitError(
                     f"Security policy violation [UNSAFE_GIT_CONFIG]: Malformed section header in '{cfg_path}'."
@@ -263,8 +268,8 @@ def _iter_git_config_entries(
             current_section = match.group(1).lower()
             entries.append((current_section, None, False, ""))
             remainder = match.group(4).strip()
-            if not remainder:
-                continue
+        if not remainder:
+            continue
 
         if current_section is None:
             raise GitError(
