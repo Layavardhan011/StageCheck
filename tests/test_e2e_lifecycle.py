@@ -565,7 +565,7 @@ class TestEndToEndLifecycle(unittest.TestCase):
         self.assertTrue(state.get("circuit_breaker_tripped"))
 
         # Agent cannot proceed automatically - human operator resets attempts to attempt 3
-        rc = run_reset_attempts("task-505", authorized_by="owner@company.com", workspace=str(self.ws))
+        rc = run_reset_attempts("task-505", authorized_by="owner@stagecheck.local", yes=True, workspace=str(self.ws))
         self.assertEqual(rc, 0, "run_reset_attempts failed")
 
         # Breaker unlatched, state reset to Attempt 3, PHASE_1_PLANNING
@@ -581,7 +581,7 @@ class TestEndToEndLifecycle(unittest.TestCase):
             reason="Exhausted maximum 3 verification attempts",
         )
         trip_circuit_breaker(self.ws, "task-505", 3, eval_exhausted, [])
-        rc_fail = run_reset_attempts("task-505", authorized_by="owner@company.com", workspace=str(self.ws))
+        rc_fail = run_reset_attempts("task-505", authorized_by="owner@stagecheck.local", yes=True, workspace=str(self.ws))
         self.assertEqual(rc_fail, 1, "Reset on attempt 3 must be rejected")
 
 

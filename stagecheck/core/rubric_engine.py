@@ -490,6 +490,16 @@ def validate_rubric_evaluation_payload(evaluation_results: List[Union[RuleEvalua
                 raise InvalidRubricExemptionError(
                     f"Illegal exemption in rule '{rid}': Missing required rationale or evidence_path."
                 )
+            if isinstance(rid, str) and rid in raw_by_id:
+                expected_pred = raw_by_id[rid].get("exemption_predicate")
+                if not expected_pred or expected_pred != pred:
+                    raise InvalidRubricExemptionError(
+                        f"Illegal exemption in rule '{rid}': predicate '{pred}' does not match canonical matrix predicate '{expected_pred}'."
+                    )
+                if res.get("evaluator") != "structural_predicate_evaluator":
+                    raise InvalidRubricExemptionError(
+                        f"Illegal exemption in rule '{rid}': evaluator must be 'structural_predicate_evaluator', got '{res.get('evaluator')}'."
+                    )
         evaluator = res.get("evaluator")
         strategy = res.get("evaluation_strategy")
         if evaluator == "unsupported_fallback" and res.get("status") == "PASS":
@@ -1297,11 +1307,31 @@ def validate_agent_review_provenance(
     if not agents:
         return False, "FAIL", "ACTIVE_STATE.json lacks registered_agents to authorize reviewer identity."
 
-    enabled_agents = [a for a in agents if a.get("enabled", True) and isinstance(a.get("name"), str)]
+    enabled_agents = [a for a in agents if a.get("enabled", True) and isinstance(a.get("name"), str) and a.get("name", "").strip()]
+    agents_by_name = {a["name"].strip().lower(): a for a in enabled_agents}
     auditors = {a["name"].strip().lower(): a for a in enabled_agents if a.get("role") == "prompt_and_audit"}
     coders = {a["name"].strip().lower(): a for a in enabled_agents if a.get("role") == "code_implementation"}
     dual_agents = {a["name"].strip().lower(): a for a in enabled_agents if a.get("role") == "dual_role"}
-    single_mode = bool(active_state.get("single_agent_mode")) if isinstance(active_state, dict) else False
+    single_mode = bool(
+        isinstance(active_state, dict)
+        and (
+            active_state.get("single_agent_mode")
+            or (
+                isinstance(active_state.get("protected"), dict)
+                and active_state["protected"].get("single_agent_mode")
+            )
+        )
+    )
+
+    matched_agent = agents_by_name.get(reviewer_lower)
+    if not matched_agent:
+        return False, "FAIL", f"Reviewer '{reviewer_clean}' is not an enabled registered agent in ACTIVE_STATE.json."
+    if role_clean != matched_agent.get("role"):
+        return (
+            False,
+            "FAIL",
+            f"Reviewer '{reviewer_clean}' claimed role '{role_clean}', which does not match registered role '{matched_agent.get('role')}'.",
+        )
 
     if not single_mode:
         if role_clean != "prompt_and_audit":
@@ -1315,13 +1345,14 @@ def validate_agent_review_provenance(
         if reviewer_lower not in allowed_pool:
             return False, "FAIL", f"Reviewer '{reviewer_clean}' is not authorized in ACTIVE_STATE.json."
 
-    # 5. Reviewer independence (dual-agent mode prohibits self-review by coder/producer)
+    # 5. Reviewer independence (dual-agent mode prohibits self-review; single_mode permits self-review only for dual_role)
     producer = (
         (pre_commit_status.get("submitted_by") or pre_commit_status.get("author") or pre_commit_status.get("producer"))
         if isinstance(pre_commit_status, dict)
         else None
     ) or src_doc.get("producer")
-    if not single_mode:
+    allow_dual_self_review = single_mode and reviewer_lower in dual_agents and reviewer_lower not in coders
+    if not allow_dual_self_review:
         if reviewer_lower in coders:
             return False, "FAIL", f"Reviewer independence violated: '{reviewer_clean}' holds 'code_implementation' role."
         if isinstance(producer, str) and producer.strip() and reviewer_lower == producer.strip().lower():
@@ -1594,6 +1625,44 @@ def verify_complete_rubric_evaluation(
     ]
     if non_passing:
         reasons.append(f"{len(non_passing)} rule(s) did not pass: {non_passing[:5]}")
+
+    if not reasons:
+        live_cycle = payload.get("cycle") if cycle is None else int(cycle)
+        try:
+            live_payload, _ = run_rubric_evaluation(
+                root,
+                task_id=task_id,
+                attempt=int(attempt),
+                cycle=live_cycle,
+            )
+            if live_payload.get("overall_verdict") != "PASS":
+                live_non_passing = [
+                    f"{item.get('rule_id')}:{item.get('status')}"
+                    for item in live_payload.get("evaluations", [])
+                    if isinstance(item, dict) and item.get("status") not in ("PASS", "NOT_APPLICABLE")
+                ]
+                reasons.append(
+                    f"Live rubric re-evaluation verdict is '{live_payload.get('overall_verdict')}', "
+                    f"expected 'PASS' ({live_non_passing[:5]})."
+                )
+            else:
+                live_map = {
+                    item["rule_id"]: (item.get("status"), item.get("exemption_predicate"))
+                    for item in live_payload.get("evaluations", [])
+                    if isinstance(item, dict) and isinstance(item.get("rule_id"), str)
+                }
+                rec_map = {
+                    item.get("rule_id"): (item.get("status"), item.get("exemption_predicate"))
+                    for item in eval_items
+                    if isinstance(item, dict) and isinstance(item.get("rule_id"), str)
+                }
+                mismatches = [rid for rid, val in rec_map.items() if live_map.get(rid) != val]
+                if mismatches or set(live_map) != set(rec_map):
+                    reasons.append(
+                        f"Recorded rubric evaluations do not match live workspace state (mismatch on {mismatches[:5]})."
+                    )
+        except Exception as err:
+            reasons.append(f"Live rubric re-evaluation failed: {err}")
 
     return len(reasons) == 0, reasons, payload
 
@@ -1883,16 +1952,21 @@ def _collect_rubric_context(
         except Exception as err:
             declared_scope_err = str(err)
     prompt_verified, prompt_verified_err = (None, "symlinked prompt_verified.json") if verified_file.is_symlink() else _safe_load_json(verified_file)
-    if prompt_verified is not None and prompt_md_ok and not scope_file.is_symlink() and scope_file.is_file():
-        try:
-            exp_p = prompt_verified.get("prompt_sha256")
-            if exp_p and exp_p != sha256_file_nofollow(prompt_file):
-                prompt_verified_err = "prompt.md modified after prompt_verified.json freeze"
-            exp_s = prompt_verified.get("scope_sha256")
-            if exp_s and exp_s != sha256_file_nofollow(scope_file):
-                prompt_verified_err = "declared_scope.json modified after prompt_verified.json freeze"
-        except StageCheckPathError as err:
-            prompt_verified_err = f"symlinked prompt artifact rejected: {err}"
+    if prompt_verified is not None:
+        if prompt_file.is_symlink() or not prompt_md_ok:
+            prompt_verified_err = "Phase-1/prompt.md missing, empty, or symlinked after prompt_verified.json freeze"
+        elif scope_file.is_symlink() or not scope_file.is_file():
+            prompt_verified_err = "Phase-1/declared_scope.json missing or symlinked after prompt_verified.json freeze"
+        else:
+            try:
+                exp_p = prompt_verified.get("prompt_sha256")
+                if not isinstance(exp_p, str) or not exp_p or exp_p != sha256_file_nofollow(prompt_file):
+                    prompt_verified_err = "prompt.md modified after prompt_verified.json freeze"
+                exp_s = prompt_verified.get("scope_sha256")
+                if not isinstance(exp_s, str) or not exp_s or exp_s != sha256_file_nofollow(scope_file):
+                    prompt_verified_err = "declared_scope.json modified after prompt_verified.json freeze"
+            except StageCheckPathError as err:
+                prompt_verified_err = f"symlinked prompt artifact rejected: {err}"
 
     pre_commit_status, pre_commit_status_err = _safe_load_json(p2a_dir / "pre_commit_status.json")
     pre_commit_review, pre_commit_review_err = _safe_load_json(p2a_dir / "pre_commit_review.json")
@@ -2462,27 +2536,53 @@ def _ev_pass(rule: RubricRule, artifact: str, message: str) -> RuleEvaluationRes
 
 
 def _has_distinct_agent_roles(active: Optional[Dict[str, Any]]) -> bool:
-    """Return True if ACTIVE_STATE.json configures distinct producer/reviewer or valid agent identities."""
+    """Return True strictly when ACTIVE_STATE configures distinct, enabled, disjoint non-producer reviewers."""
     if not isinstance(active, dict):
         return False
-    a1 = active.get("agent1")
-    a2 = active.get("agent2")
-    if a1 and a2 and a1 != a2:
-        return True
-    agents = active.get("registered_agents")
-    if not agents and isinstance(active.get("protected"), dict):
-        agents = active["protected"].get("registered_agents")
-    if not isinstance(agents, list) or not agents:
-        return False
-    auditors = {a.get("name") for a in agents if isinstance(a, dict) and a.get("role") == "prompt_and_audit" and a.get("name")}
-    coders = {a.get("name") for a in agents if isinstance(a, dict) and a.get("role") == "code_implementation" and a.get("name")}
-    if auditors and coders and auditors != coders:
-        return True
     is_single = bool(active.get("single_agent_mode")) or (
         isinstance(active.get("protected"), dict) and bool(active["protected"].get("single_agent_mode"))
     )
-    if is_single and any(isinstance(a, dict) and a.get("role") == "dual_role" and a.get("name") for a in agents):
+    if is_single:
+        return False
+
+    agents = active.get("registered_agents")
+    if not agents and isinstance(active.get("protected"), dict):
+        agents = active["protected"].get("registered_agents")
+    if isinstance(agents, list) and agents:
+        enabled = [
+            a for a in agents
+            if isinstance(a, dict) and a.get("enabled", True) and isinstance(a.get("name"), str) and a["name"].strip()
+        ]
+        auditors = {a["name"].strip().lower() for a in enabled if a.get("role") == "prompt_and_audit"}
+        coders = {a["name"].strip().lower() for a in enabled if a.get("role") == "code_implementation"}
+        return bool(auditors and coders and auditors.isdisjoint(coders))
+
+    a1 = active.get("agent1")
+    a2 = active.get("agent2")
+    return bool(isinstance(a1, str) and isinstance(a2, str) and a1.strip() and a2.strip() and a1.strip().lower() != a2.strip().lower())
+
+
+def _has_configured_agent_roles(active: Optional[Dict[str, Any]]) -> bool:
+    """Return True if ACTIVE_STATE configures either distinct dual agents or valid single-agent dual_role."""
+    if _has_distinct_agent_roles(active):
         return True
+    if not isinstance(active, dict):
+        return False
+    is_single = bool(active.get("single_agent_mode")) or (
+        isinstance(active.get("protected"), dict) and bool(active["protected"].get("single_agent_mode"))
+    )
+    agents = active.get("registered_agents")
+    if not agents and isinstance(active.get("protected"), dict):
+        agents = active["protected"].get("registered_agents")
+    if is_single and isinstance(agents, list):
+        return any(
+            isinstance(a, dict)
+            and a.get("enabled", True)
+            and a.get("role") == "dual_role"
+            and isinstance(a.get("name"), str)
+            and bool(a["name"].strip())
+            for a in agents
+        )
     return False
 
 
@@ -2588,7 +2688,7 @@ def _evaluate_evidence_rule(rule: RubricRule, workspace_root: Path, ctx: Dict[st
                 return _ev_fail(rule, "controls/AGENTS.md", "Missing binding/governance controls.")
             return _ev_pass(rule, "controls/DISPOSITIONS.json", "Binding descriptors remain owner-governed.")
         if rid == "ORCHESTRATOR-015":
-            if not _has_distinct_agent_roles(active):
+            if not _has_configured_agent_roles(active):
                 return _ev_fail(rule, "controls/ACTIVE_STATE.json", "Distinct agent identities/roles missing in ACTIVE_STATE.json.")
             return _ev_pass(rule, "controls/ACTIVE_STATE.json", "Agent role selection and separation verified.")
         if rid == "ORCHESTRATOR-016":
@@ -2659,6 +2759,8 @@ def _evaluate_evidence_rule(rule: RubricRule, workspace_root: Path, ctx: Dict[st
         if rid == "COMMON-025":
             if not ctx.get("start_manifest_ok"):
                 return _ev_fail(rule, "specs/START_MANIFEST.md", f"Context continuity breach: {ctx.get('start_manifest_err')}")
+            if not ctx.get("prompt_md_ok"):
+                return _ev_fail(rule, "Phase-1/prompt.md", "Phase-1/prompt.md is missing, empty, or symlinked.")
             if not ctx.get("prompt_verified") or ctx.get("prompt_verified_err"):
                 return _ev_fail(rule, "Phase-1/prompt_verified.json", ctx.get("prompt_verified_err") or "Missing prompt_verified.json.")
             return _ev_pass(rule, "Phase-1/prompt_verified.json", "Manifest and prompt hashes match current workspace bytes.")

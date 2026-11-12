@@ -144,6 +144,20 @@ class TestDispositions(unittest.TestCase):
         }
         (attempt_dir / "verdict.json").write_text(canonical_json_dumps(verdict_data), encoding="utf-8")
 
+        state_file = self.workspace_root / "controls" / "ACTIVE_STATE.json"
+
+        def _set_awaiting_disposition() -> None:
+            with open(state_file, "r", encoding="utf-8") as f:
+                s = json.load(f)
+            s["phase"] = "AWAITING_HUMAN_DISPOSITION"
+            os.chmod(state_file.parent, 0o755)
+            os.chmod(state_file, 0o644)
+            state_file.write_text(canonical_json_dumps(s), encoding="utf-8")
+            os.chmod(state_file, 0o444)
+            os.chmod(state_file.parent, 0o555)
+
+        _set_awaiting_disposition()
+
         # 1. Waive only defect_1 -> 1 defect still unresolved -> transitions to PHASE_1_REPAIR
         add_disposition(
             workspace_root=self.workspace_root,
@@ -159,7 +173,9 @@ class TestDispositions(unittest.TestCase):
         self.assertEqual(res_repair["resumed_phase"], "PHASE_1_REPAIR")
         self.assertIn("1 blocking defect(s) remain", res_repair["reason"])
 
-        # 2. Waive defect_2 -> all blocking defects waived -> transitions to PHASE_3_VERIFICATION
+        _set_awaiting_disposition()
+
+        # 2. Waive defect_2 -> all blocking defects waived -> transitions to PHASE_3_AUDIT
         add_disposition(
             workspace_root=self.workspace_root,
             task_id=self.task_id,
@@ -171,7 +187,7 @@ class TestDispositions(unittest.TestCase):
             confirmed=True,
         )
         res_verify = resume_after_disposition(self.workspace_root, self.task_id)
-        self.assertEqual(res_verify["resumed_phase"], "PHASE_3_VERIFICATION")
+        self.assertEqual(res_verify["resumed_phase"], "PHASE_3_AUDIT")
         self.assertIn("All blocking defects waived", res_verify["reason"])
 
     def test_resume_preserves_circuit_breaker_tripped(self):
@@ -191,6 +207,25 @@ class TestDispositions(unittest.TestCase):
 
     def test_cli_disposition_and_resume(self):
         """Verify CLI 'stagecheck disposition add' and 'stagecheck resume' execution."""
+        state_file = self.workspace_root / "controls" / "ACTIVE_STATE.json"
+        with open(state_file, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        state["phase"] = "AWAITING_HUMAN_DISPOSITION"
+        os.chmod(state_file.parent, 0o755)
+        os.chmod(state_file, 0o644)
+        state_file.write_text(canonical_json_dumps(state), encoding="utf-8")
+        os.chmod(state_file, 0o444)
+        os.chmod(state_file.parent, 0o555)
+        p3_dir = self.workspace_root / "evidence" / "tasks" / self.task_id / "attempt_1" / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        (p3_dir / "verdict.json").write_text(
+            canonical_json_dumps({
+                "result": "BLOCKED",
+                "defects": [{"defect_id": "secrets.leak_detected", "mode": "blocking"}],
+            }),
+            encoding="utf-8",
+        )
+
         # 1. CLI disposition add with --yes
         exit_disp = main([
             "disposition", "add",

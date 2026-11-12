@@ -294,7 +294,11 @@ class TestGateEngine(unittest.TestCase):
             "evaluations": full_evals,
         }), encoding="utf-8")
 
-        rep3 = check_gate_preconditions(self.workspace, "Gate-3")
+        from unittest.mock import patch
+        import json as _json
+        expected_eval = _json.loads((p3_dir / "rubric_evaluation.json").read_text(encoding="utf-8"))
+        with patch("stagecheck.core.rubric_engine.run_rubric_evaluation", return_value=(expected_eval, 1.0)):
+            rep3 = check_gate_preconditions(self.workspace, "Gate-3")
         self.assertTrue(rep3.passed, f"Expected Gate-3 to pass, failures={rep3.failure_reasons}")
 
     def test_active_state_schema_synchronization(self) -> None:

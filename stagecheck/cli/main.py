@@ -79,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_reset = subparsers.add_parser("reset-attempts", help="Monotonically allocate Attempt 4 after circuit breaker.")
     p_reset.add_argument("--task", required=True, help="Task identifier.")
     p_reset.add_argument("--authorized-by", required=True, help="Authorized owner identity.")
+    p_reset.add_argument("--yes", "-y", action="store_true", help="Bypass interactive confirmation prompt.")
     p_reset.add_argument("--workspace", help="Explicit workspace root path.")
 
     # 9. disposition
@@ -310,6 +311,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return run_reset_attempts(
             task=args.task,
             authorized_by=args.authorized_by,
+            yes=getattr(args, "yes", False),
             workspace=getattr(args, "workspace", None),
         )
 

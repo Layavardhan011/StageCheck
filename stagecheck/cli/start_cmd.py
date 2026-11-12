@@ -49,12 +49,22 @@ def run_start(workspace: Optional[Path] = None, task: Optional[str] = None) -> i
                     f"Cannot start '{task}': workspace is in phase '{phase}' "
                     f"(circuit_breaker_tripped={state.get('circuit_breaker_tripped')})."
                 )
+            existing_attempts = [p for p in task_dir.glob("attempt_*") if p.is_dir() or p.is_symlink()]
             if (
-                state.get("task_id") == task
-                and (int(state.get("attempt_index", 1)) >= 3 or phase == "SEALED_PASSED")
-            ) or (task_dir / "attempt_3").exists():
+                (
+                    state.get("task_id") == task
+                    and (
+                        state.get("status") == "SEALED_PASSED"
+                        or phase in ("COMPLETED", "SEALED_PASSED", "ABORTED")
+                        or int(state.get("attempt_index", 1)) >= 3
+                    )
+                )
+                or (task_dir / "attempt_3").exists()
+                or any((a / "seal.json").exists() or (a / "seal.json").is_symlink() for a in existing_attempts)
+                or existing_attempts
+            ):
                 raise RuntimeError(
-                    f"Attempt budget exhausted or task already sealed for '{task}'."
+                    f"Task '{task}' is already sealed, aborted, or has prior attempt history and cannot be restarted at attempt 1."
                 )
 
             with controlled_write_transaction(controls_dir):
@@ -63,9 +73,16 @@ def run_start(workspace: Optional[Path] = None, task: Optional[str] = None) -> i
                 state["attempt_index"] = 1
                 state["repair_index"] = 0
                 state["circuit_breaker_tripped"] = False
-                state.pop("attempt", None)
-                state.pop("current_task", None)
-                state.pop("status", None)
+                for stale_key in (
+                    "attempt",
+                    "current_task",
+                    "status",
+                    "cleared_gates",
+                    "resets_authorized",
+                    "halt_reason",
+                    "resume_reason",
+                ):
+                    state.pop(stale_key, None)
                 save_active_state(ws_root, state)
 
                 task_phase1_dir = task_dir / "attempt_1" / "Phase-1"

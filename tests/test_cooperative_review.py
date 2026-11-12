@@ -214,9 +214,11 @@ class TestCooperativeReview(unittest.TestCase):
         from stagecheck.core.rubric_engine import load_270_rule_catalog
         from stagecheck.core.utils import canonical_json_dumps, sha256_file
 
+        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+
         p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
         p1_dir.mkdir(parents=True, exist_ok=True)
-        (p1_dir / "prompt.md").write_text("# Prompt\n", encoding="utf-8")
+        (p1_dir / "prompt.md").write_text("# Prompt\nImplement validated order logic.\n", encoding="utf-8")
         (p1_dir / "declared_scope.json").write_text(
             json.dumps({
                 "schema_version": "2.0",
@@ -225,10 +227,7 @@ class TestCooperativeReview(unittest.TestCase):
             }),
             encoding="utf-8",
         )
-        (p1_dir / "prompt_verified.json").write_text(
-            json.dumps({"task_id": self.task_id, "status": "VERIFIED"}),
-            encoding="utf-8",
-        )
+        freeze_prompt_and_scope(self.workspace, self.task_id, self.attempt)
 
         # Compliant tests, evals, waivers, reviews, and phase evidence for strict 270-rule check-rubric
         (self.backend_dir / "test_order.py").write_text(
@@ -427,17 +426,15 @@ class TestCooperativeReview(unittest.TestCase):
         scaffold_controls_atomic(self.workspace, baselines)
         generate_start_manifest(self.workspace)
 
+        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
         p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
         p1_dir.mkdir(parents=True, exist_ok=True)
-        (p1_dir / "prompt.md").write_text("# Prompt\n", encoding="utf-8")
+        (p1_dir / "prompt.md").write_text("# Prompt\nImplement validated order logic.\n", encoding="utf-8")
         (p1_dir / "declared_scope.json").write_text(
             json.dumps({"schema_version": "2.0", "task_id": self.task_id, "allowed_paths": ["repos/backend/order.py"]}),
             encoding="utf-8",
         )
-        (p1_dir / "prompt_verified.json").write_text(
-            json.dumps({"task_id": self.task_id, "status": "VERIFIED"}),
-            encoding="utf-8",
-        )
+        freeze_prompt_and_scope(self.workspace, self.task_id, self.attempt)
 
         state = load_active_state(self.workspace)
         state["task_id"] = self.task_id

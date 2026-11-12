@@ -77,19 +77,18 @@ class TestGateCLIAndPrerequisites(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def _setup_gate1_artifacts(self) -> Path:
+    def _setup_gate1_artifacts(self, allowed_paths=None) -> Path:
+        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
         p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
         p1_dir.mkdir(parents=True, exist_ok=True)
         (p1_dir / "prompt.md").write_text("# Prompt\nImplement service\n", encoding="utf-8")
         scope = {
             "schema_version": "2.0",
             "task_id": self.task_id,
-            "allowed_paths": ["repos/core-service/service.py"],
+            "allowed_paths": allowed_paths or ["repos/core-service/service.py"],
         }
         (p1_dir / "declared_scope.json").write_text(json.dumps(scope, indent=2) + "\n", encoding="utf-8")
-        (p1_dir / "prompt_verified.json").write_text(
-            json.dumps({"task_id": self.task_id, "status": "VERIFIED"}, indent=2) + "\n", encoding="utf-8"
-        )
+        freeze_prompt_and_scope(self.workspace, self.task_id, self.attempt)
         return p1_dir
 
     def test_gate_check_reports_status_without_mutations(self) -> None:
@@ -190,14 +189,8 @@ class TestGateCLIAndPrerequisites(unittest.TestCase):
         from stagecheck.core.rubric_engine import load_270_rule_catalog
         from stagecheck.core.utils import canonical_json_dumps
 
-        p1_dir = self._setup_gate1_artifacts()
-        (p1_dir / "declared_scope.json").write_text(
-            json.dumps({
-                "schema_version": "2.0",
-                "task_id": self.task_id,
-                "allowed_paths": ["repos/core-service/service.py", "repos/core-service/test_service.py"],
-            }, indent=2) + "\n",
-            encoding="utf-8",
+        p1_dir = self._setup_gate1_artifacts(
+            allowed_paths=["repos/core-service/service.py", "repos/core-service/test_service.py"]
         )
 
         # Advance Gate 1

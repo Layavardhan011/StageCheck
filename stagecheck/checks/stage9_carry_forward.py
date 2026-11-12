@@ -55,53 +55,30 @@ def run_stage9_carry_forward(ctx: AuditContext) -> StageResult:
         )
         return StageResult(stage_id=stage_id, status="FAIL", defects=defects, errors=errors)
 
-    if not prior_seal_path.is_file():
+    if prior_seal_path.is_symlink() or not prior_seal_path.is_file():
         defects.append(
             Defect(
                 defect_id="carry_forward.missing_prior_seal",
-                message=f"Prior attempt seal 'seal.json' is missing from {prior_dir.relative_to(ctx.workspace_root)}",
+                message=f"Prior attempt seal 'seal.json' is missing or symlinked at {prior_dir.relative_to(ctx.workspace_root)}",
                 stage=stage_id,
                 severity="CRITICAL",
                 blocking=True,
             )
         )
     else:
-        # Cryptographically verify prior attempt seal
+        # Always verify the complete cryptographic seal chain (1 .. prior_attempt) regardless of seal format
         try:
-            with open(prior_seal_path, "r", encoding="utf-8") as f:
-                seal_data = json.load(f)
-            if not isinstance(seal_data, dict):
-                raise ValueError("seal.json root must be a JSON object.")
-
-            if "merkle_root_sha256" in seal_data:
-                ok, violations = verify_attempt_merkle_seal(prior_dir, ctx.workspace_root)
-                if (
-                    not ok
-                    or seal_data.get("task_id") != ctx.task_id
-                    or seal_data.get("attempt_index") != prior_attempt
-                ):
-                    msg = "; ".join(violations) if violations else "Merkle seal task/attempt binding mismatch."
-                    defects.append(
-                        Defect(
-                            defect_id="carry_forward.broken_chain",
-                            message=f"Prior Merkle seal verification failed: {msg}",
-                            stage=stage_id,
-                            severity="CRITICAL",
-                            blocking=True,
-                        )
+            ok, violations = verify_seal_chain(ctx.workspace_root, ctx.task_id, prior_attempt)
+            if not ok:
+                defects.append(
+                    Defect(
+                        defect_id="carry_forward.broken_chain",
+                        message=f"Prior seal chain verification failed: {'; '.join(violations)}",
+                        stage=stage_id,
+                        severity="CRITICAL",
+                        blocking=True,
                     )
-            else:
-                ok, violations = verify_seal_chain(ctx.workspace_root, ctx.task_id, prior_attempt)
-                if not ok:
-                    defects.append(
-                        Defect(
-                            defect_id="carry_forward.broken_chain",
-                            message=f"Prior seal chain verification failed: {'; '.join(violations)}",
-                            stage=stage_id,
-                            severity="CRITICAL",
-                            blocking=True,
-                        )
-                    )
+                )
 
             # Also verify EVIDENCE_MANIFEST.json if present
             manifest_path = ctx.workspace_root / "evidence" / "EVIDENCE_MANIFEST.json"

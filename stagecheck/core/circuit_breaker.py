@@ -14,6 +14,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -280,6 +281,7 @@ def trip_circuit_breaker(
     current_defects: List[Dict[str, Any]],
 ) -> Path:
     """Trip the circuit breaker, update ACTIVE_STATE.json, and emit alerts."""
+    from stagecheck.core.dispositions import mark_waivers_finalized
     from stagecheck.core.state import load_active_state, save_active_state
 
     controls_dir = workspace_root / "controls"
@@ -296,6 +298,8 @@ def trip_circuit_breaker(
             active_state["task_id"] = task_id
             active_state["attempt_index"] = attempt
             save_active_state(workspace_root, active_state)
+
+    mark_waivers_finalized(workspace_root, task_id, attempt)
 
     # Generate escalation report
     report_path = write_escalation_report(workspace_root, task_id, attempt, evaluation, current_defects)
@@ -318,18 +322,28 @@ def trip_circuit_breaker(
 def reset_circuit_breaker(
     workspace_root: Path,
     task_id: str,
-    authorized_by: str = "human-operator",
+    authorized_by: str = "",
+    require_tty: bool = False,
+    confirmed: bool = True,
 ) -> Dict[str, Any]:
     """Execute human-authorized reset-attempts command.
 
     Unlatches breaker state, preserves existing attempt directories intact (no resets),
-    sets attempt_budget_base = current_attempt (enabling monotonic Attempt 4+ allocation),
+    enforces human identity + OWNER_GRANTS.md CIRCUIT_BREAKER_RESET authorization + optional TTY/yes check,
     and transitions state to PHASE_1_PLANNING (GAP-C3, GAP-L2, GAP-X1).
     """
     state_file = workspace_root / "controls" / "ACTIVE_STATE.json"
     if not state_file.is_file():
         raise ResetAttemptsError("ACTIVE_STATE.json not found in controls directory.")
 
+    if require_tty and not confirmed:
+        if not sys.stdin.isatty():
+            raise ResetAttemptsError(
+                "Non-interactive reset-attempts blocked: resetting circuit breaker requires an "
+                "interactive terminal or explicit human confirmation (--yes)."
+            )
+
+    from stagecheck.core.dispositions import UnauthorizedDispositionError, is_human_identity, parse_owner_grants
     from stagecheck.core.state import load_active_state, save_active_state
 
     controls_dir = workspace_root / "controls"
@@ -339,6 +353,22 @@ def reset_circuit_breaker(
                 active_state = load_active_state(workspace_root)
             except Exception as err:
                 raise ResetAttemptsError(f"Failed to read ACTIVE_STATE.json: {err}") from err
+
+            # 0. Human identity & OWNER_GRANTS.md CIRCUIT_BREAKER_RESET check
+            auth_clean = str(authorized_by or "").strip()
+            if not auth_clean or not is_human_identity(auth_clean, active_state):
+                raise ResetAttemptsError(
+                    f"Identity '{authorized_by}' is not a valid human operator identity."
+                )
+            try:
+                grants = parse_owner_grants(workspace_root)
+            except UnauthorizedDispositionError as err:
+                raise ResetAttemptsError(str(err)) from err
+            perms = grants.get(auth_clean, set())
+            if not ({"CIRCUIT_BREAKER_RESET", "OWNER"} & perms):
+                raise ResetAttemptsError(
+                    f"Operator '{auth_clean}' lacks CIRCUIT_BREAKER_RESET grant in controls/OWNER_GRANTS.md."
+                )
 
             # 1. Task Match Precondition (GAP-L2)
             current_task = active_state.get("task_id") or active_state.get("execution_progress", {}).get("current_task")

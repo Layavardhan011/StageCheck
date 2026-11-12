@@ -23,6 +23,7 @@ from stagecheck.core.paths import find_workspace_root
 def run_reset_attempts(
     task: str,
     authorized_by: str,
+    yes: bool = False,
     workspace: Optional[str] = None,
 ) -> int:
     """Execute reset-attempts command."""
@@ -40,6 +41,8 @@ def run_reset_attempts(
             workspace_root=workspace_root,
             task_id=task,
             authorized_by=authorized_by,
+            require_tty=True,
+            confirmed=yes,
         )
         current_attempt = updated_state.get("attempt_index", 3)
         budget_base = updated_state.get("attempt_budget_base", current_attempt)

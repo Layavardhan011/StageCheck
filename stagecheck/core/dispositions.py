@@ -325,6 +325,12 @@ def mark_waivers_finalized(workspace_root: Path, task_id: str, attempt: int) -> 
                     changed = True
                 if disp_id:
                     ledger.setdefault("disposition_ids", {})[disp_id] = nonce
+    for nonce, rec in ledger.get("nonces", {}).items():
+        if isinstance(rec, dict) and rec.get("task_id") == task_id and rec.get("attempt") == attempt:
+            if not rec.get("finalized"):
+                rec["finalized"] = True
+                rec["finalized_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                changed = True
     if changed:
         _save_replay_ledger(workspace_root, ledger)
 
@@ -864,8 +870,9 @@ def resume_after_disposition(
     """Execute deterministic post-disposition resume protocol (GAP-B1).
 
     Determines the next phase:
-    - If circuit breaker remains tripped: preserves TRIP state.
-    - If all blocking defects are dispositioned: transitions to PHASE_3_VERIFICATION.
+    - Requires AWAITING_HUMAN_DISPOSITION (unless circuit_breaker_tripped).
+    - If circuit breaker remains tripped: preserves CIRCUIT_BREAKER_TRIPPED.
+    - If all blocking defects are dispositioned: transitions to PHASE_3_AUDIT.
     - If unresolved blocking defects remain: transitions to PHASE_1_REPAIR.
     """
     _validate_task_id(task_id)
@@ -876,9 +883,10 @@ def resume_after_disposition(
     controls_dir = workspace_root / "controls"
     with acquire_runtime_lock(controls_dir):
         with controlled_write_transaction(controls_dir):
+            from stagecheck.core.state import load_active_state, save_active_state
+
             try:
-                with open(state_file, "r", encoding="utf-8") as f:
-                    state = json.load(f)
+                state = load_active_state(workspace_root)
             except Exception as err:
                 raise DispositionError(f"Failed to read ACTIVE_STATE.json: {err}") from err
 
@@ -888,12 +896,17 @@ def resume_after_disposition(
                     f"Task mismatch on resume: requested '{task_id}', active state tracks '{active_task}'."
                 )
 
+            if not state.get("circuit_breaker_tripped") and state.get("phase") != "AWAITING_HUMAN_DISPOSITION":
+                raise DispositionError(
+                    f"Cannot resume task '{task_id}' from phase '{state.get('phase')}': expected 'AWAITING_HUMAN_DISPOSITION'."
+                )
+
             # If circuit breaker is tripped, disposition alone does not reset it
             if state.get("circuit_breaker_tripped"):
                 target_phase = "CIRCUIT_BREAKER_TRIPPED"
                 reason = "Circuit breaker remains tripped; requires explicit stagecheck reset-attempts."
             else:
-                # Load latest verdict to evaluate remaining defects
+                # Load latest verdict to evaluate remaining defects (fail closed if missing/invalid)
                 attempt = state.get("attempt_index", 1)
                 task_dir = _resolve_task_evidence_dir(workspace_root, task_id)
                 verdict_file = (
@@ -904,6 +917,17 @@ def resume_after_disposition(
                 )
                 if not verdict_file.is_file():
                     verdict_file = task_dir / "verdict.json"
+
+                if verdict_file.is_symlink() or not verdict_file.is_file():
+                    raise DispositionError(
+                        f"Verdict file not found or symlinked for task '{task_id}' at '{verdict_file}'."
+                    )
+                try:
+                    verdict = json.loads(verdict_file.read_text(encoding="utf-8"))
+                    if not isinstance(verdict, dict):
+                        raise ValueError("verdict.json root must be a JSON object.")
+                except Exception as err:
+                    raise DispositionError(f"Failed to parse verdict file '{verdict_file}': {err}") from err
 
                 dispositions_doc = load_dispositions(workspace_root)
                 all_disps = dispositions_doc.get("dispositions", [])
@@ -922,30 +946,23 @@ def resume_after_disposition(
                     if ok_w:
                         disp_ids.add(str(d.get("defect_id")))
 
-                unresolved_blocking = 0
-                if verdict_file.is_file():
-                    try:
-                        with open(verdict_file, "r", encoding="utf-8") as f:
-                            verdict = json.load(f)
-                        for d in verdict.get("defects", []):
-                            if d.get("mode") == "blocking" and d.get("defect_id") not in disp_ids:
-                                unresolved_blocking += 1
-                    except Exception:
-                        pass
+                unresolved_blocking = sum(
+                    1
+                    for d in verdict.get("defects", [])
+                    if isinstance(d, dict) and d.get("mode") == "blocking" and d.get("defect_id") not in disp_ids
+                )
 
                 if unresolved_blocking == 0:
-                    target_phase = "PHASE_3_VERIFICATION"
+                    target_phase = "PHASE_3_AUDIT"
                     reason = "All blocking defects waived or resolved; ready for independent verification rerun."
                 else:
                     target_phase = "PHASE_1_REPAIR"
                     reason = f"{unresolved_blocking} blocking defect(s) remain unresolved; active code repair required."
 
             state["phase"] = target_phase
-            state["resume_reason"] = reason
-            state["resumed_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-
-            with open(state_file, "w", encoding="utf-8") as f:
-                f.write(pretty_json_dumps(state))
+            state.pop("resume_reason", None)
+            state.pop("resumed_at", None)
+            save_active_state(workspace_root, state)
 
     return {
         "task_id": task_id,

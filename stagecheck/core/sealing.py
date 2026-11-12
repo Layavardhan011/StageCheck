@@ -165,6 +165,26 @@ def compute_attempt_merkle_seal(
 
     merkle_root_sha256 = hashlib.sha256(canonical_json_bytes).hexdigest()
 
+    prior_seal_sha256: Optional[str] = None
+    if attempt_index > 1:
+        from stagecheck.core.agents import resolve_task_attempt_dir
+        from stagecheck.core.paths import sha256_file_nofollow
+
+        prior_dir = resolve_task_attempt_dir(ws_root, task_id, attempt_index - 1)
+        prior_seal_file = prior_dir / "seal.json"
+        if os.path.islink(prior_seal_file) or not prior_seal_file.is_file():
+            raise SealingError(
+                f"Cannot seal attempt {attempt_index}: prior attempt_{attempt_index - 1} seal.json is missing or symlinked."
+            )
+        if write_seal_file:
+            from stagecheck.core.evidence import verify_seal_chain
+            ok_chain, chain_viol = verify_seal_chain(ws_root, task_id, attempt_index - 1)
+            if not ok_chain:
+                raise SealingError(
+                    f"Cannot seal attempt {attempt_index}: prior seal chain failed validation ({'; '.join(chain_viol)})."
+                )
+        prior_seal_sha256 = sha256_file_nofollow(prior_seal_file)
+
     metadata_envelope = {
         "schema_version": "2.0.0",
         "task_id": task_id,
@@ -173,6 +193,8 @@ def compute_attempt_merkle_seal(
         "total_files_sealed": len(leaf_entries),
         "verdict": verdict_data or {},
     }
+    if prior_seal_sha256 is not None:
+        metadata_envelope["prior_seal_sha256"] = prior_seal_sha256
     seal_payload_sha256 = hashlib.sha256(
         json.dumps(metadata_envelope, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     ).hexdigest()
@@ -187,6 +209,8 @@ def compute_attempt_merkle_seal(
         "verdict": verdict_data or {},
         "leaves": leaf_entries,
     }
+    if prior_seal_sha256 is not None:
+        seal_record["prior_seal_sha256"] = prior_seal_sha256
 
     if write_seal_file:
         seal_file = attempt_path / "seal.json"

@@ -153,7 +153,7 @@ class TestPrettyJSONFormatting(unittest.TestCase):
         state_file = self.workspace / "controls" / "ACTIVE_STATE.json"
         self.assert_pretty_json_file(state_file)
 
-        reset_circuit_breaker(self.workspace, "task-cb", "human-operator")
+        reset_circuit_breaker(self.workspace, "task-cb", "owner@stagecheck.local")
         elevate_permissions_for_teardown(self.workspace)
         self.assert_pretty_json_file(state_file)
 
@@ -179,9 +179,19 @@ class TestPrettyJSONFormatting(unittest.TestCase):
         disp_file = self.workspace / "controls" / "DISPOSITIONS.json"
         self.assert_pretty_json_file(disp_file)
 
+        state_file = self.workspace / "controls" / "ACTIVE_STATE.json"
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        state["phase"] = "AWAITING_HUMAN_DISPOSITION"
+        state_file.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        verdict_dir = self.workspace / "evidence" / "tasks" / "task-init" / "attempt_1" / "Phase-3"
+        verdict_dir.mkdir(parents=True, exist_ok=True)
+        (verdict_dir / "verdict.json").write_text(
+            json.dumps({"result": "PASSED", "defects": []}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
         resume_after_disposition(self.workspace, "task-init")
         elevate_permissions_for_teardown(self.workspace)
-        state_file = self.workspace / "controls" / "ACTIVE_STATE.json"
         self.assert_pretty_json_file(state_file)
 
     def test_evidence_manifest_and_seals_are_pretty_printed(self) -> None:

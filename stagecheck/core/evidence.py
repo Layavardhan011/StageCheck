@@ -395,6 +395,11 @@ def verify_seal_chain(
                 violations.append(
                     f"Attempt {att} seal attempt_index mismatch: '{seal_data.get('attempt_index')}' != {att}."
                 )
+            if att > 1 and seal_data.get("prior_seal_sha256") != prior_expected_hash:
+                violations.append(
+                    f"Cryptographic chain broken at attempt {att}: Merkle seal prior_seal_sha256 "
+                    f"({str(seal_data.get('prior_seal_sha256'))[:12]}) != attempt {att-1} hash ({prior_expected_hash[:12]})."
+                )
             ok, seal_violations = verify_attempt_merkle_seal(seal_path.parent, ws_root)
             if not ok:
                 violations.extend(seal_violations)

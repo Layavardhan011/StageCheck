@@ -107,17 +107,15 @@ class TestTurnProtocol(unittest.TestCase):
 
     def test_phase2a_cooperative_review_turn_progression(self) -> None:
         """Verify Phase 2A turn transitions: AGENT_2 -> AGENT_1 -> AGENT_2 (revision) -> STAGECHECK (approved)."""
+        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
         p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
         p1_dir.mkdir(parents=True, exist_ok=True)
-        (p1_dir / "prompt.md").write_text("# Prompt\n", encoding="utf-8")
+        (p1_dir / "prompt.md").write_text("# Prompt\nImplement service logic.\n", encoding="utf-8")
         (p1_dir / "declared_scope.json").write_text(
             json.dumps({"schema_version": "2.0", "task_id": self.task_id, "allowed_paths": ["repos/service/app.py"]}),
             encoding="utf-8",
         )
-        (p1_dir / "prompt_verified.json").write_text(
-            json.dumps({"task_id": self.task_id, "status": "VERIFIED"}),
-            encoding="utf-8",
-        )
+        freeze_prompt_and_scope(self.workspace, self.task_id, self.attempt)
         advance_gate_atomic(self.workspace, "Gate-1", task_id=self.task_id, attempt=self.attempt)
 
         p2a_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
@@ -259,7 +257,7 @@ class TestTurnProtocol(unittest.TestCase):
         # When prompt is drafted: Turn switches exclusively to STAGECHECK verifier
         p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
         p1_dir.mkdir(parents=True, exist_ok=True)
-        (p1_dir / "prompt.md").write_text("# Feature\n", encoding="utf-8")
+        (p1_dir / "prompt.md").write_text("# Feature\nImplement service logic.\n", encoding="utf-8")
         (p1_dir / "declared_scope.json").write_text(
             json.dumps({"schema_version": "2.0", "task_id": self.task_id, "allowed_paths": ["repos/service/app.py"]}),
             encoding="utf-8",
@@ -270,10 +268,8 @@ class TestTurnProtocol(unittest.TestCase):
         self.assertNotEqual(status_verifying.active_turn, "AGENT_2")
 
         # When verified: Still STAGECHECK turn until Gate-1 advance is completed
-        (p1_dir / "prompt_verified.json").write_text(
-            json.dumps({"task_id": self.task_id, "status": "VERIFIED"}),
-            encoding="utf-8",
-        )
+        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+        freeze_prompt_and_scope(self.workspace, self.task_id, self.attempt)
         status_gate1 = compute_turn_status(self.workspace)
         self.assertEqual(status_gate1.active_turn, "STAGECHECK")
 

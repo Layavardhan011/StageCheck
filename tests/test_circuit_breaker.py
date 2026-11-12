@@ -216,7 +216,7 @@ class TestCircuitBreaker(unittest.TestCase):
         """Verify reset-attempts validates task match, trips requirement, and unlatches state."""
         # 1. Reject reset when task is NOT tripped
         with self.assertRaises(ResetAttemptsError) as cm_premature:
-            reset_circuit_breaker(self.workspace_root, self.task_id)
+            reset_circuit_breaker(self.workspace_root, self.task_id, authorized_by="owner@stagecheck.local")
         self.assertIn("not tripped", str(cm_premature.exception))
 
         # Trip the breaker at attempt 2
@@ -225,19 +225,19 @@ class TestCircuitBreaker(unittest.TestCase):
 
         # 2. Reject reset when task ID mismatches
         with self.assertRaises(ResetAttemptsError) as cm_mismatch:
-            reset_circuit_breaker(self.workspace_root, "different-task-999")
+            reset_circuit_breaker(self.workspace_root, "different-task-999", authorized_by="owner@stagecheck.local")
         self.assertIn("Task ID mismatch", str(cm_mismatch.exception))
 
         # 3. Successful reset from attempt 2 -> advances monotonically to attempt 3
         updated = reset_circuit_breaker(
             self.workspace_root,
             self.task_id,
-            authorized_by="developer@example.com",
+            authorized_by="owner@stagecheck.local",
         )
         self.assertFalse(updated["circuit_breaker_tripped"])
         self.assertEqual(updated["phase"], "PHASE_1_PLANNING")
         self.assertEqual(updated["attempt_index"], 3)
-        self.assertEqual(updated["resets_authorized"][-1]["authorized_by"], "developer@example.com")
+        self.assertEqual(updated["resets_authorized"][-1]["authorized_by"], "owner@stagecheck.local")
 
     def test_attempt_budget_cap_enforcement(self):
         """Verify DEC-028 / FR-06: Attempt budget hard cap of 3 cannot be bypassed via retry."""
@@ -247,7 +247,7 @@ class TestCircuitBreaker(unittest.TestCase):
 
         # Attempting reset or retry at attempt 3 MUST fail closed with AttemptBudgetExhaustedError
         with self.assertRaises(AttemptBudgetExhaustedError) as cm_exhausted:
-            reset_circuit_breaker(self.workspace_root, self.task_id)
+            reset_circuit_breaker(self.workspace_root, self.task_id, authorized_by="owner@stagecheck.local")
         self.assertIn("Attempt budget exhausted", str(cm_exhausted.exception))
 
     def test_attempt_budget_accounting(self):
@@ -269,7 +269,8 @@ class TestCircuitBreaker(unittest.TestCase):
         exit_code = main([
             "reset-attempts",
             "--task", self.task_id,
-            "--authorized-by", "owner@example.com",
+            "--authorized-by", "owner@stagecheck.local",
+            "--yes",
             "--workspace", str(self.workspace_root),
         ])
         self.assertEqual(exit_code, 0)

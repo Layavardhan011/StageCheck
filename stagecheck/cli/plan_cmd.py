@@ -13,7 +13,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from stagecheck.core.paths import find_workspace_root
+from stagecheck.core.paths import StageCheckPathError, find_workspace_root, safe_resolve, sha256_file_nofollow
+from stagecheck.core.sealing import verify_attempt_merkle_seal
 from stagecheck.core.task_plan import (
     CircularDependencyError,
     TaskPlanError,
@@ -105,24 +106,72 @@ def run_plan(
             if isinstance(t, dict) and t.get("status") == "completed" and t.get("task_id")
         }
         active_state_file = workspace_root / "controls" / "ACTIVE_STATE.json"
-        if active_state_file.is_file():
+        if active_state_file.is_file() and not active_state_file.is_symlink():
             try:
                 state_data = load_json_file(active_state_file)
                 completed_tasks.update(state_data.get("completed_tasks", []))
-                if state_data.get("phase") == "SEALED_PASSED" and state_data.get("task_id"):
+                if (
+                    state_data.get("phase") == "SEALED_PASSED"
+                    or state_data.get("status") == "SEALED_PASSED"
+                ) and state_data.get("task_id"):
                     completed_tasks.add(str(state_data["task_id"]))
             except Exception:
                 pass
+
+        manifest_sealed_tasks = {}
+        manifest_path = workspace_root / "evidence" / "EVIDENCE_MANIFEST.json"
+        if manifest_path.is_file() and not manifest_path.is_symlink():
+            try:
+                manifest_data = load_json_file(manifest_path)
+                if isinstance(manifest_data, dict) and isinstance(manifest_data.get("sealed_tasks"), dict):
+                    manifest_sealed_tasks = manifest_data["sealed_tasks"]
+            except Exception:
+                manifest_sealed_tasks = {}
+
         tasks_evidence_dir = workspace_root / "evidence" / "tasks"
-        if tasks_evidence_dir.is_dir():
-            for seal_file in tasks_evidence_dir.glob("*/attempt_*/seal.json"):
+        if tasks_evidence_dir.is_dir() and not tasks_evidence_dir.is_symlink():
+            for seal_file in sorted(tasks_evidence_dir.glob("*/attempt_*/seal.json")):
                 try:
-                    seal_data = load_json_file(seal_file)
-                    if seal_data.get("verdict") == "PASSED" or seal_data.get("outcome") == "PASSED":
-                        tid = seal_data.get("task_id") or seal_file.parent.parent.name
-                        if tid:
-                            completed_tasks.add(str(tid))
-                except Exception:
+                    safe_seal = safe_resolve(seal_file, workspace_root, allow_symlinks=False)
+                    if safe_seal.is_symlink() or not safe_seal.is_file():
+                        continue
+                    seal_data = load_json_file(safe_seal)
+                    if not isinstance(seal_data, dict):
+                        continue
+                    expected_task = safe_seal.parent.parent.name
+                    tid = seal_data.get("task_id")
+                    if tid != expected_task:
+                        continue
+                    attempt_name = safe_seal.parent.name
+                    if not attempt_name.startswith("attempt_") or not attempt_name[8:].isdigit():
+                        continue
+                    att_idx = int(attempt_name[8:])
+                    recorded_att = seal_data.get("attempt_index", seal_data.get("attempt"))
+                    if isinstance(recorded_att, bool) or recorded_att != att_idx:
+                        continue
+
+                    indexed_entry = (
+                        manifest_sealed_tasks.get(str(tid), {}).get(attempt_name)
+                        if isinstance(manifest_sealed_tasks.get(str(tid)), dict)
+                        else None
+                    )
+                    if not isinstance(indexed_entry, dict):
+                        continue
+                    if indexed_entry.get("seal_sha256") != sha256_file_nofollow(safe_seal):
+                        continue
+
+                    ok_seal, _ = verify_attempt_merkle_seal(safe_seal.parent, workspace_root)
+                    if not ok_seal:
+                        continue
+
+                    verdict = seal_data.get("verdict")
+                    verdict_passed = (
+                        isinstance(verdict, dict)
+                        and (verdict.get("status") in ("PASSED", "CLEAR") or verdict.get("result") in ("PASSED", "CLEAR"))
+                    )
+                    if verdict_passed or seal_data.get("outcome") == "PASSED":
+                        completed_tasks.add(str(tid))
+                except (StageCheckPathError, Exception):
                     pass
 
         next_task = get_next_eligible_task(plan_data, completed_tasks=completed_tasks)

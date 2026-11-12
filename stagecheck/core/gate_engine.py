@@ -236,12 +236,12 @@ def evaluate_gate_1_criteria(
 
     # 1. prompt.md
     prompt_file = p1_dir / "prompt.md"
-    if not prompt_file.is_file():
+    if prompt_file.is_symlink() or not prompt_file.is_file():
         criteria.append(GateCriterion(
             criterion_id="gate1.prompt_exists",
             description="Phase 1 prompt blueprint exists and is readable",
             status="FAILED",
-            message=f"Missing required artifact: '{prompt_file.relative_to(workspace_root)}'",
+            message=f"Missing or symlinked required artifact: '{prompt_file.relative_to(workspace_root)}'",
         ))
     else:
         content = prompt_file.read_text(encoding="utf-8")
@@ -264,89 +264,76 @@ def evaluate_gate_1_criteria(
 
     # 2. declared_scope.json
     scope_file = p1_dir / "declared_scope.json"
-    if not scope_file.is_file():
+    if scope_file.is_symlink() or not scope_file.is_file():
         criteria.append(GateCriterion(
             criterion_id="gate1.scope_exists",
             description="Declared scope descriptor exists and defines boundary",
             status="FAILED",
-            message=f"Missing required artifact: '{scope_file.relative_to(workspace_root)}'",
+            message=f"Missing or symlinked required artifact: '{scope_file.relative_to(workspace_root)}'",
         ))
     else:
         try:
+            from stagecheck.core.prompt_gate import PromptGateError, validate_declared_scope
             scope_data = load_json_file(scope_file)
-            allowed = scope_data.get("allowed_paths", [])
-            # Check for illegal top-level, repo-root, or globbed repo-name wildcards
-            has_forbidden_wildcard = False
-            for p in allowed:
-                if not isinstance(p, str):
-                    has_forbidden_wildcard = True
-                    break
-                norm_p = p.strip().lstrip("/")
-                if norm_p in ("*", "/**", "**", "repos", "repos/", "repos/*", "repos/**", "repos/**/*"):
-                    has_forbidden_wildcard = True
-                    break
-                parts = norm_p.split("/")
-                if parts[0] == "repos" and (len(parts) < 2 or any(ch in parts[1] for ch in "*?[")):
-                    has_forbidden_wildcard = True
-                    break
-            if has_forbidden_wildcard:
-                criteria.append(GateCriterion(
-                    criterion_id="gate1.scope_discrete",
-                    description="Declared scope contains discrete non-wildcard repository paths",
-                    status="FAILED",
-                    message="declared_scope.json contains prohibited top-level or repository-wide wildcard pattern.",
-                ))
-            else:
-                s_hash = sha256_file(scope_file)
-                deliverables.append({"path": str(scope_file.relative_to(workspace_root)), "sha256": s_hash, "status": "VALID"})
-                criteria.append(GateCriterion(
-                    criterion_id="gate1.scope_discrete",
-                    description="Declared scope contains discrete permitted repository paths",
-                    status="MET",
-                    message="declared_scope.json validates with discrete allowed paths.",
-                ))
+            validate_declared_scope(workspace_root, scope_data)
+            if scope_data.get("task_id") != task_id:
+                raise PromptGateError(
+                    f"declared_scope.json task_id '{scope_data.get('task_id')}' does not match '{task_id}'."
+                )
+            s_hash = sha256_file(scope_file)
+            deliverables.append({"path": str(scope_file.relative_to(workspace_root)), "sha256": s_hash, "status": "VALID"})
+            criteria.append(GateCriterion(
+                criterion_id="gate1.scope_discrete",
+                description="Declared scope contains discrete permitted repository paths",
+                status="MET",
+                message="declared_scope.json validates with discrete allowed paths.",
+            ))
         except Exception as err:
             criteria.append(GateCriterion(
-                criterion_id="gate1.scope_schema",
-                description="Declared scope matches JSON schema",
+                criterion_id="gate1.scope_discrete",
+                description="Declared scope matches JSON schema and containment rules",
                 status="FAILED",
-                message=f"Failed to load or parse declared_scope.json: {err}",
+                message=f"declared_scope.json validation failed: {err}",
             ))
 
-    # 3. prompt_verified.json
+    # 3. prompt_verified.json (verify cryptographic invariance and task/attempt binding)
     pv_file = p1_dir / "prompt_verified.json"
-    if not pv_file.is_file():
+    if pv_file.is_symlink() or not pv_file.is_file():
         criteria.append(GateCriterion(
             criterion_id="gate1.prompt_frozen",
             description="Prompt and scope verification record generated and frozen",
             status="FAILED",
-            message="Prompt has not been verified (missing prompt_verified.json). Run 'stagecheck verify-prompt'.",
+            message="Prompt has not been verified (missing or symlinked prompt_verified.json). Run 'stagecheck verify-prompt'.",
         ))
     else:
         try:
-            pv_data = load_json_file(pv_file)
-            if pv_data.get("status") != "VERIFIED":
-                criteria.append(GateCriterion(
-                    criterion_id="gate1.prompt_verified_status",
-                    description="Prompt verification status is VERIFIED",
-                    status="FAILED",
-                    message=f"prompt_verified.json status is '{pv_data.get('status')}', expected 'VERIFIED'.",
-                ))
-            else:
-                pv_hash = sha256_file(pv_file)
-                deliverables.append({"path": str(pv_file.relative_to(workspace_root)), "sha256": pv_hash, "status": "VALID"})
-                criteria.append(GateCriterion(
-                    criterion_id="gate1.prompt_frozen",
-                    description="Prompt and scope verified and frozen",
-                    status="MET",
-                    message="prompt_verified.json status is VERIFIED.",
-                ))
+            from stagecheck.core.prompt_gate import PromptGateError, assert_prompt_invariance
+            pv_data = assert_prompt_invariance(workspace_root, task_id, attempt)
+            pv_att = pv_data.get("attempt")
+            if (
+                pv_data.get("status") != "VERIFIED"
+                or pv_data.get("task_id") != task_id
+                or isinstance(pv_att, bool)
+                or int(pv_att or 0) != int(attempt)
+            ):
+                raise PromptGateError(
+                    f"prompt_verified.json status or task/attempt binding mismatch "
+                    f"(status={pv_data.get('status')!r}, task_id={pv_data.get('task_id')!r}, attempt={pv_att!r})."
+                )
+            pv_hash = sha256_file(pv_file)
+            deliverables.append({"path": str(pv_file.relative_to(workspace_root)), "sha256": pv_hash, "status": "VALID"})
+            criteria.append(GateCriterion(
+                criterion_id="gate1.prompt_frozen",
+                description="Prompt and scope verified and frozen",
+                status="MET",
+                message="prompt_verified.json status is VERIFIED and matches current file digests.",
+            ))
         except Exception as err:
             criteria.append(GateCriterion(
                 criterion_id="gate1.prompt_verified_format",
-                description="prompt_verified.json is valid JSON",
+                description="prompt_verified.json is valid JSON matching current Phase-1 files",
                 status="FAILED",
-                message=f"Error reading prompt_verified.json: {err}",
+                message=f"Prompt/scope invariance check failed: {err}",
             ))
 
     return criteria, deliverables
@@ -1275,6 +1262,7 @@ def _advance_gate_atomic_locked(
 
     # Specialized transactional execution for Gate 4 sealing per DEC-025
     if gate_id == GateId.GATE_4:
+        from stagecheck.core.dispositions import _replay_ledger_path, mark_waivers_finalized
         from stagecheck.core.journal import write_ahead_transaction
         from stagecheck.core.sealing import compute_attempt_merkle_seal, index_seal_in_manifest
 
@@ -1288,6 +1276,7 @@ def _advance_gate_atomic_locked(
 
         manifest_path = root / "evidence" / "EVIDENCE_MANIFEST.json"
         state_path = root / "controls" / "ACTIVE_STATE.json"
+        ledger_path = _replay_ledger_path(root)
 
         with write_ahead_transaction(
             workspace_root=root,
@@ -1299,6 +1288,7 @@ def _advance_gate_atomic_locked(
             journal.record_pre_image(seal_path)
             journal.record_pre_image(state_path)
             journal.record_pre_image(manifest_path)
+            journal.record_pre_image(ledger_path)
 
             parent_dir = receipt_path.parent
             parent_dir.mkdir(parents=True, exist_ok=True)
@@ -1312,6 +1302,11 @@ def _advance_gate_atomic_locked(
             _write_receipt_no_follow(root, receipt_path, content_str)
             journal.record_staged_write(receipt_path)
             live_hash = sha256_file(receipt_path)
+
+            # Finalize attempt waivers against cross-attempt/cross-task replay before sealing
+            mark_waivers_finalized(root, resolved_task_id, resolved_attempt)
+            if ledger_path.exists():
+                journal.record_staged_write(ledger_path)
 
             # Compute and write deterministic Merkle DAG seal.json
             seal_record = compute_attempt_merkle_seal(
@@ -1394,11 +1389,6 @@ def _advance_gate_atomic_locked(
             freeze_phase_directory(attempt_dir / "Phase-2B")
         elif gate_id == GateId.GATE_3:
             freeze_phase_directory(attempt_dir / "Phase-3")
-        elif gate_id == GateId.GATE_4:
-            from stagecheck.core.dispositions import mark_waivers_finalized
-
-            mark_waivers_finalized(root, resolved_task_id, resolved_attempt)
-            freeze_phase_directory(attempt_dir)
 
         return GateAdvanceResult(
             gate_id=gate_id.value,

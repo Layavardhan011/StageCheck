@@ -371,7 +371,7 @@ class TestAdversarialSecurity(unittest.TestCase):
 
         # Attempting reset beyond maximum attempt budget must strictly fail closed
         with self.assertRaises(AttemptBudgetExhaustedError):
-            reset_circuit_breaker(self.ws, "task-adv-01", authorized_by="human-operator")
+            reset_circuit_breaker(self.ws, "task-adv-01", authorized_by="owner@stagecheck.local")
 
     # =========================================================================
     # 8. Premature CLI Operations Defenses
@@ -678,6 +678,348 @@ class TestAdversarialSecurity(unittest.TestCase):
         jdir.symlink_to(outside)
         with self.assertRaises(JournalError):
             recover_interrupted_transactions(self.ws)
+
+    # =========================================================================
+    # Batch 6 Regression Guards (Findings 13, 23, 24, 25, 28, 29, 32, 33, 35, 36)
+    # =========================================================================
+
+    def test_adversarial_batch6_dual_role_and_single_agent_fail_closed(self) -> None:
+        """[13] dual_role cannot spoof prompt_and_audit; single_agent_mode fails dual-agent rules."""
+        from stagecheck.core.rubric_engine import (
+            _collect_rubric_context,
+            build_agent_reviews_artifact,
+            evaluate_rubric_rule,
+            load_270_rule_catalog,
+            validate_agent_review_provenance,
+        )
+
+        solo_ws = Path(self.temp_dir.name) / "solo_ws"
+        solo_repo = solo_ws / "repos" / "app"
+        solo_repo.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "-C", str(solo_repo), "init"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(solo_repo), "config", "user.name", "Tester"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(solo_repo), "config", "user.email", "tester@example.com"], check=True, capture_output=True)
+        (solo_repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(solo_repo), "add", "app.py"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(solo_repo), "commit", "-m", "init"], check=True, capture_output=True)
+
+        self.assertEqual(run_init(solo_ws, agent1="solo", agent2="solo"), 0)
+        self.assertEqual(run_start(workspace=solo_ws, task="task-solo-01"), 0)
+
+        p2a_dir = solo_ws / "evidence" / "tasks" / "task-solo-01" / "attempt_1" / "Phase-2A"
+        p2a_dir.mkdir(parents=True, exist_ok=True)
+        reviews_doc = build_agent_reviews_artifact(
+            workspace_root=solo_ws,
+            task_id="task-solo-01",
+            attempt=1,
+            reviews={},
+            reviewer="solo",
+            reviewer_role="prompt_and_audit",
+        )
+        (p2a_dir / "agent_reviews.json").write_text(json.dumps(reviews_doc), encoding="utf-8")
+        ok, _, reason = validate_agent_review_provenance(
+            workspace_root=solo_ws,
+            src_doc=reviews_doc,
+            src_rel_path="Phase-2A/agent_reviews.json",
+            task_id="task-solo-01",
+            attempt=1,
+            active_state=load_active_state(solo_ws),
+            pre_commit_status={
+                "task_id": "task-solo-01",
+                "attempt": 1,
+                "touched_repositories": ["app"],
+                "base_commits": reviews_doc["head_commits"],
+            },
+            repo_heads=reviews_doc["head_commits"],
+            diff_snapshot_sha256=reviews_doc["diff_snapshot_sha256"],
+        )
+        self.assertFalse(ok)
+        self.assertIn("role", reason.lower())
+
+        catalog = {r.rule_id: r for r in load_270_rule_catalog()}
+        ctx = _collect_rubric_context(solo_ws, task_id="task-solo-01", attempt=1)
+        for rid in ("CLAIM_SUPPORT-013", "INDEPENDENT_RERUN-001"):
+            res = evaluate_rubric_rule(catalog[rid], solo_ws, ctx)
+            self.assertEqual(res.status, "FAIL", f"{rid} must fail in single_agent_mode: {res}")
+
+    def test_adversarial_batch6_forged_rubric_and_prompt_scope_invariance(self) -> None:
+        """[28, 32, 36] Reject forged 270/270 rubric, wrong N/A predicates, deleted prompt.md, and scope task mismatch."""
+        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+        from stagecheck.core.rubric_engine import (
+            InvalidRubricExemptionError,
+            _collect_rubric_context,
+            compute_rubric_context_digest,
+            evaluate_rubric_rule,
+            load_270_rule_catalog,
+            validate_rubric_evaluation_payload,
+            verify_complete_rubric_evaluation,
+        )
+
+        p1_dir = self.ws / "evidence" / "tasks" / "task-adv-01" / "attempt_1" / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").write_text("# Task\nImplement hardened verification checks.\n", encoding="utf-8")
+        (p1_dir / "declared_scope.json").write_text(
+            json.dumps({"schema_version": "2.0", "task_id": "task-adv-01", "allowed_paths": ["repos/backend/main.py"]}),
+            encoding="utf-8",
+        )
+        freeze_prompt_and_scope(self.ws, "task-adv-01", 1)
+
+        catalog = load_270_rule_catalog()
+        by_id = {r.rule_id: r for r in catalog}
+
+        # [36a] Forged NOT_APPLICABLE using wrong evaluator/exemption_predicate rejected
+        with self.assertRaises(InvalidRubricExemptionError):
+            validate_rubric_evaluation_payload([
+                {
+                    "rule_id": catalog[0].rule_id,
+                    "title": catalog[0].title,
+                    "category": catalog[0].category,
+                    "domain": catalog[0].domain,
+                    "status": "NOT_APPLICABLE",
+                    "severity": "BLOCKING",
+                    "evaluator": "forged_evaluator",
+                    "evidence_path": "",
+                    "message": "fake na",
+                    "exemption_predicate": "fake_predicate",
+                }
+            ])
+
+        # [36b] Forged 270/270 PASS JSON with genuine context_digest caught by live re-evaluation
+        ctx_digest = compute_rubric_context_digest(self.ws, "task-adv-01", 1)
+        forged_doc = {
+            "schema_version": "2.0",
+            "task_id": "task-adv-01",
+            "attempt": 1,
+            "cycle": 1,
+            "context_digest": ctx_digest,
+            "overall_verdict": "PASS",
+            "counts": {
+                "total": len(catalog),
+                "pass": len(catalog),
+                "fail": 0,
+                "not_applicable": 0,
+                "evaluated": len(catalog),
+            },
+            "evaluations": [
+                {
+                    "rule_id": r.rule_id,
+                    "title": r.title,
+                    "category": r.category,
+                    "domain": r.domain,
+                    "status": "PASS",
+                    "severity": "BLOCKING",
+                    "evaluator": r.domain.lower() + "_evaluator",
+                    "evidence_path": "Phase-1/prompt.md",
+                    "message": "forged pass",
+                }
+                for r in catalog
+            ],
+        }
+        p2a_rubric = self.ws / "evidence" / "tasks" / "task-adv-01" / "attempt_1" / "Phase-2A" / "rubric_evaluation.json"
+        p2a_rubric.parent.mkdir(parents=True, exist_ok=True)
+        p2a_rubric.write_text(json.dumps(forged_doc), encoding="utf-8")
+        v_ok, _, v_reasons = verify_complete_rubric_evaluation(
+            self.ws, p2a_rubric, task_id="task-adv-01", attempt=1
+        )
+        self.assertFalse(v_ok)
+        self.assertTrue(v_reasons)
+
+        # [32] Deleting prompt.md after prompt_verified.json fails COMMON-025
+        (p1_dir / "prompt.md").unlink()
+        ctx_missing = _collect_rubric_context(self.ws, task_id="task-adv-01", attempt=1)
+        res_025 = evaluate_rubric_rule(by_id["COMMON-025"], self.ws, ctx_missing)
+        self.assertEqual(res_025.status, "FAIL")
+
+        # [28] Replacing declared_scope.json with mismatched task_id fails Gate-1
+        from stagecheck.core.gate_engine import evaluate_gate_1_criteria
+        (p1_dir / "prompt.md").write_text("# Task\nImplement hardened verification checks.\n", encoding="utf-8")
+        os.chmod(p1_dir / "declared_scope.json", 0o644)
+        (p1_dir / "declared_scope.json").write_text(
+            json.dumps({"schema_version": "2.0", "task_id": "other-task", "allowed_paths": ["repos/backend/main.py"]}),
+            encoding="utf-8",
+        )
+        criteria, _ = evaluate_gate_1_criteria(self.ws, "task-adv-01", 1)
+        self.assertTrue(any(c.status == "FAILED" for c in criteria))
+
+    def test_adversarial_batch6_waiver_finalization_on_breaker(self) -> None:
+        """[29] Tripping the circuit breaker finalizes attempt waivers against replay."""
+        from stagecheck.core.circuit_breaker import CircuitBreakerEvaluation, trip_circuit_breaker
+        from stagecheck.core.dispositions import (
+            DispositionReplayError,
+            build_waiver_entry,
+            record_waiver_in_replay_ledger,
+            validate_waiver_provenance,
+        )
+
+        proof = self.ws / "evidence" / "waiver_b6.txt"
+        with controlled_write_transaction(self.ws / "evidence"):
+            proof.write_text("Approved waiver proof\n", encoding="utf-8")
+        entry = build_waiver_entry(
+            workspace_root=self.ws,
+            task_id="task-adv-01",
+            defect_id="sec.test_waiver",
+            rationale="Verified temporary waiver",
+            authorized_by="owner@stagecheck.local",
+            attempt=1,
+            evidence_path="evidence/waiver_b6.txt",
+            rule_id="SECRETS-001",
+            waived_rules=["SECRETS-001"],
+        )
+        record_waiver_in_replay_ledger(self.ws, entry)
+
+        trip_circuit_breaker(
+            self.ws,
+            "task-adv-01",
+            1,
+            CircuitBreakerEvaluation(tripped=True, trigger="stagnant_defects", reason="Stagnant"),
+            [],
+        )
+        ok_w, msg_w = validate_waiver_provenance(self.ws, entry, "task-adv-01", 1)
+        self.assertFalse(ok_w)
+        self.assertIn("replay", msg_w.lower())
+
+    def test_adversarial_batch6_resume_and_circuit_breaker_guards(self) -> None:
+        """[24, 25] Resume requires AWAITING_HUMAN_DISPOSITION + verdict.json; breaker reset requires granted human."""
+        from stagecheck.cli.main import main
+        from stagecheck.core.circuit_breaker import CircuitBreakerEvaluation, trip_circuit_breaker
+        from stagecheck.core.dispositions import DispositionError, resume_after_disposition
+
+        # [25a] Wrong phase fails closed
+        with self.assertRaises(DispositionError):
+            resume_after_disposition(self.ws, "task-adv-01")
+
+        # [25b] Missing Phase-3/verdict.json fails closed even in AWAITING_HUMAN_DISPOSITION
+        with controlled_write_transaction(self.ws / "controls"):
+            st = load_active_state(self.ws)
+            st["phase"] = "AWAITING_HUMAN_DISPOSITION"
+            save_active_state(self.ws, st)
+        with self.assertRaises(DispositionError):
+            resume_after_disposition(self.ws, "task-adv-01")
+
+        # [25c] Valid verdict.json resumes cleanly to PHASE_3_AUDIT without schema-invalid fields
+        p3_dir = self.ws / "evidence" / "tasks" / "task-adv-01" / "attempt_1" / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        (p3_dir / "verdict.json").write_text(json.dumps({"result": "PASSED", "defects": []}), encoding="utf-8")
+        res = resume_after_disposition(self.ws, "task-adv-01")
+        self.assertEqual(res["resumed_phase"], "PHASE_3_AUDIT")
+        updated = load_active_state(self.ws)
+        self.assertEqual(updated["phase"], "PHASE_3_AUDIT")
+        self.assertNotIn("resume_reason", updated)
+        self.assertNotIn("resumed_at", updated)
+
+        # [24] Circuit breaker reset rejects ungranted/agent/empty/unconfirmed/non-TTY calls
+        trip_circuit_breaker(
+            self.ws,
+            "task-adv-01",
+            2,
+            CircuitBreakerEvaluation(tripped=True, trigger="stagnant_defects", reason="Stagnant"),
+            [],
+        )
+        for bad_id in ("agent2", "human-operator", ""):
+            with self.assertRaises(ResetAttemptsError):
+                reset_circuit_breaker(self.ws, "task-adv-01", authorized_by=bad_id)
+        with self.assertRaises(ResetAttemptsError):
+            reset_circuit_breaker(
+                self.ws,
+                "task-adv-01",
+                authorized_by="owner@stagecheck.local",
+                require_tty=True,
+                confirmed=False,
+            )
+        rc = main(["disposition", "--task", "task-adv-01", "--action", "retry", "--workspace", str(self.ws), "--yes"])
+        self.assertNotEqual(rc, 0)
+
+    def test_adversarial_batch6_merkle_chain_and_plan_start_guards(self) -> None:
+        """[23, 33, 35] Enforce Merkle seal chain, ignore unindexed plan seals, and block task restarts."""
+        from contextlib import redirect_stdout
+        import io
+        from stagecheck.checks.base import AuditContext
+        from stagecheck.checks.stage9_carry_forward import run_stage9_carry_forward
+        from stagecheck.cli.plan_cmd import run_plan
+        from stagecheck.core.sealing import SealingError, compute_attempt_merkle_seal, index_seal_in_manifest
+
+        att1 = self.ws / "evidence" / "tasks" / "task-adv-01" / "attempt_1"
+        att2 = self.ws / "evidence" / "tasks" / "task-adv-01" / "attempt_2"
+        att3 = self.ws / "evidence" / "tasks" / "task-adv-01" / "attempt_3"
+        (att1 / "Phase-1").mkdir(parents=True, exist_ok=True)
+        (att1 / "Phase-1" / "prompt.md").write_text("# A1\nOriginal prompt.\n", encoding="utf-8")
+        (att2 / "Phase-1").mkdir(parents=True, exist_ok=True)
+        (att2 / "Phase-1" / "prompt.md").write_text("# A2\nRetry prompt.\n", encoding="utf-8")
+        att3.mkdir(parents=True, exist_ok=True)
+
+        seal1_rec = compute_attempt_merkle_seal(att1, self.ws, "task-adv-01", 1, write_seal_file=True)
+        index_seal_in_manifest(self.ws, "task-adv-01", 1, seal1_rec)
+        seal2_rec = compute_attempt_merkle_seal(att2, self.ws, "task-adv-01", 2, write_seal_file=True)
+        index_seal_in_manifest(self.ws, "task-adv-01", 2, seal2_rec)
+
+        # [23a] Tampering attempt_1/seal.json fails attempt_2 seal generation
+        seal1_path = att1 / "seal.json"
+        s1_obj = json.loads(seal1_path.read_text(encoding="utf-8"))
+        s1_obj["merkle_root_sha256"] = "0" * 64
+        os.chmod(att1, 0o755)
+        os.chmod(seal1_path, 0o644)
+        seal1_path.write_text(json.dumps(s1_obj), encoding="utf-8")
+        with self.assertRaises(SealingError):
+            compute_attempt_merkle_seal(att2, self.ws, "task-adv-01", 2, write_seal_file=True)
+
+        # [23b] Stage 9 on attempt=3 catches tampered attempt_1 even when attempt_2 used Merkle seal
+        s9_res = run_stage9_carry_forward(
+            AuditContext(
+                workspace_root=self.ws,
+                task_id="task-adv-01",
+                attempt=3,
+                touched_repos=["backend"],
+                all_registered_repos=["backend", "frontend"],
+            )
+        )
+        self.assertEqual(s9_res.status, "FAIL")
+
+        # [33] plan next ignores unindexed seal.json files under evidence/tasks
+        plan_file = self.ws / "specs" / "TASK_PLAN.json"
+        plan_obj = json.loads(plan_file.read_text(encoding="utf-8"))
+        plan_obj["tasks"] = [
+            {
+                "task_id": "task-adv-01",
+                "title": "First",
+                "description": "First task in dependency chain.",
+                "priority": "HIGH",
+                "target_repositories": ["backend"],
+                "dependencies": [],
+                "status": "planned",
+            },
+            {
+                "task_id": "task-next-02",
+                "title": "Second",
+                "description": "Second task blocked on task-adv-01.",
+                "priority": "HIGH",
+                "target_repositories": ["backend"],
+                "dependencies": ["task-adv-01"],
+                "status": "planned",
+            },
+        ]
+        with controlled_write_transaction(self.ws / "specs"):
+            plan_file.write_text(json.dumps(plan_obj), encoding="utf-8")
+        forged_seal_dir = self.ws / "evidence" / "tasks" / "task-fake" / "attempt_1"
+        forged_seal_dir.mkdir(parents=True, exist_ok=True)
+        (forged_seal_dir / "seal.json").write_text(json.dumps({"task_id": "task-adv-01"}), encoding="utf-8")
+        out_buf = io.StringIO()
+        with redirect_stdout(out_buf):
+            rc_plan = run_plan("next", workspace=str(self.ws))
+        self.assertEqual(rc_plan, 0)
+        self.assertIn("task-adv-01", out_buf.getvalue())
+
+        # [35] start rejects restarting completed/attempted task, allows fresh next task
+        with controlled_write_transaction(self.ws / "controls"):
+            st = load_active_state(self.ws)
+            st["phase"] = "COMPLETED"
+            st["status"] = "SEALED_PASSED"
+            st["halt_reason"] = "old"
+            save_active_state(self.ws, st)
+        self.assertEqual(run_start(workspace=self.ws, task="task-adv-01"), 1)
+        self.assertEqual(run_start(workspace=self.ws, task="task-next-02"), 0)
+        new_st = load_active_state(self.ws)
+        self.assertEqual(new_st["task_id"], "task-next-02")
+        self.assertNotIn("halt_reason", new_st)
 
 
 if __name__ == "__main__":

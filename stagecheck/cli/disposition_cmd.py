@@ -206,13 +206,25 @@ def run_disposition(
         return run_resume(task=task, workspace=workspace)
 
     if norm_action == "retry":
+        if not str(authorized_by or "").strip():
+            print(
+                "ERROR: [disposition.missing_auth] --authorized-by is required for '--action retry'.",
+                file=sys.stderr,
+            )
+            return 1
         from stagecheck.core.circuit_breaker import (
             AttemptBudgetExhaustedError,
             CircuitBreakerError,
             reset_circuit_breaker,
         )
         try:
-            res = reset_circuit_breaker(workspace_root, task_id=task, authorized_by=authorized_by)
+            res = reset_circuit_breaker(
+                workspace_root,
+                task_id=task,
+                authorized_by=authorized_by,
+                require_tty=True,
+                confirmed=yes,
+            )
             print(f"SUCCESS: Reset attempts for task '{task}'. Next attempt index: {res['attempt_index']}.")
             return 0
         except AttemptBudgetExhaustedError as err:
