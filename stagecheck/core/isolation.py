@@ -143,12 +143,28 @@ def validate_bwrap_binary(
 
 
 def find_workspace_root_for_cwd(cwd: Path) -> Optional[Path]:
-    """Infer StageCheck workspace root from cwd by scanning ancestors for controls/."""
+    """Infer StageCheck workspace root from cwd using authoritative root markers.
+
+    Ignores nested `repos/<name>/...` directories and prefers the outermost ancestor
+    bearing an authoritative workspace marker (`controls/STAGECHECK_ROOT.json`,
+    `controls/ACTIVE_STATE.json`, `.stagecheck_root`, or `.stagecheck-init.lock`).
+    """
     resolved = cwd.resolve()
+    matched: Optional[Path] = None
     for candidate in (resolved, *resolved.parents):
-        if (candidate / "controls").is_dir():
-            return candidate
-    return None
+        if "repos" in candidate.parts and candidate.name != "repos":
+            # A repo subdirectory may not spoof the enclosing StageCheck workspace root.
+            repos_ancestors = [p for p in candidate.parents if p.name == "repos"]
+            if repos_ancestors:
+                continue
+        if (
+            (candidate / "controls" / "STAGECHECK_ROOT.json").is_file()
+            or (candidate / "controls" / "ACTIVE_STATE.json").is_file()
+            or (candidate / ".stagecheck_root").is_file()
+            or (candidate / ".stagecheck-init.lock").exists()
+        ):
+            matched = candidate
+    return matched
 
 
 def _is_relative_to(path: Path, ancestor: Path) -> bool:
@@ -172,40 +188,6 @@ def _is_governance_protected_path(path: Path, workspace_root: Optional[Path]) ->
     return False
 
 
-def _collect_argv_ephemeral_ro_binds(
-    exec_argv: Sequence[str],
-    cwd: Path,
-    workspace_root: Optional[Path],
-) -> List[Path]:
-    """Identify existing script/file inputs under /tmp or /var/tmp so bwrap can expose them read-only."""
-    mounts: List[Path] = []
-    seen: set[Path] = set()
-    tmp_roots = (Path("/tmp").resolve(), Path("/var/tmp").resolve())
-
-    for token in exec_argv[1:]:
-        if not token or token.startswith("-") or "\n" in token or "\x00" in token or len(token) > 1024:
-            continue
-        try:
-            candidate = Path(token)
-            if not candidate.is_absolute():
-                candidate = cwd / candidate
-            resolved = candidate.resolve()
-            if not resolved.exists():
-                continue
-        except Exception:
-            continue
-        if _is_relative_to(resolved, cwd):
-            continue
-        if _is_governance_protected_path(resolved, workspace_root):
-            continue
-        if any(_is_relative_to(resolved, tr) for tr in tmp_roots):
-            if resolved not in seen:
-                seen.add(resolved)
-                mounts.append(resolved)
-
-    return mounts
-
-
 def build_bwrap_argv(
     exec_argv: Sequence[str],
     policy: SandboxPolicy,
@@ -218,6 +200,11 @@ def build_bwrap_argv(
     cwd = policy.working_directory.resolve()
     ws_root = policy.workspace_root.resolve() if policy.workspace_root else find_workspace_root_for_cwd(cwd)
 
+    if ws_root is not None and (cwd == ws_root or _is_relative_to(ws_root, cwd)) and policy.allow_cwd_write:
+        raise IsolationError(
+            f"Refusing writable sandbox mount for workspace root or ancestor '{cwd}'."
+        )
+
     argv: List[str] = [
         bwrap_bin,
         "--ro-bind", "/", "/",
@@ -227,33 +214,58 @@ def build_bwrap_argv(
         "--tmpfs", "/var/tmp",
     ]
 
-    # Mask sensitive user credential directories so same-UID child cannot read SSH/cloud keys.
+    # Mask the entire user home directory when credential masking is enabled so
+    # ambient tokens (.npmrc, .netrc, .git-credentials, .pypirc, .ssh, etc.) are hidden.
     if policy.mask_home_credentials:
         home_dir = Path.home().resolve()
-        py_prefix = Path(sys.prefix).resolve()
-        for rel in SENSITIVE_HOME_RELPATHS:
-            target = (home_dir / rel).resolve()
-            if not target.exists():
-                continue
-            if _is_relative_to(cwd, target) or _is_relative_to(py_prefix, target):
-                continue
-            if target.is_dir():
-                argv.extend(["--tmpfs", str(target)])
-            elif target.is_file():
-                argv.extend(["--ro-bind", "/dev/null", str(target)])
+        if _is_relative_to(home_dir, cwd):
+            raise IsolationError(
+                f"Refusing to execute sandboxed command with working_directory equal to or ancestor of HOME ('{cwd}')."
+            )
+        if home_dir.is_dir() and home_dir != Path("/"):
+            argv.extend(["--tmpfs", str(home_dir)])
+        seen_toolchain: set[Path] = set()
+        for tc_cand in (
+            Path(sys.prefix).resolve(),
+            Path(sys.base_prefix).resolve(),
+            Path(sys.executable).resolve().parent.parent,
+        ):
+            if (
+                tc_cand.is_dir()
+                and tc_cand not in seen_toolchain
+                and _is_relative_to(tc_cand, home_dir)
+                and not _is_relative_to(tc_cand, cwd)
+            ):
+                seen_toolchain.add(tc_cand)
+                argv.extend(["--ro-bind", str(tc_cand), str(tc_cand)])
+
+        raw_exe = Path(exec_argv[0])
+        if raw_exe.is_absolute():
+            resolved_exe = raw_exe.resolve()
+            if (
+                resolved_exe.is_file()
+                and (_is_relative_to(raw_exe, home_dir) or _is_relative_to(resolved_exe, home_dir))
+                and not _is_relative_to(resolved_exe, cwd)
+                and not _is_governance_protected_path(resolved_exe, ws_root)
+            ):
+                target_mount = str(raw_exe) if _is_relative_to(raw_exe, home_dir) else str(resolved_exe)
+                argv.extend(["--ro-bind", str(resolved_exe), target_mount])
+                if target_mount != str(resolved_exe) and _is_relative_to(resolved_exe, home_dir):
+                    argv.extend(["--ro-bind", str(resolved_exe), str(resolved_exe)])
 
     # Bind the authorized execution directory (either rw within repo or strict ro).
     if cwd.is_dir():
         bind_flag = "--bind" if policy.allow_cwd_write else "--ro-bind"
         argv.extend([bind_flag, str(cwd), str(cwd)])
 
-    # Expose explicit read-only script arguments that live inside /tmp or extra_ro_binds.
+    # Expose only explicitly authorized read-only inputs via policy.extra_ro_binds
+    # (never trusting untrusted exec_argv tokens and never unmasking /tmp or /var/tmp roots).
+    tmp_roots = {Path("/tmp").resolve(), Path("/var/tmp").resolve()}
     seen_ro: set[Path] = set()
-    for ro_path in (
-        list(policy.extra_ro_binds)
-        + _collect_argv_ephemeral_ro_binds(exec_argv, cwd, ws_root)
-    ):
+    for ro_path in policy.extra_ro_binds:
         resolved_ro = ro_path.resolve()
+        if resolved_ro in tmp_roots or _is_governance_protected_path(resolved_ro, ws_root):
+            continue
         if resolved_ro.exists() and resolved_ro not in seen_ro:
             seen_ro.add(resolved_ro)
             argv.extend(["--ro-bind", str(resolved_ro), str(resolved_ro)])

@@ -433,7 +433,11 @@ def record_pre_commit_review(
         for repo_name in touched_repos:
             repo_path = resolve_governed_repo_path(root, repo_name)
             if repo_path.is_dir():
-                staged_res = scanner.scan_staged_changes(repo_dir=repo_path, repo_name=repo_name)
+                staged_res = scanner.scan_staged_changes(
+                    repo_dir=repo_path,
+                    repo_name=repo_name,
+                    workspace_root=root,
+                )
                 if not staged_res.is_clear:
                     error_msg = "; ".join(d.message for d in staged_res.defects)
                     raise ReviewGateError(

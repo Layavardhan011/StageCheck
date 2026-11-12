@@ -82,6 +82,7 @@ class TestSameUidIsolation(unittest.TestCase):
             ["python3", "-m", "unittest", "discover"],
             working_directory=self.repo_dir,
             timeout_seconds=10,
+            check_tree_integrity=False,
             require_isolation=True,
         )
         self.assertEqual(res.exit_code, 0, f"stderr={res.stderr}\nstdout={res.stdout}")
@@ -172,6 +173,7 @@ class TestSameUidIsolation(unittest.TestCase):
                 execute_secure_command(
                     ["python3", "-m", "unittest", "--help"],
                     working_directory=self.repo_dir,
+                    check_tree_integrity=False,
                     require_isolation=True,
                 )
             self.assertEqual(cmd_ctx.exception.exit_code, 126)
@@ -306,6 +308,55 @@ class TestSameUidIsolation(unittest.TestCase):
         with patch("stagecheck.core.isolation.run_bwrap_deployment_preflight", side_effect=SandboxUnavailableError("no bwrap")):
             with self.assertRaises(SandboxUnavailableError):
                 orch.run_all_stages(ctx)
+
+    def test_full_home_masking_no_tmp_argv_unmask_and_ws_root_protection(self) -> None:
+        """Verify arbitrary $HOME tokens are masked, /tmp argv tokens are not auto-mounted, and rw ws_root is rejected."""
+        from stagecheck.core.isolation import IsolationError, find_workspace_root_for_cwd
+
+        with tempfile.TemporaryDirectory() as fake_home_tmp:
+            fake_home = Path(fake_home_tmp).resolve()
+            (fake_home / ".netrc").write_text("machine example.com password supersecret\n", encoding="utf-8")
+            host_tmp_secret = Path(tempfile.gettempdir()) / f"sc_tmp_leak_{os.getpid()}.txt"
+            host_tmp_secret.write_text("host-tmp-secret-value\n", encoding="utf-8")
+            try:
+                probe_script = (
+                    "import os, pathlib\n"
+                    f"assert not pathlib.Path({str(fake_home / '.netrc')!r}).exists(), '.netrc leaked'\n"
+                    f"assert not pathlib.Path({str(host_tmp_secret)!r}).exists(), 'host /tmp arg unmasked'\n"
+                )
+                policy = SandboxPolicy(
+                    working_directory=self.repo_dir,
+                    workspace_root=self.ws,
+                    allow_cwd_write=False,
+                    mask_home_credentials=True,
+                )
+                with patch("pathlib.Path.home", return_value=fake_home):
+                    wrapped, enforced = prepare_isolated_command(
+                        [sys.executable, "-c", probe_script, str(host_tmp_secret)],
+                        policy=policy,
+                        mandatory=True,
+                    )
+                self.assertTrue(enforced)
+                proc = subprocess.run(wrapped, capture_output=True, text=True, timeout=10, check=False)
+                self.assertEqual(proc.returncode, 0, f"Isolation check failed: {proc.stderr}")
+            finally:
+                host_tmp_secret.unlink(missing_ok=True)
+
+        # Writable workspace_root cwd must be rejected
+        rw_ws_policy = SandboxPolicy(
+            working_directory=self.ws,
+            workspace_root=self.ws,
+            allow_cwd_write=True,
+        )
+        with self.assertRaises(IsolationError):
+            prepare_isolated_command([sys.executable, "-c", "print(1)"], policy=rw_ws_policy, mandatory=True)
+
+        # Spoofed repos/app/controls must be ignored when authoritative outer workspace exists
+        (self.controls_dir / "STAGECHECK_ROOT.json").write_text('{"schema_version":"2.0"}\n', encoding="utf-8")
+        spoof_ctrl = self.repo_dir / "controls"
+        spoof_ctrl.mkdir(parents=True, exist_ok=True)
+        (spoof_ctrl / "ACTIVE_STATE.json").write_text("{}\n", encoding="utf-8")
+        self.assertEqual(find_workspace_root_for_cwd(self.repo_dir), self.ws)
 
 
 if __name__ == "__main__":

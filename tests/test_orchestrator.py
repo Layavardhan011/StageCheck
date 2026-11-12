@@ -531,7 +531,7 @@ class TestNineStageVerification(unittest.TestCase):
                             "type": "command",
                             "record": "python3",
                             "argv": ["python3", "-m", "unittest", "--help"],
-                            "cwd": ".",
+                            "cwd": "repos/app",
                             "exit_status": 0,
                         }
                     ],
@@ -563,7 +563,7 @@ class TestNineStageVerification(unittest.TestCase):
                             "type": "command",
                             "record": "python3",
                             "argv": ["python3", "-m", "unittest", "nonexistent_test_module_that_fails"],
-                            "cwd": ".",
+                            "cwd": "repos/app",
                             "exit_status": 0,
                         }
                     ],

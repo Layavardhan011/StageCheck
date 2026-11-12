@@ -153,6 +153,7 @@ class SecretScanner:
         env: Optional[Dict[str, str]] = None,
         timeout: int = 30,
         cwd: Optional[Path] = None,
+        workspace_root: Optional[Path] = None,
     ) -> subprocess.CompletedProcess:
         """Execute scanner command via registered test launcher or real subprocess."""
         launcher = self.__class__._test_launcher
@@ -165,6 +166,7 @@ class SecretScanner:
 
             policy = SandboxPolicy(
                 working_directory=Path(cwd).resolve(),
+                workspace_root=Path(workspace_root).resolve() if workspace_root else None,
                 allow_cwd_write=False,
                 mask_governance_dirs=True,
             )
@@ -276,6 +278,83 @@ class SecretScanner:
                 )
             ]
 
+    def _check_forbidden_scanner_configs(
+        self,
+        repo_dir: Path,
+        repo_name: str,
+        stage: str,
+        defect_id: str,
+        check_staged: bool = False,
+        commit_range: Optional[Tuple[str, str]] = None,
+    ) -> Optional[ScanExecutionResult]:
+        """Fail closed if repository contains .gitleaks.toml or .gitleaksignore on disk, staged, or committed."""
+        forbidden = (".gitleaks.toml", ".gitleaksignore")
+        for forbidden_cfg in forbidden:
+            candidate = repo_dir / forbidden_cfg
+            if candidate.exists() or candidate.is_symlink():
+                return ScanExecutionResult(
+                    is_clear=False,
+                    defects=[
+                        Defect(
+                            defect_id=defect_id,
+                            message=f"Unauthorized Gitleaks override '{forbidden_cfg}' detected in '{repo_name}'.",
+                            stage=stage,
+                            severity="CRITICAL",
+                            blocking=True,
+                            repo=repo_name,
+                        )
+                    ],
+                    status=ScannerStatus.SCANNER_ERROR,
+                )
+
+        if (repo_dir / ".git").exists():
+            from stagecheck.core.git import GitError, run_safe_git, split_git_nul_paths
+
+            git_checks: List[List[str]] = []
+            if check_staged:
+                git_checks.append(["ls-files", "--cached", "-z", "--", *forbidden])
+            if commit_range is not None:
+                base_commit, target_commit = commit_range
+                git_checks.append(["diff", "--name-only", "-z", f"{base_commit}..{target_commit}", "--", *forbidden])
+                git_checks.append(["ls-tree", "-r", "--name-only", "-z", target_commit, "--", *forbidden])
+
+            for git_args in git_checks:
+                try:
+                    res = run_safe_git(repo_dir, git_args, check=False)
+                except GitError as err:
+                    return ScanExecutionResult(
+                        is_clear=False,
+                        defects=[
+                            Defect(
+                                defect_id=defect_id,
+                                message=f"Failed to verify scanner config hygiene in '{repo_name}': {err}",
+                                stage=stage,
+                                severity="CRITICAL",
+                                blocking=True,
+                                repo=repo_name,
+                            )
+                        ],
+                        status=ScannerStatus.SCANNER_ERROR,
+                    )
+                if res.returncode == 0:
+                    matched = [p for p in split_git_nul_paths(res.stdout) if p in forbidden]
+                    if matched:
+                        return ScanExecutionResult(
+                            is_clear=False,
+                            defects=[
+                                Defect(
+                                    defect_id=defect_id,
+                                    message=f"Unauthorized Gitleaks override '{matched[0]}' detected in '{repo_name}'.",
+                                    stage=stage,
+                                    severity="CRITICAL",
+                                    blocking=True,
+                                    repo=repo_name,
+                                )
+                            ],
+                            status=ScannerStatus.SCANNER_ERROR,
+                        )
+        return None
+
     def scan_commit_range(
         self,
         repo_dir: Path,
@@ -284,8 +363,19 @@ class SecretScanner:
         repo_name: str,
         stage: str = "secrets",
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
+        workspace_root: Optional[Path] = None,
     ) -> ScanExecutionResult:
         """Scan commits between base_commit and target_commit for secrets."""
+        forbidden_res = self._check_forbidden_scanner_configs(
+            repo_dir=repo_dir,
+            repo_name=repo_name,
+            stage=stage,
+            defect_id="secrets.unauthorized_scanner_config",
+            commit_range=(base_commit, target_commit),
+        )
+        if forbidden_res is not None:
+            return forbidden_res
+
         # 1. Preflight binary check
         is_valid, binary_defects = self.verify_scanner_binary(stage=stage)
         if not is_valid:
@@ -335,6 +425,7 @@ class SecretScanner:
             f"--source={repo_dir}",
             f"--log-opts={base_commit}..{target_commit}",
             *config_flags,
+            "--ignore-gitleaks-allow",
             "--verbose",
             "--no-banner",
         ]
@@ -348,6 +439,7 @@ class SecretScanner:
                 env=env,
                 timeout=timeout,
                 cwd=repo_dir,
+                workspace_root=workspace_root,
             )
 
             # Condition 7: Secret detected (exit code 1)
@@ -451,8 +543,19 @@ class SecretScanner:
         repo_dir: Path,
         repo_name: str,
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
+        workspace_root: Optional[Path] = None,
     ) -> ScanExecutionResult:
         """Scan staged changes before commit authorization (Spec 14 / SEC-M1)."""
+        forbidden_res = self._check_forbidden_scanner_configs(
+            repo_dir=repo_dir,
+            repo_name=repo_name,
+            stage="pre_commit",
+            defect_id="pre_commit.unauthorized_scanner_config",
+            check_staged=True,
+        )
+        if forbidden_res is not None:
+            return forbidden_res
+
         is_valid, binary_defects = self.verify_scanner_binary(stage="pre_commit")
         if not is_valid:
             status = ScannerStatus.SCANNER_UNAVAILABLE
@@ -501,6 +604,7 @@ class SecretScanner:
             "--staged",
             f"--source={repo_dir}",
             *config_flags,
+            "--ignore-gitleaks-allow",
             "--verbose",
             "--no-banner",
         ]
@@ -512,6 +616,7 @@ class SecretScanner:
                 env=env,
                 timeout=timeout,
                 cwd=repo_dir,
+                workspace_root=workspace_root,
             )
             if res.returncode == 1:
                 return ScanExecutionResult(

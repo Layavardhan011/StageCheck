@@ -250,6 +250,51 @@ class TestSecretScannerIntegration(unittest.TestCase):
             run_stage6_secrets(ctx)
             self.assertTrue(mock_scan.called, "SecretScanner.scan_commit_range was not called in Stage 6!")
 
+    def test_gitleaks_allow_comment_and_gitleaksignore_blocked(self):
+        """7. Prove '# gitleaks:allow' inline comments and .gitleaksignore cannot bypass SecretScanner."""
+        scanner = SecretScanner()
+
+        # 7a. Inline '# gitleaks:allow' must still be caught in staged scan AND commit-range scan
+        (self.repo_dir / "leak_allow.py").write_text(
+            'AWS_KEY = "AKIA1234567890ABCDEF"  # gitleaks:allow\n', encoding="utf-8"
+        )
+        subprocess.run(["git", "-C", str(self.repo_dir), "add", "leak_allow.py"], check=True)
+        staged_res = scanner.scan_staged_changes(
+            repo_dir=self.repo_dir,
+            repo_name="service",
+            workspace_root=self.workspace_root,
+        )
+        self.assertFalse(staged_res.is_clear, "Staged scan must ignore '# gitleaks:allow'")
+
+        subprocess.run(["git", "-C", str(self.repo_dir), "commit", "-m", "leak with allow"], check=True)
+        base_sha = subprocess.run(
+            ["git", "-C", str(self.repo_dir), "rev-parse", "HEAD~1"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        target_sha = subprocess.run(
+            ["git", "-C", str(self.repo_dir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        commit_res = scanner.scan_commit_range(
+            repo_dir=self.repo_dir,
+            base_commit=base_sha,
+            target_commit=target_sha,
+            repo_name="service",
+            workspace_root=self.workspace_root,
+        )
+        self.assertFalse(commit_res.is_clear, "Commit-range scan must ignore '# gitleaks:allow'")
+
+        # 7b. .gitleaksignore must be rejected by SecretScanner in staged scan too
+        (self.repo_dir / ".gitleaksignore").write_text("dummy:fingerprint\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo_dir), "add", ".gitleaksignore"], check=True)
+        ignore_res = scanner.scan_staged_changes(
+            repo_dir=self.repo_dir,
+            repo_name="service",
+            workspace_root=self.workspace_root,
+        )
+        self.assertFalse(ignore_res.is_clear)
+        self.assertTrue(any("unauthorized_scanner_config" in d.defect_id for d in ignore_res.defects))
+
 
 if __name__ == "__main__":
     unittest.main()

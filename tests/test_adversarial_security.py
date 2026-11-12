@@ -129,6 +129,7 @@ class TestAdversarialSecurity(unittest.TestCase):
                 working_directory=self.ws,
                 timeout_seconds=10,
                 check_tree_integrity=False,
+                allow_cwd_write=False,
             )
             self.assertEqual(rec.exit_code, 0)
             self.assertNotIn("GITHUB_TOKEN", rec.stdout)

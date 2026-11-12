@@ -62,6 +62,7 @@ def _test_at_base_commit(
                 working_directory=wt.worktree_path,
                 timeout_seconds=120,
                 check_tree_integrity=False,
+                workspace_root=ctx.workspace_root,
             )
             return rec.exit_code
     except Exception:
@@ -91,12 +92,13 @@ def run_stage8_rerun(ctx: AuditContext) -> StageResult:
             continue
 
         work_dir = (ctx.workspace_root / rel_cwd).resolve()
-        # Security: verify work_dir is within workspace_root
-        if not work_dir.is_relative_to(ctx.workspace_root.resolve()):
+        # Security: verify work_dir resides strictly inside a repository under repos/
+        repos_root = (ctx.workspace_root / "repos").resolve()
+        if not work_dir.is_relative_to(repos_root) or work_dir == repos_root:
             defects.append(
                 Defect(
                     defect_id="rerun.working_directory_escaped",
-                    message=f"Cited command working directory '{rel_cwd}' escapes workspace root",
+                    message=f"Cited command working directory '{rel_cwd}' must reside inside a repository under repos/",
                     stage=stage_id,
                     severity="CRITICAL",
                     blocking=True,
@@ -111,6 +113,7 @@ def run_stage8_rerun(ctx: AuditContext) -> StageResult:
                 working_directory=work_dir,
                 timeout_seconds=300,
                 check_tree_integrity=True,
+                workspace_root=ctx.workspace_root,
             )
         except Exception as err:
             defects.append(

@@ -118,8 +118,9 @@ def build_sanitized_environment(
             if not any(sub in var.upper() for sub in SENSITIVE_ENV_SUBSTRINGS):
                 clean[var] = val
 
-    # Enforce bytecode suppression
+    # Enforce bytecode suppression and ephemeral sandbox HOME
     clean["PYTHONDONTWRITEBYTECODE"] = "1"
+    clean["HOME"] = "/tmp"
 
     if extra_env:
         for k, v in extra_env.items():
@@ -563,11 +564,11 @@ def validate_command_security(argv: List[str], cwd: Optional[Path] = None) -> No
 
 
 def capture_git_status_porcelain(repo_path: Union[str, Path]) -> str:
-    """Capture clean git status including untracked files."""
+    """Capture clean git status including untracked and ignored files."""
     try:
         res = run_safe_git(
             Path(repo_path),
-            ["status", "--porcelain=v1", "--untracked-files=all"],
+            ["status", "--porcelain=v1", "--untracked-files=all", "--ignored"],
             check=True,
         )
         return res.stdout.strip()
@@ -656,6 +657,11 @@ def execute_secure_command(
             )
 
     in_git_repo = (cwd / ".git").exists() or any((p / ".git").exists() for p in cwd.parents)
+    if check_tree_integrity and not in_git_repo:
+        raise CommandSecurityError(
+            f"Tree integrity verification requires a Git repository working directory (got '{cwd}').",
+            exit_code=126,
+        )
     before_status = ""
     if check_tree_integrity and in_git_repo:
         before_status = capture_git_status_porcelain(cwd)

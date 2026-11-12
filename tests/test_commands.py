@@ -107,9 +107,9 @@ class TestSecureCommandRunner(unittest.TestCase):
 
     def test_command_execution_timeout_raises_124(self) -> None:
         """Verify command execution timing out raises CommandTimeoutError with code 124."""
-        timeout_script = self.workspace / "hang.py"
+        timeout_script = self.repo_dir / "hang.py"
         timeout_script.write_text("import time; time.sleep(5)\n", encoding="utf-8")
-        cmd = ["python3", str(timeout_script)]
+        cmd = ["python3", "hang.py"]
         with self.assertRaises(CommandTimeoutError) as ctx:
             execute_secure_command(
                 argv=cmd,
@@ -147,13 +147,13 @@ class TestSecureCommandRunner(unittest.TestCase):
         """Verify test execution mutating working tree triggers TreeMutationError."""
         # Run a script that creates an untracked file inside repo_dir
         # We write a helper script to avoid forbidden flags
-        helper_script = self.workspace / "mutate.py"
+        helper_script = self.repo_dir / "mutate.py"
         helper_script.write_text(
-            f"with open('{self.repo_dir}/leak.txt', 'w') as f: f.write('dirty')\n",
+            "with open('leak.txt', 'w') as f: f.write('dirty')\n",
             encoding="utf-8",
         )
 
-        cmd = ["python3", str(helper_script)]
+        cmd = ["python3", "mutate.py"]
         with self.assertRaises(TreeMutationError):
             execute_secure_command(
                 argv=cmd,
@@ -161,6 +161,18 @@ class TestSecureCommandRunner(unittest.TestCase):
                 timeout_seconds=10,
                 check_tree_integrity=True,
             )
+
+    def test_tree_integrity_requires_git_repo(self) -> None:
+        """Verify check_tree_integrity=True fails closed on non-git working directory."""
+        non_git = self.workspace / "plain_dir"
+        non_git.mkdir(parents=True, exist_ok=True)
+        with self.assertRaises(CommandSecurityError) as ctx:
+            execute_secure_command(
+                argv=["python3", "-m", "unittest", "--help"],
+                working_directory=non_git,
+                check_tree_integrity=True,
+            )
+        self.assertEqual(ctx.exception.exit_code, 126)
 
     def test_npm_package_and_flag_security(self) -> None:
         """Verify NPM execution policy, hook suppression, script allowlist, and package.json validation (DEC-014 / SR-01)."""
