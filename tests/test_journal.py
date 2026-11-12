@@ -387,6 +387,65 @@ class TestWriteAheadJournal(unittest.TestCase):
         self.assertFalse(is_valid)
         self.assertTrue(any("Merkle root mismatch" in v or "Leaf hash mismatch" in v for v in violations))
 
+    def test_malformed_pre_image_dict_entries_quarantined_and_controls_restored_ro(self) -> None:
+        """Malformed pre_images/pre_modes/pre_encodings entries are quarantined as CORRUPTED and controls/ is restored 0o555."""
+        import json
+        import stat
+
+        journal_dir = self.ws / ".stagecheck_journal"
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        controls_dir = self.ws / "controls"
+        controls_dir.mkdir(parents=True, exist_ok=True)
+        controls_dir.chmod(0o755)
+
+        malformed_cases = [
+            (
+                "txn_bad_mode.active.json",
+                {
+                    "txn_id": "txn_bad_mode",
+                    "operation": "TEST_BAD_MODE",
+                    "pre_images": {"controls/ACTIVE_STATE.json": "{}"},
+                    "pre_modes": {"controls/ACTIVE_STATE.json": True},
+                    "pre_encodings": {"controls/ACTIVE_STATE.json": "utf-8"},
+                },
+            ),
+            (
+                "txn_bad_encoding.active.json",
+                {
+                    "txn_id": "txn_bad_encoding",
+                    "operation": "TEST_BAD_ENC",
+                    "pre_images": {"controls/ACTIVE_STATE.json": "{}"},
+                    "pre_modes": {"controls/ACTIVE_STATE.json": 0o444},
+                    "pre_encodings": {"controls/ACTIVE_STATE.json": "latin-1"},
+                },
+            ),
+            (
+                "txn_bad_image.active.json",
+                {
+                    "txn_id": "txn_bad_image",
+                    "operation": "TEST_BAD_IMG",
+                    "pre_images": {"controls/ACTIVE_STATE.json": 12345},
+                    "pre_modes": {},
+                    "pre_encodings": {},
+                },
+            ),
+        ]
+
+        written_files = []
+        for fname, payload in malformed_cases:
+            p = journal_dir / fname
+            p.write_text(json.dumps(payload), encoding="utf-8")
+            written_files.append(p)
+
+        records = recover_interrupted_transactions(self.ws, verbose=False)
+        self.assertEqual(len(records), len(malformed_cases))
+        self.assertTrue(all(r.status == "CORRUPTED" for r in records))
+        for p in written_files:
+            self.assertFalse(p.exists())
+
+        mode = stat.S_IMODE(controls_dir.stat().st_mode)
+        self.assertEqual(mode, 0o555)
+
 
 if __name__ == "__main__":
     unittest.main()

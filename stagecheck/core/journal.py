@@ -435,11 +435,15 @@ def recover_interrupted_transactions(
                 pre_images = data.get("pre_images", {})
                 pre_modes = data.get("pre_modes", {})
                 pre_encodings = data.get("pre_encodings", {})
-                if (
-                    not isinstance(pre_images, dict)
-                    or not isinstance(pre_modes, dict)
-                    or not isinstance(pre_encodings, dict)
-                ):
+                valid_entries = (
+                    isinstance(pre_images, dict)
+                    and isinstance(pre_modes, dict)
+                    and isinstance(pre_encodings, dict)
+                    and all(isinstance(k, str) and (v is None or isinstance(v, str)) for k, v in pre_images.items())
+                    and all(isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool) for k, v in pre_modes.items())
+                    and all(isinstance(k, str) and v in ("utf-8", "base64") for k, v in pre_encodings.items())
+                )
+                if not valid_entries:
                     records.append(RecoveryRecord(
                         txn_id=str(txn_id),
                         operation=str(operation),
@@ -449,9 +453,24 @@ def recover_interrupted_transactions(
                         message=f"Malformed pre-image metadata in active journal record '{item.name}' quarantined.",
                     ))
                     item.unlink(missing_ok=True)
+                    processed_any = True
                     continue
 
-                restored, removed = _restore_pre_images(ws, pre_images, pre_modes, pre_encodings)
+                try:
+                    restored, removed = _restore_pre_images(ws, pre_images, pre_modes, pre_encodings)
+                except Exception as err:
+                    records.append(RecoveryRecord(
+                        txn_id=str(txn_id),
+                        operation=str(operation),
+                        files_restored=[],
+                        files_removed=[],
+                        status="CORRUPTED",
+                        message=f"Failed restoring journal record '{item.name}': {err}; quarantined.",
+                    ))
+                    item.unlink(missing_ok=True)
+                    processed_any = True
+                    continue
+
                 processed_any = True
 
                 item.unlink(missing_ok=True)
