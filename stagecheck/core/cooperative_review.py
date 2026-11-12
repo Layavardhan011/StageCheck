@@ -191,7 +191,22 @@ def verify_precommit_scope(
     violations: List[str] = []
 
     if not touched_repos:
-        return ["Missing touched_repositories: at least one repository must be evaluated in pre-commit review."]
+        # Read-only / evidence-only task: verify all registered repositories are clean
+        prod_repos_file = root / "controls" / "PRODUCT_REPOSITORIES.json"
+        if prod_repos_file.is_file():
+            try:
+                prod_data = load_json_file(prod_repos_file)
+                for reg_name in (prod_data.get("repositories") or {}):
+                    reg_path = resolve_governed_repo_path(root, reg_name)
+                    if (reg_path / ".git").exists():
+                        st = run_safe_git(reg_path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+                        if st.returncode == 0 and st.stdout.strip():
+                            violations.append(
+                                f"Repository '{reg_name}' has uncommitted modifications while touched_repositories is empty."
+                            )
+            except Exception as err:
+                violations.append(f"Failed to verify clean repositories for read-only task: {err}")
+        return violations
 
     for repo_name in touched_repos:
         try:
@@ -425,25 +440,24 @@ def record_pre_commit_review(
 
     touched_repos = list(base_commits.keys())
     if status == "APPROVED":
-        if not touched_repos:
-            raise ReviewGateError("Review cannot be APPROVED with empty base_commits.")
-        # 1. Enforce staged secret scanning gate before commit authorization (Spec 08, Spec 14, SEC-M1)
-        from stagecheck.core.scanner import SecretScanner
-        scanner = SecretScanner()
-        for repo_name in touched_repos:
-            repo_path = resolve_governed_repo_path(root, repo_name)
-            if repo_path.is_dir():
-                staged_res = scanner.scan_staged_changes(
-                    repo_dir=repo_path,
-                    repo_name=repo_name,
-                    workspace_root=root,
-                )
-                if not staged_res.is_clear:
-                    error_msg = "; ".join(d.message for d in staged_res.defects)
-                    raise ReviewGateError(
-                        f"Pre-commit staged secret scan failed for repo '{repo_name}': {error_msg}. "
-                        "Commits cannot be authorized when secret scanning fails or leaks are detected."
+        if touched_repos:
+            # 1. Enforce staged secret scanning gate before commit authorization (Spec 08, Spec 14, SEC-M1)
+            from stagecheck.core.scanner import SecretScanner
+            scanner = SecretScanner()
+            for repo_name in touched_repos:
+                repo_path = resolve_governed_repo_path(root, repo_name)
+                if repo_path.is_dir():
+                    staged_res = scanner.scan_staged_changes(
+                        repo_dir=repo_path,
+                        repo_name=repo_name,
+                        workspace_root=root,
                     )
+                    if not staged_res.is_clear:
+                        error_msg = "; ".join(d.message for d in staged_res.defects)
+                        raise ReviewGateError(
+                            f"Pre-commit staged secret scan failed for repo '{repo_name}': {error_msg}. "
+                            "Commits cannot be authorized when secret scanning fails or leaks are detected."
+                        )
 
         # 2. Compute approved diff hashes
         approved_diff_hashes, approved_snapshot_sha256 = compute_uncommitted_diff_hashes(

@@ -2773,7 +2773,8 @@ def _evaluate_evidence_rule(rule: RubricRule, workspace_root: Path, ctx: Dict[st
         if rid == "ORCHESTRATOR-003":
             if not p2a_stat:
                 return _ev_fail(rule, "Phase-2A/pre_commit_status.json", ctx.get("pre_commit_status_err") or "Missing Phase-2A/pre_commit_status.json.")
-            if not p2a_stat.get("base_commits"):
+            is_readonly = p2a_stat.get("touched_repositories") == [] and isinstance(p2a_stat.get("base_commits"), dict)
+            if not p2a_stat.get("base_commits") and not is_readonly:
                 return _ev_fail(rule, "Phase-2A/pre_commit_status.json", "pre_commit_status.json missing retained base_commits.")
             return _ev_pass(rule, "Phase-2A/pre_commit_status.json", "Baseline HEAD and base_commits identities retained.")
         if rid == "ORCHESTRATOR-004":

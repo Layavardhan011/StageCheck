@@ -172,7 +172,7 @@ def run_review_precommit(
     print(f"Task ID:       {task}")
     print(f"Attempt:       {attempt}")
     print(f"Review Cycle:  {cycle}")
-    print(f"Repositories:  {', '.join(touched_repos)}")
+    print(f"Repositories:  {', '.join(touched_repos) if touched_repos else '(none - read-only/evidence-only)'}")
     print(f"Summary:       {data.get('summary', 'No summary provided')}")
     print(f"----------------------------------------------------------------")
 

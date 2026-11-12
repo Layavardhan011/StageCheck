@@ -512,6 +512,54 @@ class TestCooperativeReview(unittest.TestCase):
             final_state = load_active_state(self.workspace)
             self.assertEqual(final_state.get("attempt_index", 1), initial_attempt)
 
+    def test_readonly_empty_touched_repositories_supported(self) -> None:
+        """Verify read-only/evidence-only tasks with touched_repositories=[] validate and fail if dirty."""
+        from stagecheck.core.agents import resolve_task_attempt_dir
+        from stagecheck.core.cooperative_review import verify_precommit_scope
+        from stagecheck.core.utils import validate_schema
+        from stagecheck.schemas import get_schema_path
+
+        p1_dir = resolve_task_attempt_dir(self.workspace, self.task_id, self.attempt) / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "declared_scope.json").write_text(
+            json.dumps({"task_id": self.task_id, "allowed_paths": ["evidence/**"]}),
+            encoding="utf-8",
+        )
+        (self.workspace / "controls").mkdir(parents=True, exist_ok=True)
+        (self.workspace / "controls" / "PRODUCT_REPOSITORIES.json").write_text(
+            json.dumps({"repositories": {"backend": {"baseline_head": self.base_commit}}}),
+            encoding="utf-8",
+        )
+
+        schema = json.loads(get_schema_path("pre_commit_status.schema.json").read_text(encoding="utf-8"))
+        status_doc = {
+            "schema_version": "2.0",
+            "task_id": self.task_id,
+            "attempt": self.attempt,
+            "cycle": 1,
+            "status": "AWAITING_REVIEW",
+            "touched_repositories": [],
+            "base_commits": {},
+            "summary": "Read-only evidence task",
+        }
+        validate_schema(status_doc, schema)
+        self.assertEqual(verify_precommit_scope(self.workspace, self.task_id, self.attempt, [], {}), [])
+
+        review_file = record_pre_commit_review(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            cycle=1,
+            status="APPROVED",
+            summary="Approved read-only task",
+            base_commits={},
+        )
+        self.assertEqual(json.loads(review_file.read_text(encoding="utf-8"))["status"], "APPROVED")
+
+        # Dirty repo with touched_repositories=[] must be rejected by verify_precommit_scope
+        (self.backend_dir / "sneaky.py").write_text("x = 1\n", encoding="utf-8")
+        violations = verify_precommit_scope(self.workspace, self.task_id, self.attempt, [], {})
+        self.assertTrue(any("uncommitted modifications" in v for v in violations))
 
 
 if __name__ == "__main__":

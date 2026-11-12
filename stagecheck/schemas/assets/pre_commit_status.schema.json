@@ -35,7 +35,6 @@
     },
     "touched_repositories": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "type": "string",
         "pattern": "^(?!(?:\\.|\\.\\.)$)[a-zA-Z0-9._-]+$"
@@ -43,7 +42,6 @@
     },
     "base_commits": {
       "type": "object",
-      "minProperties": 1,
       "additionalProperties": {
         "type": "string",
         "pattern": "^[0-9a-fA-F]{40,64}$"
