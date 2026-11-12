@@ -202,7 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_super.add_argument("--file", dest="file_path", help="Target file for stability check.")
     p_super.add_argument("--seconds", type=float, default=30.0, help="Quiet seconds for stability check.")
     p_super.add_argument("--ceiling", type=float, default=300.0, help="Hard ceiling seconds for stability check.")
-    p_super.add_argument("--timeout", type=float, default=600.0, help="Watchdog timeout seconds.")
+    p_super.add_argument("--timeout", type=float, default=1800.0, help="Watchdog timeout seconds.")
     p_super.add_argument("--json", action="store_true", dest="json_output", help="Emit JSON output.")
     p_super.add_argument("--workspace", help="Explicit workspace root path.")
 
@@ -477,7 +477,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             file_path=getattr(args, "file_path", None),
             seconds=getattr(args, "seconds", 30.0),
             ceiling=getattr(args, "ceiling", 300.0),
-            timeout=getattr(args, "timeout", 600.0),
+            timeout=getattr(args, "timeout", 1800.0),
             output_json=getattr(args, "json_output", False),
         )
 

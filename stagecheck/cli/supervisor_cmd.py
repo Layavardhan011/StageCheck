@@ -34,7 +34,7 @@ def run_supervisor_cmd(
     file_path: Optional[str] = None,
     seconds: float = 30.0,
     ceiling: float = 300.0,
-    timeout: float = 600.0,
+    timeout: float = 1800.0,
     output_json: bool = False,
 ) -> int:
     """Execute supervisor commands and workflows."""

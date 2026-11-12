@@ -829,7 +829,7 @@ class SentinelDaemon:
                 # Check watchdog periodically for active agent phases
                 try:
                     from stagecheck.core.supervisor import evaluate_watchdog
-                    evaluate_watchdog(self.root, timeout_seconds=600.0)
+                    evaluate_watchdog(self.root, timeout_seconds=1800.0)
                 except Exception:
                     pass
         finally:

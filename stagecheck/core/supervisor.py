@@ -214,7 +214,7 @@ def _notify_watchdog_timeout(phase: str) -> None:
 def _evaluate_watchdog_locked(
     root: Path,
     state: Dict[str, Any],
-    timeout_seconds: float = 600.0,
+    timeout_seconds: float = 1800.0,
     now_utc: Optional[datetime.datetime] = None,
 ) -> Tuple[bool, str, Dict[str, Any]]:
     """Evaluate watchdog assuming caller holds acquire_runtime_lock(root)."""
@@ -240,7 +240,7 @@ def _evaluate_watchdog_locked(
 
 def evaluate_watchdog(
     workspace_root: Path,
-    timeout_seconds: float = 600.0,
+    timeout_seconds: float = 1800.0,
     now_utc: Optional[datetime.datetime] = None,
 ) -> Tuple[bool, str, Dict[str, Any]]:
     """Evaluate dual-condition watchdog inactivity (FR-05).
@@ -393,7 +393,7 @@ class SupervisorEngine:
         workspace_root: Union[str, Path],
         quiet_seconds: float = 30.0,
         max_ceiling_seconds: float = 300.0,
-        watchdog_timeout_seconds: float = 600.0,
+        watchdog_timeout_seconds: float = 1800.0,
     ):
         self.root = Path(workspace_root).resolve()
         self.debouncer = PromptDebouncer(
