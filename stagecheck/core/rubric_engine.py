@@ -1749,6 +1749,7 @@ def _analyze_non_python_repo_file(
     fname: str,
     src: str,
     metrics: Dict[str, Any],
+    record_defects: bool = True,
 ) -> bool:
     """Extract test adequacy metrics for non-Python repositories (Go, JS/TS, Rust)."""
     low_src = src.lower()
@@ -1758,10 +1759,11 @@ def _analyze_non_python_repo_file(
         metrics["test_files"].append(rel_label)
         fn_matches = re.findall(r"^\s*func\s+(Test\w+|Benchmark\w+|Fuzz\w+|Example\w+)\s*\(", src, re.MULTILINE)
         metrics["test_count"] += len(fn_matches) if fn_matches else 1
-        if re.search(r"\bt\.Skip(?:f|Now)?\s*\(", src):
-            metrics["skipped_tests_in_code"].append(rel_label)
-        if re.search(r"\btime\.Sleep\s*\(", src):
-            metrics["flaky_sleep_detected"].append(rel_label)
+        if record_defects:
+            if re.search(r"\bt\.Skip(?:f|Now)?\s*\(", src):
+                metrics["skipped_tests_in_code"].append(rel_label)
+            if re.search(r"\btime\.Sleep\s*\(", src):
+                metrics["flaky_sleep_detected"].append(rel_label)
         if any(tok in src for tok in ("t.Error", "t.Fatal", "t.Fail", "assert.", "require.", "reflect.DeepEqual", "cmp.Diff", "!= ", "== ")):
             metrics["has_positive_tests"] = True
         if any(tok in src for tok in ("err != nil", "t.Error", "t.Fatal", "assert.Error", "require.Error", "!= ", "recover()")):
@@ -1773,7 +1775,7 @@ def _analyze_non_python_repo_file(
         metrics["test_files"].append(rel_label)
         tc_matches = re.findall(r"\b(?:it|test)\s*\(", src)
         metrics["test_count"] += len(tc_matches) if tc_matches else 1
-        if re.search(r"\b(?:it|test|describe)\.skip\s*\(|\bx(?:it|test|describe)\s*\(", src):
+        if record_defects and re.search(r"\b(?:it|test|describe)\.skip\s*\(|\bx(?:it|test|describe)\s*\(", src):
             metrics["skipped_tests_in_code"].append(rel_label)
         if any(tok in src for tok in ("expect(", "assert.", "assert(")):
             metrics["has_positive_tests"] = True
@@ -1789,7 +1791,7 @@ def _analyze_non_python_repo_file(
         if rs_matches or "tests" in rel.parts or fname.endswith("_test.rs"):
             metrics["test_files"].append(rel_label)
             metrics["test_count"] += len(rs_matches) if rs_matches else 1
-            if "#[ignore" in src:
+            if record_defects and "#[ignore" in src:
                 metrics["skipped_tests_in_code"].append(rel_label)
             if any(tok in src for tok in ("assert!", "assert_eq!", "assert_ne!")):
                 metrics["has_positive_tests"] = True
@@ -1801,7 +1803,11 @@ def _analyze_non_python_repo_file(
     return False
 
 
-def _analyze_python_repo_files(repo_dir: Path, max_files: int = 120) -> Dict[str, Any]:
+def _analyze_python_repo_files(
+    repo_dir: Path,
+    max_files: int = 120,
+    changed_files: Optional[Set[str]] = None,
+) -> Dict[str, Any]:
     """Fast single-pass AST/source analysis for repository source & test adequacy signals."""
     metrics: Dict[str, Any] = {
         "syntax_errors": [],
@@ -1841,6 +1847,12 @@ def _analyze_python_repo_files(repo_dir: Path, max_files: int = 120) -> Dict[str
             fpath = root_p / fname
             if fpath.is_symlink() or not fpath.is_file():
                 continue
+            rel_path = fpath.relative_to(repo_dir)
+            rel_posix = rel_path.as_posix()
+            in_changed = changed_files is not None and rel_posix in changed_files
+            record_defects = changed_files is None or in_changed
+            if scanned > max_files and not in_changed:
+                continue
             try:
                 if fpath.stat().st_size > 512 * 1024:
                     continue
@@ -1849,34 +1861,29 @@ def _analyze_python_repo_files(repo_dir: Path, max_files: int = 120) -> Dict[str
                 continue
 
             if not is_py:
-                rel = fpath.relative_to(repo_dir)
-                if _analyze_non_python_repo_file(repo_dir, rel, fname, src, metrics):
+                if _analyze_non_python_repo_file(repo_dir, rel_path, fname, src, metrics, record_defects=record_defects):
                     scanned += 1
-                    if scanned > max_files:
-                        break
                 continue
 
             scanned += 1
-            if scanned > max_files:
-                break
-
-            rel = str(fpath.relative_to(repo_dir))
+            rel = rel_posix
             is_test = (
                 fname.startswith("test_")
                 or fname.endswith("_test.py")
-                or "tests" in fpath.relative_to(repo_dir).parts
+                or "tests" in rel_path.parts
             )
 
             try:
                 tree = ast.parse(src, filename=rel)
             except SyntaxError as err:
-                metrics["syntax_errors"].append(f"{repo_dir.name}/{rel}:{err.lineno}: {err.msg}")
+                if record_defects:
+                    metrics["syntax_errors"].append(f"{repo_dir.name}/{rel}:{err.lineno}: {err.msg}")
                 continue
 
-            if not is_test and (fname.startswith("qual_") or "TestQual" in src):
+            if record_defects and not is_test and (fname.startswith("qual_") or "TestQual" in src):
                 metrics["qual_in_prod"].append(f"{repo_dir.name}/{rel}")
 
-            if not is_test and ("from evals" in src or "import evals" in src):
+            if record_defects and not is_test and ("from evals" in src or "import evals" in src):
                 metrics["eval_imports_in_repo"].append(f"{repo_dir.name}/{rel}")
 
             with_open_lines: Set[int] = set()
@@ -1894,10 +1901,11 @@ def _analyze_python_repo_files(repo_dir: Path, max_files: int = 120) -> Dict[str
                 if isinstance(node, ast.Call):
                     fn = node.func
                     if isinstance(fn, ast.Name) and fn.id == "open" and node.lineno not in with_open_lines:
-                        if not is_test:
+                        if record_defects and not is_test:
                             metrics["resource_leak_files"].append(f"{repo_dir.name}/{rel}:{node.lineno}")
                     elif isinstance(fn, ast.Name) and fn.id in ("eval", "exec") and not is_test:
-                        metrics["unsafe_patterns"].append(f"{repo_dir.name}/{rel}:{node.lineno}:{fn.id}()")
+                        if record_defects:
+                            metrics["unsafe_patterns"].append(f"{repo_dir.name}/{rel}:{node.lineno}:{fn.id}()")
                     elif (
                         isinstance(fn, ast.Attribute)
                         and fn.attr == "sleep"
@@ -1905,10 +1913,11 @@ def _analyze_python_repo_files(repo_dir: Path, max_files: int = 120) -> Dict[str
                         and fn.value.id == "time"
                         and is_test
                     ):
-                        metrics["flaky_sleep_detected"].append(f"{repo_dir.name}/{rel}:{node.lineno}")
+                        if record_defects:
+                            metrics["flaky_sleep_detected"].append(f"{repo_dir.name}/{rel}:{node.lineno}")
 
                 if isinstance(node, ast.ExceptHandler) and not is_test:
-                    if len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
+                    if record_defects and len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
                         metrics["swallowed_exceptions"].append(f"{repo_dir.name}/{rel}:{node.lineno}")
 
             if is_test:
@@ -1925,7 +1934,7 @@ def _analyze_python_repo_files(repo_dir: Path, max_files: int = 120) -> Dict[str
                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
                         metrics["test_count"] += 1
                         dec_names = " ".join(ast.unparse(d) for d in node.decorator_list) if node.decorator_list else ""
-                        if "skip" in dec_names.lower():
+                        if record_defects and "skip" in dec_names.lower():
                             metrics["skipped_tests_in_code"].append(f"{repo_dir.name}/{rel}:{node.name}")
 
                         has_assertion = False
@@ -1935,11 +1944,12 @@ def _analyze_python_repo_files(repo_dir: Path, max_files: int = 120) -> Dict[str
                                 has_assertion = True
                                 test_expr = sub.test
                                 if isinstance(test_expr, ast.Constant) and test_expr.value is True:
-                                    metrics["weak_assertions"].append(f"{repo_dir.name}/{rel}:{sub.lineno}: assert True")
+                                    if record_defects:
+                                        metrics["weak_assertions"].append(f"{repo_dir.name}/{rel}:{sub.lineno}: assert True")
                                 elif isinstance(test_expr, ast.Compare) and len(test_expr.ops) == 1 and isinstance(test_expr.ops[0], ast.Eq):
                                     left_s = ast.unparse(test_expr.left)
                                     right_s = ast.unparse(test_expr.comparators[0])
-                                    if left_s == right_s:
+                                    if record_defects and left_s == right_s:
                                         metrics["self_comparison_tautologies"].append(
                                             f"{repo_dir.name}/{rel}:{sub.lineno}: {left_s} == {right_s}"
                                         )
@@ -1952,9 +1962,9 @@ def _analyze_python_repo_files(repo_dir: Path, max_files: int = 120) -> Dict[str
                                     has_assertion = True
                                     only_trivial = False
                                     metrics["has_positive_tests"] = True
-                                if "skip" in callee.lower() and ("pytest.skip" in callee or "skipTest" in callee):
+                                if record_defects and "skip" in callee.lower() and ("pytest.skip" in callee or "skipTest" in callee):
                                     metrics["skipped_tests_in_code"].append(f"{repo_dir.name}/{rel}:{sub.lineno}")
-                        if not has_assertion and not dec_names:
+                        if record_defects and not has_assertion and not dec_names:
                             metrics["weak_assertions"].append(f"{repo_dir.name}/{rel}:{node.lineno}: {node.name} has zero assertions")
                         elif has_assertion and only_trivial and f"{repo_dir.name}/{rel}" not in [w.split(":")[0] for w in metrics["weak_assertions"]]:
                             pass
@@ -2186,17 +2196,7 @@ def _collect_rubric_context(
         if (r_dir / ".gitleaks.toml").exists():
             rogue_scanner_configs.append(f"repos/{r_dir.name}/.gitleaks.toml")
 
-        repo_ast = _analyze_python_repo_files(r_dir)
-        for k in (
-            "syntax_errors", "resource_leak_files", "swallowed_exceptions", "unsafe_patterns",
-            "eval_imports_in_repo", "qual_in_prod", "test_files", "weak_assertions",
-            "skipped_tests_in_code", "flaky_sleep_detected", "self_comparison_tautologies",
-        ):
-            agg_ast[k].extend(repo_ast[k])
-        agg_ast["test_count"] += repo_ast["test_count"]
-        for flag in ("has_positive_tests", "has_negative_tests", "has_malformed_tests", "has_duplicate_tests"):
-            agg_ast[flag] = agg_ast[flag] or repo_ast[flag]
-
+        changed_rel_files: Set[str] = set()
         if (r_dir / ".git").exists():
             try:
                 head_res = run_safe_git(r_dir, ["rev-parse", "HEAD"])
@@ -2209,6 +2209,7 @@ def _collect_rubric_context(
                     if touched_repo_names is not None and r_dir.name not in touched_repo_names:
                         untouched_dirty.append(r_dir.name)
                     for rel_p in parse_git_porcelain_z(res.stdout, include_rename_sources=True):
+                        changed_rel_files.add(Path(rel_p).as_posix())
                         ws_rel = f"repos/{r_dir.name}/{rel_p}"
                         if declared_scope and not is_path_in_scope(ws_rel, declared_scope):
                             out_of_scope_files.append(ws_rel)
@@ -2228,6 +2229,7 @@ def _collect_rubric_context(
                     d_names = run_safe_git(r_dir, ["diff", "--name-only", "-z", "--end-of-options", f"{base_sha}..{cur_sha}", "--"])
                     if d_names.returncode == 0:
                         for changed_rel in split_git_nul_paths(d_names.stdout):
+                            changed_rel_files.add(Path(changed_rel).as_posix())
                             ws_rel = f"repos/{r_dir.name}/{changed_rel}"
                             if declared_scope and not is_path_in_scope(ws_rel, declared_scope):
                                 if ws_rel not in out_of_scope_files:
@@ -2239,6 +2241,20 @@ def _collect_rubric_context(
                                 removed_assertions.append(f"{r_dir.name}: {dline[1:].strip()[:80]}")
             except Exception:
                 pass
+
+        repo_ast = _analyze_python_repo_files(
+            r_dir,
+            changed_files=(changed_rel_files if changed_rel_files else None),
+        )
+        for k in (
+            "syntax_errors", "resource_leak_files", "swallowed_exceptions", "unsafe_patterns",
+            "eval_imports_in_repo", "qual_in_prod", "test_files", "weak_assertions",
+            "skipped_tests_in_code", "flaky_sleep_detected", "self_comparison_tautologies",
+        ):
+            agg_ast[k].extend(repo_ast[k])
+        agg_ast["test_count"] += repo_ast["test_count"]
+        for flag in ("has_positive_tests", "has_negative_tests", "has_malformed_tests", "has_duplicate_tests"):
+            agg_ast[flag] = agg_ast[flag] or repo_ast[flag]
 
     if isinstance(scanner_report_doc, dict):
         for d in scanner_report_doc.get("defects", []):

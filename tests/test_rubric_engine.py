@@ -1219,6 +1219,49 @@ class TestRubricEngine(unittest.TestCase):
         )
         self.assertTrue(any(e["status"] == "PASS" for e in ta_evals))
 
+    def test_untouched_preexisting_go_sleep_does_not_fail_docs_task(self) -> None:
+        """Verify untouched pre-existing *_test.go time.Sleep() does not fail TEST_ADEQUACY on a README task."""
+        self._seed_full_compliant_workspace()
+        for py_file in self.repo_dir.glob("*.py"):
+            py_file.unlink()
+        (self.repo_dir / "go.mod").write_text("module example.com/zkready\n\ngo 1.26.0\n", encoding="utf-8")
+        (self.repo_dir / "main.go").write_text("package main\n\nfunc Add(a, b int) int { return a + b }\n", encoding="utf-8")
+        (self.repo_dir / "common_test.go").write_text(
+            "package main\n\nimport (\n    \"testing\"\n    \"time\"\n)\n\n"
+            "func TestPreExistingSleep(t *testing.T) {\n"
+            "    time.Sleep(5 * time.Millisecond)\n"
+            "    // malformed invalid duplicate replay\n"
+            "    var err error\n"
+            "    if err != nil { t.Error(err) }\n"
+            "    if got := Add(1, 2); got != 3 { t.Fatalf(\"%d\", got) }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (self.repo_dir / "README.md").write_text("# ZK Ready\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(self.repo_dir), check=True)
+        subprocess.run(["git", "commit", "-m", "baseline go repo"], cwd=str(self.repo_dir), check=True, capture_output=True)
+
+        # Update PRODUCT_REPOSITORIES.json baseline_head to this baseline commit
+        new_base = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(self.repo_dir), check=True, capture_output=True, text=True
+        ).stdout.strip()
+        from stagecheck.core.permissions import controlled_write_transaction
+        prod_path = self.workspace / "controls" / "PRODUCT_REPOSITORIES.json"
+        prod_data = json.loads(prod_path.read_text(encoding="utf-8"))
+        prod_data["repositories"]["backend"]["baseline_head"] = new_base
+        with controlled_write_transaction(self.workspace / "controls"):
+            prod_path.write_text(json.dumps(prod_data, indent=2), encoding="utf-8")
+
+        # Task only modifies README.md (does NOT touch common_test.go)
+        (self.repo_dir / "README.md").write_text("# ZK Ready\n\nUpdated docs.\n", encoding="utf-8")
+
+        payload, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
+        ta_evals = [e for e in payload["evaluations"] if e["domain"] == "TEST_ADEQUACY"]
+        self.assertTrue(
+            all(e["status"] in ("PASS", "NOT_APPLICABLE") for e in ta_evals),
+            f"Unexpected TEST_ADEQUACY failure from untouched common_test.go: {[e for e in ta_evals if e['status'] not in ('PASS', 'NOT_APPLICABLE')]}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

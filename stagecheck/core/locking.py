@@ -131,9 +131,18 @@ def acquire_runtime_lock(target_dir: Path) -> Generator[int, None, None]:
                 "Workspace runtime is locked by an active StageCheck operation (.stagecheck.lock held)."
             ) from err
 
+        try:
+            os.utime(fd, None)
+        except OSError:
+            pass
+
         yield fd
 
     finally:
+        try:
+            os.utime(fd, None)
+        except OSError:
+            pass
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)
         except OSError:

@@ -500,6 +500,33 @@ class TestSentinel(unittest.TestCase):
         self.assertIn("\\u2028", sanitized)
         self.assertIn("\\u2029", sanitized)
 
+    def test_authorized_runtime_lock_classified_as_authorized_transaction(self) -> None:
+        """Verify SentinelDaemon detects active/recent runtime lock transactions and avoids false GOVERNANCE_BREACH."""
+        from stagecheck.core.locking import acquire_runtime_lock
+        from stagecheck.core.permissions import MODE_DIR_RO, MODE_DIR_RW
+
+        controls_dir = self.workspace / "controls"
+        daemon = SentinelDaemon(self.workspace)
+
+        # Without lock or recent transaction -> False -> GOVERNANCE_BREACH
+        self.assertFalse(daemon._is_active_transaction())
+        tier, label = classify_event_path(self.workspace, "controls/ACTIVE_STATE.json", active_transaction=daemon._is_active_transaction())
+        self.assertEqual((tier, label), (1, "GOVERNANCE_BREACH"))
+
+        # During/immediately after acquire_runtime_lock with at-rest 0555 controls/ -> AUTHORIZED_TRANSACTION
+        os.chmod(controls_dir, MODE_DIR_RO)
+        try:
+            with acquire_runtime_lock(self.workspace):
+                self.assertTrue(daemon._is_active_transaction())
+                tier_tx, label_tx = classify_event_path(
+                    self.workspace, "controls/ACTIVE_STATE.json", active_transaction=daemon._is_active_transaction()
+                )
+                self.assertEqual((tier_tx, label_tx), (1, "AUTHORIZED_TRANSACTION"))
+            # Right after release (within 1.0s epoll delivery window) with 0555 controls/ -> still True
+            self.assertTrue(daemon._is_active_transaction())
+        finally:
+            os.chmod(controls_dir, MODE_DIR_RW)
+
 
 if __name__ == "__main__":
     unittest.main()

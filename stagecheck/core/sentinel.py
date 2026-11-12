@@ -253,6 +253,23 @@ def is_process_alive(pid: int) -> bool:
     return True
 
 
+def _normalize_rel_event_path(rel_path: str) -> str:
+    norm = rel_path.strip().replace("\\", "/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    return norm.lstrip("/")
+
+
+def _is_tier1_rel_path(norm: str) -> bool:
+    for pref in TIER_1_PREFIXES:
+        if norm == pref.rstrip("/") or norm.startswith(pref):
+            return True
+    for git_suff in TIER_1_GIT_SUFFIXES:
+        if git_suff in norm or norm.endswith(git_suff):
+            return True
+    return False
+
+
 def classify_event_path(
     workspace_root: Union[str, Path],
     rel_path: str,
@@ -264,27 +281,12 @@ def classify_event_path(
     Returns:
         Tuple of (tier_number, classification_label).
     """
-    norm = rel_path.strip().replace("\\", "/")
-    while norm.startswith("./"):
-        norm = norm[2:]
-    norm = norm.lstrip("/")
+    norm = _normalize_rel_event_path(rel_path)
 
     # ----------------------------------------------------
     # Tier 1: Governance Guard & Critical Git Controls
     # ----------------------------------------------------
-    is_tier_1 = False
-    for pref in TIER_1_PREFIXES:
-        if norm == pref.rstrip("/") or norm.startswith(pref):
-            is_tier_1 = True
-            break
-
-    if not is_tier_1:
-        for git_suff in TIER_1_GIT_SUFFIXES:
-            if git_suff in norm or norm.endswith(git_suff):
-                is_tier_1 = True
-                break
-
-    if is_tier_1:
+    if _is_tier1_rel_path(norm):
         if active_transaction:
             return 1, "AUTHORIZED_TRANSACTION"
         return 1, "GOVERNANCE_BREACH"
@@ -334,6 +336,7 @@ class SentinelDaemon:
         self._inotify_fd: Optional[int] = None
         self._watch_descriptors: Dict[int, str] = {}
         self.last_activity_monotonic: float = time.monotonic()
+        self._in_process_transaction: bool = False
 
         # Restore monotonic tracking from ACTIVE_STATE.json if present (DEC-027)
         state_file = self.root / "controls" / "ACTIVE_STATE.json"
@@ -829,14 +832,56 @@ class SentinelDaemon:
                 # Check watchdog periodically for active agent phases
                 try:
                     from stagecheck.core.supervisor import evaluate_watchdog
+                    self._in_process_transaction = True
                     evaluate_watchdog(self.root, timeout_seconds=1800.0)
                 except Exception:
                     pass
+                finally:
+                    self._in_process_transaction = False
         finally:
             try:
                 epoll.unregister(self._inotify_fd)
                 epoll.close()
                 os.close(self._inotify_fd)
+            except OSError:
+                pass
+
+    def _is_active_transaction(self) -> bool:
+        """Return True if an authorized StageCheck runtime lock transaction is active or just completed."""
+        if self._in_process_transaction:
+            return True
+        lock_file = self.root / ".stagecheck.lock"
+        if lock_file.is_symlink() or not lock_file.is_file():
+            return False
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(str(lock_file), flags)
+        except OSError:
+            return False
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return False
+            try:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except (BlockingIOError, OSError):
+                return True
+            if (time.time() - st.st_mtime) <= 1.0:
+                controls_dir = self.root / "controls"
+                if controls_dir.is_dir() and not controls_dir.is_symlink():
+                    try:
+                        if (controls_dir.stat().st_mode & 0o222) == 0:
+                            return True
+                    except OSError:
+                        pass
+            return False
+        except OSError:
+            return False
+        finally:
+            try:
+                os.close(fd)
             except OSError:
                 pass
 
@@ -856,7 +901,9 @@ class SentinelDaemon:
             if parent_dir and name:
                 full_path = Path(parent_dir) / name
                 rel_path = str(full_path.relative_to(self.root))
-                tier, label = classify_event_path(self.root, rel_path)
+                norm = _normalize_rel_event_path(rel_path)
+                active_tx = self._is_active_transaction() if _is_tier1_rel_path(norm) else False
+                tier, label = classify_event_path(self.root, rel_path, active_transaction=active_tx)
                 self._log_event(rel_path, tier, label)
 
     _MAX_LOG_BYTES = 512 * 1024
