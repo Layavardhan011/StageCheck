@@ -905,6 +905,36 @@ def resume_after_disposition(
             if state.get("circuit_breaker_tripped"):
                 target_phase = "CIRCUIT_BREAKER_TRIPPED"
                 reason = "Circuit breaker remains tripped; requires explicit stagecheck reset-attempts."
+            elif str(state.get("halt_reason") or "").startswith("WATCHDOG_INACTIVITY_TIMEOUT"):
+                import re as _re
+                import time as _time
+
+                resumable_phases = {
+                    "PHASE_1_PLANNING",
+                    "PHASE_1_REPAIR",
+                    "PHASE_2A_CODING",
+                    "PHASE_2A_IMPLEMENTATION",
+                    "PHASE_2B_COMMITTING",
+                    "PHASE_2B_DELIVERY",
+                    "PHASE_3_AUDIT",
+                    "PHASE_3_AUDITING",
+                    "GATE_4_SEALING",
+                }
+                wd_obj = state.setdefault("watchdog", {})
+                candidate = wd_obj.get("interrupted_phase") if isinstance(wd_obj, dict) else None
+                if not candidate:
+                    m_phase = _re.search(r"\bin phase ([A-Z0-9_]+)\b", str(state.get("halt_reason") or ""))
+                    if m_phase:
+                        candidate = m_phase.group(1)
+                target_phase = candidate if candidate in resumable_phases else "PHASE_2A_CODING"
+                now_dt = datetime.datetime.now(datetime.timezone.utc)
+                if isinstance(wd_obj, dict):
+                    wd_obj["last_active_timestamp"] = now_dt.isoformat()
+                    wd_obj["last_active_monotonic"] = _time.monotonic()
+                    wd_obj.pop("tripped_at", None)
+                    wd_obj.pop("interrupted_phase", None)
+                state["halt_reason"] = None
+                reason = f"Resumed from watchdog inactivity timeout into '{target_phase}'."
             else:
                 # Load latest verdict to evaluate remaining defects (fail closed if missing/invalid)
                 attempt = state.get("attempt_index", 1)

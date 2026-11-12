@@ -254,6 +254,7 @@ def run_init(
                 workspace_root=workspace_root,
                 agent1_name=resolved_a1,
                 agent2_name=resolved_a2,
+                refresh=is_reconcile or force,
             )
 
             # Step 4c: Scaffold specs/ and reconcile specification files (Spec 05 / FR-08)

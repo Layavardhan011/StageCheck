@@ -402,6 +402,98 @@ class TestSupervisorCLI(unittest.TestCase):
         self.assertEqual(res.status, "WAITING")
         self.assertEqual(res.action_taken, "LOCK_CONTENDED")
 
+    def test_supervisor_returns_halted_on_halted_phases_and_watchdog_resumes(self) -> None:
+        """Halted phases return HALTED; watchdog timeout resumes to interrupted phase with refreshed watchdog."""
+        from stagecheck.cli.start_cmd import run_start
+        from stagecheck.core.dispositions import resume_after_disposition
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.scaffold import scaffold_agent_instructions
+
+        self.assertEqual(run_start(workspace=self.ws, task="task-halt-resume"), 0)
+        with controlled_write_transaction(self.ws / "controls"):
+            st = load_active_state(self.ws)
+            st["phase"] = "PHASE_2A_CODING"
+            st["watchdog"] = {
+                "last_active_timestamp": "2020-01-01T00:00:00+00:00",
+                "last_active_monotonic": 1.0,
+            }
+            save_active_state(self.ws, st)
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        tripped, halt_msg, _ = evaluate_watchdog(self.ws, timeout_seconds=1800.0, now_utc=now_utc)
+        self.assertTrue(tripped)
+        self.assertIn("30 minutes", halt_msg)
+
+        st_tripped = load_active_state(self.ws)
+        self.assertEqual(st_tripped["phase"], "AWAITING_HUMAN_DISPOSITION")
+        self.assertEqual(st_tripped["watchdog"]["interrupted_phase"], "PHASE_2A_CODING")
+
+        engine = SupervisorEngine(self.ws)
+        for halted_phase in ("AWAITING_HUMAN_DISPOSITION", "CIRCUIT_BREAKER_TRIPPED", "ABORTED"):
+            with controlled_write_transaction(self.ws / "controls"):
+                s = load_active_state(self.ws)
+                s["phase"] = halted_phase
+                save_active_state(self.ws, s)
+            step_res = engine.step(task_id="task-halt-resume", attempt=1)
+            self.assertEqual(step_res.status, "HALTED")
+            self.assertEqual(step_res.current_phase, halted_phase)
+
+        with controlled_write_transaction(self.ws / "controls"):
+            s = load_active_state(self.ws)
+            s["phase"] = "AWAITING_HUMAN_DISPOSITION"
+            save_active_state(self.ws, s)
+
+        resumed = resume_after_disposition(self.ws, "task-halt-resume")
+        self.assertEqual(resumed["resumed_phase"], "PHASE_2A_CODING")
+        st_after = load_active_state(self.ws)
+        self.assertEqual(st_after["phase"], "PHASE_2A_CODING")
+        self.assertIsNone(st_after.get("halt_reason"))
+        self.assertNotIn("tripped_at", st_after.get("watchdog", {}))
+        self.assertNotIn("interrupted_phase", st_after.get("watchdog", {}))
+
+        # Refresh existing instruction files
+        a1_file = self.ws / "instructions" / "agent1_prompt_and_audit.md"
+        a1_file.write_text("# Old\n", encoding="utf-8")
+        scaffold_agent_instructions(self.ws, "agent1", "agent2", refresh=True)
+        self.assertIn("Do not stop", a1_file.read_text(encoding="utf-8"))
+
+    def test_reset_circuit_breaker_refreshes_watchdog_turn_and_cleared_gates(self) -> None:
+        """reset_circuit_breaker refreshes watchdog timestamps and resets turn and cleared_gates."""
+        from stagecheck.core.circuit_breaker import (
+            CircuitBreakerEvaluation,
+            reset_circuit_breaker,
+            trip_circuit_breaker,
+        )
+        from stagecheck.core.permissions import controlled_write_transaction
+
+        with controlled_write_transaction(self.ws / "controls"):
+            st = load_active_state(self.ws)
+            st["cleared_gates"] = {"GATE_1": "a" * 64}
+            st["turn"] = "AGENT2_CODING"
+            st["watchdog"] = {
+                "last_active_timestamp": "2020-01-01T00:00:00+00:00",
+                "last_active_monotonic": 1.0,
+                "tripped_at": "2020-01-01T00:30:00+00:00",
+                "interrupted_phase": "PHASE_2A_CODING",
+            }
+            save_active_state(self.ws, st)
+
+        trip_circuit_breaker(
+            self.ws,
+            load_active_state(self.ws)["task_id"],
+            1,
+            CircuitBreakerEvaluation(tripped=True, trigger="stagnant_defects", reason="Stagnant"),
+            [],
+        )
+        task_id = load_active_state(self.ws)["task_id"]
+        updated = reset_circuit_breaker(self.ws, task_id, authorized_by="owner@stagecheck.local")
+        self.assertEqual(updated["phase"], "PHASE_1_PLANNING")
+        self.assertEqual(updated["turn"], "AGENT1_PROMPTING")
+        self.assertEqual(updated["cleared_gates"], {})
+        self.assertNotIn("tripped_at", updated["watchdog"])
+        self.assertNotIn("interrupted_phase", updated["watchdog"])
+        self.assertNotEqual(updated["watchdog"]["last_active_timestamp"], "2020-01-01T00:00:00+00:00")
+
 
 if __name__ == "__main__":
     unittest.main()

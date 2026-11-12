@@ -15,6 +15,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -394,6 +395,7 @@ def reset_circuit_breaker(
                 )
 
             # 4. Unlatch breaker state with monotonic attempt budgeting and schema-compliant audit entry
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
             next_attempt = current_attempt + 1
             active_state["circuit_breaker_tripped"] = False
             active_state["halt_reason"] = None
@@ -401,8 +403,16 @@ def reset_circuit_breaker(
             active_state.pop("last_reset", None)
             active_state["attempt_index"] = next_attempt
             active_state["phase"] = "PHASE_1_PLANNING"
+            active_state["turn"] = "AGENT1_PROMPTING"
+            active_state["cleared_gates"] = {}
+            wd = active_state.setdefault("watchdog", {})
+            if isinstance(wd, dict):
+                wd["last_active_timestamp"] = now_dt.isoformat()
+                wd["last_active_monotonic"] = time.monotonic()
+                wd.pop("tripped_at", None)
+                wd.pop("interrupted_phase", None)
             active_state.setdefault("resets_authorized", []).append({
-                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "timestamp": now_dt.isoformat(),
                 "authorized_by": authorized_by,
                 "from_attempt": current_attempt,
                 "to_attempt": next_attempt,

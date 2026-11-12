@@ -81,14 +81,15 @@ Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define d
 - Record defect history in `TASK_<ID>_ISSUE_HISTORY.md`.
 
 ## Phase-2 Cooperative Review Protocol (JSON Status Loop)
-- During `PHASE_2A_CODING`, StageCheck does not interfere while Agent 1 and Agent 2 iterate; coordinate via `stagecheck turn --task <task_id> --json` (max 3 calls per 5s window) and Phase-2A JSON artifacts.
-- Wait until `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` has `"status": "AWAITING_REVIEW"` (or `active_turn == "AGENT_1"`).
+- **Do not stop** after authoring `Phase-1/prompt.md` and `Phase-1/declared_scope.json` — continuously poll `stagecheck turn --task <task_id> --json` (e.g., `sleep 5`, respecting max 3 calls per 5s window) until `Phase-2A` / `Phase-3` / task completion.
+- During `PHASE_2A_CODING`, StageCheck does not interfere while Agent 1 and Agent 2 iterate via Phase-2A JSON status files.
+- Poll until `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` has `"status": "AWAITING_REVIEW"` (or `active_turn == "AGENT_1"`).
 - Review the uncommitted diff (`git status`, `git diff`), tests, and scope compliance, then record `Phase-2A/agent_reviews.json` and run `stagecheck review-precommit --task <task_id> --attempt <N>`:
-  - If defects remain, write `"status": "REVISION_REQUIRED"` in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json` so `active_turn` returns to `AGENT_2`.
+  - If defects remain, write `"status": "REVISION_REQUIRED"` in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json` so `active_turn` returns to `AGENT_2`, and continue polling until Agent 2 resubmits.
   - Once all defects are resolved, approve via `stagecheck approve-review` (`"status": "APPROVED"`) so StageCheck can commit and advance Gate-2A / Gate-2B.
 
 ## Attempt & Overall Task Monitoring
-- Monitor `controls/ACTIVE_STATE.json` (`phase`, `status`, `attempt_index`, `circuit_breaker_tripped`, `completed_tasks`) and `evidence/tasks/<task_id>/attempt_<N>/Phase-3/verdict.json` (`result`: `PASSED` vs `BLOCKED`).
+- Continuously monitor `controls/ACTIVE_STATE.json` (`phase`, `status`, `attempt_index`, `circuit_breaker_tripped`, `completed_tasks`) and `evidence/tasks/<task_id>/attempt_<N>/Phase-3/verdict.json` (`result`: `PASSED` vs `BLOCKED`).
 - If an attempt fails Phase-3 audit, track remaining attempt budget (`attempt_index <= 3`); if `phase == "AWAITING_HUMAN_DISPOSITION"` or `circuit_breaker_tripped == true`, pause for human disposition/reset.
 - Once the current task reaches `SEALED_PASSED` / `COMPLETED`, run `stagecheck plan next` (against `specs/TASK_PLAN.json`) to proceed to the next eligible task (`stagecheck start --task <next_task_id>`).
 
@@ -117,12 +118,13 @@ Implement source code, unit tests, and regression coverage for approved tasks on
 - Run local Gitleaks secret check (`gitleaks protect --staged`) prior to commit.
 
 ## Phase-2 Implementation & Cooperative Repair Loop (JSON Status)
-- Wait for Gate-1 to advance (`controls/ACTIVE_STATE.json` `phase == "PHASE_2A_CODING"` or `stagecheck turn --task <task_id> --json` reporting `active_turn == "AGENT_2"`).
+- **Do not stop** until the local commit and `Phase-2B/report.md` are complete.
+- Continuously poll `stagecheck turn --task <task_id> --json` (e.g., `sleep 5`, max 3 calls per 5s window) and `controls/ACTIVE_STATE.json` until `phase == "PHASE_2A_CODING"` and `active_turn == "AGENT_2"`.
 - Implement changes strictly within `Phase-1/declared_scope.json`, run local tests and `gitleaks protect --staged`, and write `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` with `"status": "AWAITING_REVIEW"`, `cycle`, `touched_repositories`, and `base_commits`.
-- Wait for Agent 1's review in `Phase-2A/pre_commit_review.json` (or poll `stagecheck turn --task <task_id> --json`, max 3 calls per 5s window):
+- Continuously poll `Phase-2A/pre_commit_review.json` (and `stagecheck turn --task <task_id> --json`, max 3 calls per 5s window):
   - If `"status": "REVISION_REQUIRED"`, inspect the defects in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json`, fix the code/tests, increment `cycle`, and resubmit `Phase-2A/pre_commit_status.json`.
   - Repeat until `Phase-2A/pre_commit_review.json` reports `"status": "APPROVED"`.
-- Once `phase == "PHASE_2B_COMMITTING"`, write `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/report.md` so StageCheck can advance Gate-2B to Phase 3.
+- Once `phase == "PHASE_2B_COMMITTING"`, commit locally on the task branch and write `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/report.md` so StageCheck can advance Gate-2B to Phase 3.
 
 ## Must Not
 - MUST NOT execute remote push operations (`git push` is strictly forbidden).
@@ -136,6 +138,7 @@ def scaffold_agent_instructions(
     workspace_root: Path,
     agent1_name: str = "agent1",
     agent2_name: str = "agent2",
+    refresh: bool = False,
 ) -> Dict[str, Path]:
     """Scaffold instructions/ directory and role instruction markdown files (Specs 03, 08)."""
     root = Path(workspace_root).resolve()
@@ -149,7 +152,7 @@ def scaffold_agent_instructions(
     if norm_a1 == norm_a2:
         # Single-agent unified dual role
         single_path = instructions_dir / f"{norm_a1}_dual_role.md"
-        if not single_path.exists():
+        if refresh or not single_path.exists():
             single_content = (
                 f"# {agent1_name.strip()} Unified Instructions: Dual-Role Operating Protocol\n\n"
                 f"Role: `dual_role`.\n\n"
@@ -176,9 +179,10 @@ def scaffold_agent_instructions(
                 f"- NEVER execute remote push commands (`git push`).\n"
                 f"- Permitted Git commands during review are read-only: `git status`, `git log`, `git diff`, `git show`, `git blame`, `git branch`.\n\n"
                 f"### Phase-2 Review & Attempt/Task Monitoring\n"
-                f"- During `PHASE_2A_CODING`, coordinate via `stagecheck turn --task <task_id> --json` (max 3 calls per 5s window) and Phase-2A JSON status files without StageCheck interference.\n"
+                f"- **Do not stop** after authoring `Phase-1/prompt.md` and `declared_scope.json`; continuously poll `stagecheck turn --task <task_id> --json` (e.g., `sleep 5`, max 3 calls per 5s window) until task completion.\n"
+                f"- During `PHASE_2A_CODING`, coordinate via Phase-2A JSON status files without StageCheck interference.\n"
                 f"- After submitting `Phase-2A/pre_commit_status.json` (`\"status\": \"AWAITING_REVIEW\"`), switch to auditor role, author `Phase-2A/agent_reviews.json`, and run `stagecheck review-precommit`; iterate via `REVISION_REQUIRED` until `APPROVED`.\n"
-                f"- Monitor `controls/ACTIVE_STATE.json` (`phase`, `status`, `attempt_index`, `circuit_breaker_tripped`) and `Phase-3/verdict.json`; once `SEALED_PASSED` / `COMPLETED`, run `stagecheck plan next` to proceed to the next eligible task.\n\n"
+                f"- Continuously monitor `controls/ACTIVE_STATE.json` (`phase`, `status`, `attempt_index`, `circuit_breaker_tripped`) and `Phase-3/verdict.json`; once `SEALED_PASSED` / `COMPLETED`, run `stagecheck plan next` to proceed to the next eligible task.\n\n"
                 f"---\n\n"
                 f"## Part 2: Code Implementation Responsibilities (Phase 2A Implementation & Delivery)\n\n"
                 f"### Purpose\n"
@@ -203,7 +207,7 @@ def scaffold_agent_instructions(
     else:
         # Dual-agent separate instructions
         a1_path = instructions_dir / f"{norm_a1}_prompt_and_audit.md"
-        if not a1_path.exists():
+        if refresh or not a1_path.exists():
             a1_content = (
                 f"# {agent1_name.strip()} Instructions: Prompt Architecture & Governance Auditor\n\n"
                 f"Role: `prompt_and_audit`.\n\n"
@@ -213,7 +217,7 @@ def scaffold_agent_instructions(
         paths[a1_path.name] = a1_path
 
         a2_path = instructions_dir / f"{norm_a2}_code_implementation.md"
-        if not a2_path.exists():
+        if refresh or not a2_path.exists():
             a2_content = (
                 f"# {agent2_name.strip()} Instructions: Code Implementation & Test Authoring\n\n"
                 f"Role: `code_implementation`.\n\n"

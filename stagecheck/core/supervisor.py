@@ -231,7 +231,9 @@ def _evaluate_watchdog_locked(
         )
         state["phase"] = "AWAITING_HUMAN_DISPOSITION"
         state["halt_reason"] = halt_msg
-        state.setdefault("watchdog", {})["tripped_at"] = now.isoformat()
+        wd_state = state.setdefault("watchdog", {})
+        wd_state["tripped_at"] = now.isoformat()
+        wd_state["interrupted_phase"] = phase
         save_active_state(root, state)
         return True, halt_msg, meta
 
@@ -647,6 +649,17 @@ class SupervisorEngine:
                             action_taken="NONE",
                             status="COMPLETED",
                             message="Task completed and sealed.",
+                        )
+
+                    elif phase in ("AWAITING_HUMAN_DISPOSITION", "CIRCUIT_BREAKER_TRIPPED", "ABORTED"):
+                        halt_detail = state.get("halt_reason") or "requires human disposition or reset"
+                        return SupervisorStepResult(
+                            task_id=task,
+                            attempt=att,
+                            current_phase=phase,
+                            action_taken=phase,
+                            status="HALTED",
+                            message=f"Execution halted in phase '{phase}': {halt_detail}",
                         )
 
                     return SupervisorStepResult(
