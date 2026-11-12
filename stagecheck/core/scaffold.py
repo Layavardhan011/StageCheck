@@ -570,3 +570,66 @@ def scaffold_controls_atomic(
         if staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
 
+
+def scaffold_remotes_config(
+    workspace_root: Union[str, Path],
+    approve_remotes: Optional[List[str]] = None,
+) -> Path:
+    """Scaffold or reconcile controls/remotes.json and optionally approve push URLs."""
+    from stagecheck.core.paths import safe_resolve
+    from stagecheck.core.utils import pretty_json_dumps, strict_json_loads
+
+    root = Path(workspace_root).resolve()
+    controls_dir = root / "controls"
+    controls_dir.mkdir(parents=True, exist_ok=True)
+    remotes_path = safe_resolve("controls/remotes.json", root, allow_symlinks=False)
+
+    data: Dict[str, Any] = {"approved_push_urls": []}
+    if remotes_path.exists():
+        if remotes_path.is_symlink() or not remotes_path.is_file():
+            raise ScaffoldingError(f"Unsafe controls/remotes.json path: '{remotes_path}'")
+        parsed = strict_json_loads(remotes_path.read_text(encoding="utf-8"), source=str(remotes_path))
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("approved_push_urls", []), list):
+            raise ScaffoldingError("controls/remotes.json must be a JSON object with 'approved_push_urls' list.")
+        data = dict(parsed)
+        data.setdefault("approved_push_urls", [])
+
+    urls = [str(u) for u in data.get("approved_push_urls", [])]
+    changed = not remotes_path.exists()
+    for raw_url in approve_remotes or []:
+        if not isinstance(raw_url, str):
+            raise ScaffoldingError("Approved remote URL must be a string.")
+        clean_url = raw_url.strip()
+        if not clean_url or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in clean_url):
+            raise ScaffoldingError(f"Invalid remote push URL: {raw_url!r}")
+        if clean_url not in urls:
+            urls.append(clean_url)
+            changed = True
+
+    if changed:
+        data["approved_push_urls"] = urls
+        tmp_path = controls_dir / ".remotes.json.tmp"
+        tmp_path.write_text(pretty_json_dumps(data), encoding="utf-8")
+        os.replace(str(tmp_path), str(remotes_path))
+
+    return remotes_path
+
+
+def approve_remote_url(
+    workspace_root: Union[str, Path],
+    remote_url: str,
+) -> Path:
+    """Safely add an approved push URL to controls/remotes.json under runtime lock and write transaction."""
+    from stagecheck.core.locking import acquire_runtime_lock
+    from stagecheck.core.permissions import controlled_write_transaction
+
+    root = Path(workspace_root).resolve()
+    controls_dir = root / "controls"
+    if not controls_dir.is_dir():
+        raise ScaffoldingError(f"Workspace controls directory not found at '{controls_dir}'. Run 'stagecheck init' first.")
+
+    with acquire_runtime_lock(controls_dir):
+        with controlled_write_transaction(controls_dir):
+            return scaffold_remotes_config(root, approve_remotes=[remote_url])
+
+

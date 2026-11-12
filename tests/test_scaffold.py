@@ -186,6 +186,47 @@ class TestAtomicScaffolding(unittest.TestCase):
         # Other unmodified controls remain untouched
         self.assertEqual(sha256_file(controls_dir / "ACTIVE_STATE.json"), hashes_first["ACTIVE_STATE.json"])
 
+    def test_init_scaffolds_remotes_json_and_approve_remote_cli(self) -> None:
+        """init scaffolds controls/remotes.json and --approve-remote / approve_remote_url register URLs under 0555/0444."""
+        import stat
+        import subprocess
+        from stagecheck.cli.main import main
+        from stagecheck.core.git import get_approved_remote_urls
+        from stagecheck.core.scaffold import approve_remote_url
+
+        ws = self.workspace / "remotes_ws"
+        repo = ws / "repos" / "app"
+        repo.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Tester"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "tester@example.com"], check=True, capture_output=True)
+        (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "app.py"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-m", "init"], check=True, capture_output=True)
+
+        url1 = "https://github.com/org/repo-one.git"
+        url2 = "git@github.com:org/repo-two.git"
+
+        rc_init = main(["init", "--workspace", str(ws), "--agent1", "agent1", "--agent2", "agent2", "--approve-remote", url1])
+        self.assertEqual(rc_init, 0)
+
+        remotes_file = ws / "controls" / "remotes.json"
+        self.assertTrue(remotes_file.is_file())
+        self.assertEqual(stat.S_IMODE(remotes_file.stat().st_mode), 0o444)
+        self.assertEqual(stat.S_IMODE((ws / "controls").stat().st_mode), 0o555)
+        self.assertEqual(get_approved_remote_urls(ws), {url1})
+
+        # Approve a second remote on a locked workspace via helper & init reconcile
+        approve_remote_url(ws, url2)
+        self.assertEqual(stat.S_IMODE(remotes_file.stat().st_mode), 0o444)
+        self.assertEqual(stat.S_IMODE((ws / "controls").stat().st_mode), 0o555)
+        self.assertEqual(get_approved_remote_urls(ws), {url1, url2})
+
+        # Reconcile preserves existing approved_push_urls
+        rc_rec = main(["init", "--workspace", str(ws), "--agent1", "agent1", "--agent2", "agent2"])
+        self.assertEqual(rc_rec, 0)
+        self.assertEqual(get_approved_remote_urls(ws), {url1, url2})
+
 
 if __name__ == "__main__":
     unittest.main()

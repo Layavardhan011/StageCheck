@@ -31,6 +31,7 @@ from stagecheck.core.scaffold import (
     reconcile_specs_directory,
     scaffold_agent_instructions,
     scaffold_controls_atomic,
+    scaffold_remotes_config,
     scaffold_task_plan,
 )
 from stagecheck.core.utils import AgentSlugError, pretty_json_dumps, validate_agent_slug
@@ -68,6 +69,7 @@ def run_init(
     manifest_sha256: str = "0" * 64,
     agent1: Optional[str] = None,
     agent2: Optional[str] = None,
+    approve_remotes: Optional[List[str]] = None,
 ) -> int:
     """Execute the governed workspace initialization workflow.
 
@@ -247,6 +249,12 @@ def run_init(
                     agent1_name=resolved_a1,
                     agent2_name=resolved_a2,
                 )
+
+            # Step 4a-bis: Scaffold/reconcile controls/remotes.json
+            scaffold_remotes_config(
+                workspace_root=workspace_root,
+                approve_remotes=approve_remotes,
+            )
 
             # Step 4b: Scaffold agent instructions & role definitions (Specs 03, 08)
             print("Reconciling agent instructions under instructions/...")

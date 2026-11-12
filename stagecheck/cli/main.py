@@ -40,6 +40,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--force", "--reinit", action="store_true", dest="force", help="Force re-initialization with owner grant.")
     p_init.add_argument("--agent1", help="Agent 1 name (Prompt Architect & Auditor).")
     p_init.add_argument("--agent2", help="Agent 2 name (Code Implementer).")
+    p_init.add_argument(
+        "--approve-remote",
+        action="append",
+        dest="approve_remotes",
+        help="Approve a remote git push URL in controls/remotes.json (repeatable).",
+    )
 
     # 2. start
     p_start = subparsers.add_parser("start", help="Activate a new task under exclusive lock.")
@@ -250,6 +256,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             force=getattr(args, "force", False),
             agent1=getattr(args, "agent1", None),
             agent2=getattr(args, "agent2", None),
+            approve_remotes=getattr(args, "approve_remotes", None),
         )
 
     if args.subcommand == "start":
