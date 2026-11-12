@@ -467,6 +467,39 @@ class TestSentinel(unittest.TestCase):
         daemon._run_loop(ready_fd=None)
         self.assertFalse(daemon.is_running()[0])
 
+    def test_daemon_rejects_symlink_daemon_log_and_lock(self) -> None:
+        """SentinelDaemon.start rejects symlinked sentinel_daemon.log and .stagecheck_sentinel.lock."""
+        from stagecheck.core.sentinel import SentinelError
+        daemon = SentinelDaemon(self.workspace)
+        daemon.log_file.parent.mkdir(parents=True, exist_ok=True)
+        daemon_log = self.workspace / "evidence" / "sentinel_daemon.log"
+        target = self.workspace / "evidence" / "victim.txt"
+        target.write_text("do-not-touch", encoding="utf-8")
+        daemon_log.unlink(missing_ok=True)
+        daemon_log.symlink_to(target)
+        with self.assertRaises(SentinelError):
+            daemon.start(daemon=True)
+
+        daemon_log.unlink(missing_ok=True)
+        lock_file = self.workspace / ".stagecheck_sentinel.lock"
+        lock_file.unlink(missing_ok=True)
+        lock_file.symlink_to(target)
+        with self.assertRaises(SentinelError):
+            daemon.start(daemon=True)
+        lock_file.unlink(missing_ok=True)
+
+    def test_sanitize_log_field_escapes_c1_and_unicode_line_separators(self) -> None:
+        """_sanitize_log_field escapes U+0085, U+2028, and U+2029 so forged lines cannot be injected."""
+        from stagecheck.core.sentinel import _sanitize_log_field
+        raw = "repos/backend/a\u0085b\u2028c\u2029d.py"
+        sanitized = _sanitize_log_field(raw)
+        self.assertNotIn("\u0085", sanitized)
+        self.assertNotIn("\u2028", sanitized)
+        self.assertNotIn("\u2029", sanitized)
+        self.assertIn("\\x85", sanitized)
+        self.assertIn("\\u2028", sanitized)
+        self.assertIn("\\u2029", sanitized)
+
 
 if __name__ == "__main__":
     unittest.main()

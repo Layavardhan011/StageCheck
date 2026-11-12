@@ -69,7 +69,7 @@ def run_sentinel(
             raw = f.read()
         if offset > 0 and b"\n" in raw:
             raw = raw.split(b"\n", 1)[1]
-        lines = raw.decode("utf-8", errors="replace").splitlines()[-200:]
+        lines = raw.decode("utf-8", errors="replace").split("\n")[-200:]
         content = "\n".join(lines).strip()
         print(content if content else "Sentinel log file is empty.")
         return 0

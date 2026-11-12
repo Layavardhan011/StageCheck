@@ -1184,165 +1184,125 @@ def advance_gate_atomic(
         validate_task_id(task_id)
 
     with acquire_runtime_lock(root):
-        state = load_active_state(root)
-        active_task_id = str(state.get("task_id", "task-default"))
-        active_attempt = int(state.get("attempt_index", 1))
-        if (task_id is not None and str(task_id) != active_task_id) or (
-            attempt is not None and int(attempt) != active_attempt
-        ):
-            raise GateCriteriaFailedError(
-                f"Cannot advance {gate_id.value}: task/attempt mismatch against ACTIVE_STATE.json "
-                f"(requested ({task_id}, {attempt}), active ({active_task_id}, {active_attempt}))",
-                failure_reasons=["task/attempt mismatch"],
-            )
-        resolved_task_id = str(task_id or active_task_id)
-        resolved_attempt = int(attempt or active_attempt)
-
-        attempt_dir = resolve_task_attempt_dir(root, resolved_task_id, resolved_attempt)
-        receipt_path = get_gate_receipt_path(root, gate_id, resolved_task_id, resolved_attempt)
-        seal_path = attempt_dir / "seal.json"
-
-        # Idempotency check for GATE_4
-        if gate_id == GateId.GATE_4:
-            if (
-                state.get("status") == "SEALED_PASSED"
-                and receipt_path.is_file()
-                and not receipt_path.is_symlink()
-                and seal_path.is_file()
-                and "GATE_4" in state.get("cleared_gates", {})
-            ):
-                from stagecheck.core.sealing import verify_attempt_merkle_seal
-                is_valid, _ = verify_attempt_merkle_seal(attempt_dir, root)
-                if is_valid:
-                    live_hash = sha256_file(receipt_path)
-                    if live_hash.lower() == str(state["cleared_gates"]["GATE_4"]).lower():
-                        return GateAdvanceResult(
-                            gate_id=gate_id.value,
-                            task_id=resolved_task_id,
-                            attempt=resolved_attempt,
-                            receipt_path=receipt_path,
-                            receipt_sha256=live_hash,
-                            from_phase=state.get("phase", "COMPLETED"),
-                            to_phase="SEALED_PASSED",
-                            turn="IDLE",
-                        )
-
-        # 1. Non-mutating precondition check
-        report = check_gate_preconditions(root, gate_id, resolved_task_id, resolved_attempt)
-        if not report.passed:
-            raise GateCriteriaFailedError(
-                f"Cannot advance {gate_id.value}: criteria unmet ({'; '.join(report.failure_reasons)})",
-                failure_reasons=report.failure_reasons,
-            )
-
-        target_phase = GATE_TARGET_PHASE[gate_id]
-        new_turn = GATE_TURN_ROTATION.get(gate_id, "IDLE")
-
-        # 2. Build receipt
-        check_ids = [c.criterion_id for c in report.criteria]
-        receipt_path, receipt_data, digest = generate_gate_receipt(
-            workspace_root=root,
+        return _advance_gate_atomic_locked(
+            root=root,
             gate_id=gate_id,
-            task_id=resolved_task_id,
-            attempt=resolved_attempt,
-            from_phase=report.current_phase,
-            to_phase=target_phase,
-            deliverables=report.deliverables,
-            checks_evaluated=check_ids,
+            task_id=task_id,
+            attempt=attempt,
             verified_by=verified_by,
         )
 
-        # Pre-check receipt directory and symlink containment before creating dirs/files
-        receipt_path.parent.mkdir(parents=True, exist_ok=True)
-        safe_resolve(receipt_path.relative_to(root).as_posix(), root, allow_symlinks=False)
 
-        # Specialized transactional execution for Gate 4 sealing per DEC-025
-        if gate_id == GateId.GATE_4:
-            from stagecheck.core.journal import write_ahead_transaction
-            from stagecheck.core.sealing import compute_attempt_merkle_seal, index_seal_in_manifest
+def _advance_gate_atomic_locked(
+    root: Path,
+    gate_id: GateId,
+    task_id: Optional[str] = None,
+    attempt: Optional[int] = None,
+    verified_by: str = "stagecheck-core",
+) -> GateAdvanceResult:
+    """Execute atomic gate advancement assuming the caller already holds acquire_runtime_lock(root)."""
+    state = load_active_state(root)
+    active_task_id = str(state.get("task_id", "task-default"))
+    active_attempt = int(state.get("attempt_index", 1))
+    if (task_id is not None and str(task_id) != active_task_id) or (
+        attempt is not None and int(attempt) != active_attempt
+    ):
+        raise GateCriteriaFailedError(
+            f"Cannot advance {gate_id.value}: task/attempt mismatch against ACTIVE_STATE.json "
+            f"(requested ({task_id}, {attempt}), active ({active_task_id}, {active_attempt}))",
+            failure_reasons=["task/attempt mismatch"],
+        )
+    resolved_task_id = str(task_id or active_task_id)
+    resolved_attempt = int(attempt or active_attempt)
 
-            verdict_file = attempt_dir / "Phase-3" / "verdict.json"
-            verdict_data: Dict[str, Any] = {}
-            if verdict_file.is_file():
-                try:
-                    verdict_data = json.loads(verdict_file.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+    attempt_dir = resolve_task_attempt_dir(root, resolved_task_id, resolved_attempt)
+    receipt_path = get_gate_receipt_path(root, gate_id, resolved_task_id, resolved_attempt)
+    seal_path = attempt_dir / "seal.json"
 
-            manifest_path = root / "evidence" / "EVIDENCE_MANIFEST.json"
-            state_path = root / "controls" / "ACTIVE_STATE.json"
-
-            with write_ahead_transaction(
-                workspace_root=root,
-                operation="gate4",
-                task_id=resolved_task_id,
-                attempt_index=resolved_attempt,
-            ) as journal:
-                journal.record_pre_image(receipt_path)
-                journal.record_pre_image(seal_path)
-                journal.record_pre_image(state_path)
-                journal.record_pre_image(manifest_path)
-
-                parent_dir = receipt_path.parent
-                parent_dir.mkdir(parents=True, exist_ok=True)
-                if not os.access(parent_dir, os.W_OK):
-                    try:
-                        os.chmod(str(parent_dir), 0o755)
-                    except OSError:
-                        pass
-
-                content_str = json.dumps(receipt_data, indent=2) + "\n"
-                _write_receipt_no_follow(root, receipt_path, content_str)
-                journal.record_staged_write(receipt_path)
+    # Idempotency check for GATE_4
+    if gate_id == GateId.GATE_4:
+        if (
+            state.get("status") == "SEALED_PASSED"
+            and receipt_path.is_file()
+            and not receipt_path.is_symlink()
+            and seal_path.is_file()
+            and "GATE_4" in state.get("cleared_gates", {})
+        ):
+            from stagecheck.core.sealing import verify_attempt_merkle_seal
+            is_valid, _ = verify_attempt_merkle_seal(attempt_dir, root)
+            if is_valid:
                 live_hash = sha256_file(receipt_path)
+                if live_hash.lower() == str(state["cleared_gates"]["GATE_4"]).lower():
+                    return GateAdvanceResult(
+                        gate_id=gate_id.value,
+                        task_id=resolved_task_id,
+                        attempt=resolved_attempt,
+                        receipt_path=receipt_path,
+                        receipt_sha256=live_hash,
+                        from_phase=state.get("phase", "COMPLETED"),
+                        to_phase="SEALED_PASSED",
+                        turn="IDLE",
+                    )
 
-                # Compute and write deterministic Merkle DAG seal.json
-                seal_record = compute_attempt_merkle_seal(
-                    attempt_dir=attempt_dir,
-                    workspace_root=root,
-                    task_id=resolved_task_id,
-                    attempt_index=resolved_attempt,
-                    verdict_data=verdict_data,
-                    write_seal_file=True,
-                )
-                journal.record_staged_write(seal_path)
+    # 1. Non-mutating precondition check
+    report = check_gate_preconditions(root, gate_id, resolved_task_id, resolved_attempt)
+    if not report.passed:
+        raise GateCriteriaFailedError(
+            f"Cannot advance {gate_id.value}: criteria unmet ({'; '.join(report.failure_reasons)})",
+            failure_reasons=report.failure_reasons,
+        )
 
-                # Index seal downstream in EVIDENCE_MANIFEST.json
-                index_seal_in_manifest(root, resolved_task_id, resolved_attempt, seal_record)
-                journal.record_staged_write(manifest_path)
+    target_phase = GATE_TARGET_PHASE[gate_id]
+    new_turn = GATE_TURN_ROTATION.get(gate_id, "IDLE")
 
-                # Update ACTIVE_STATE.json
-                state["phase"] = "COMPLETED"
-                state["status"] = "SEALED_PASSED"
-                state["turn"] = "IDLE"
-                state.setdefault("cleared_gates", {})[gate_id.value] = live_hash
-                save_active_state(root, state)
-                journal.record_staged_write(state_path)
+    # 2. Build receipt
+    check_ids = [c.criterion_id for c in report.criteria]
+    receipt_path, receipt_data, digest = generate_gate_receipt(
+        workspace_root=root,
+        gate_id=gate_id,
+        task_id=resolved_task_id,
+        attempt=resolved_attempt,
+        from_phase=report.current_phase,
+        to_phase=target_phase,
+        deliverables=report.deliverables,
+        checks_evaluated=check_ids,
+        verified_by=verified_by,
+    )
 
-            # Freeze completed attempt directory hierarchy
-            freeze_phase_directory(attempt_dir)
+    # Pre-check receipt directory and symlink containment before creating dirs/files
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_resolve(receipt_path.relative_to(root).as_posix(), root, allow_symlinks=False)
 
-            return GateAdvanceResult(
-                gate_id=gate_id.value,
-                task_id=resolved_task_id,
-                attempt=resolved_attempt,
-                receipt_path=receipt_path,
-                receipt_sha256=live_hash,
-                from_phase=report.current_phase,
-                to_phase="SEALED_PASSED",
-                turn="IDLE",
-            )
+    # Specialized transactional execution for Gate 4 sealing per DEC-025
+    if gate_id == GateId.GATE_4:
+        from stagecheck.core.journal import write_ahead_transaction
+        from stagecheck.core.sealing import compute_attempt_merkle_seal, index_seal_in_manifest
 
-        # Snapshot state deeply for rollback
-        state_backup = copy.deepcopy(state)
-        created_receipt = False
+        verdict_file = attempt_dir / "Phase-3" / "verdict.json"
+        verdict_data: Dict[str, Any] = {}
+        if verdict_file.is_file():
+            try:
+                verdict_data = json.loads(verdict_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
 
-        try:
-            # Ensure parent directory is writable during receipt creation
+        manifest_path = root / "evidence" / "EVIDENCE_MANIFEST.json"
+        state_path = root / "controls" / "ACTIVE_STATE.json"
+
+        with write_ahead_transaction(
+            workspace_root=root,
+            operation="gate4",
+            task_id=resolved_task_id,
+            attempt_index=resolved_attempt,
+        ) as journal:
+            journal.record_pre_image(receipt_path)
+            journal.record_pre_image(seal_path)
+            journal.record_pre_image(state_path)
+            journal.record_pre_image(manifest_path)
+
             parent_dir = receipt_path.parent
             parent_dir.mkdir(parents=True, exist_ok=True)
-            parent_is_ro = not os.access(parent_dir, os.W_OK)
-            if parent_is_ro:
+            if not os.access(parent_dir, os.W_OK):
                 try:
                     os.chmod(str(parent_dir), 0o755)
                 except OSError:
@@ -1350,63 +1310,120 @@ def advance_gate_atomic(
 
             content_str = json.dumps(receipt_data, indent=2) + "\n"
             _write_receipt_no_follow(root, receipt_path, content_str)
-            created_receipt = True
-
-            # Calculate live receipt hash
+            journal.record_staged_write(receipt_path)
             live_hash = sha256_file(receipt_path)
 
-            # Update ACTIVE_STATE
-            state["phase"] = target_phase
-            state["turn"] = new_turn
-            state.setdefault("cleared_gates", {})[gate_id.value] = live_hash
-            if gate_id == GateId.GATE_4:
-                state["status"] = "SEALED_PASSED"
-
-            save_active_state(root, state)
-
-            # Update evidence manifest transactionally
-            update_evidence_manifest(root, [receipt_path])
-
-            # Freeze completed phase directory per Table 10 (defense-in-depth immutability)
-            attempt_dir = resolve_task_attempt_dir(root, resolved_task_id, resolved_attempt)
-            if gate_id == GateId.GATE_1:
-                freeze_phase_directory(attempt_dir / "Phase-1")
-            elif gate_id == GateId.GATE_2A:
-                freeze_phase_directory(attempt_dir / "Phase-2A")
-            elif gate_id == GateId.GATE_2B:
-                freeze_phase_directory(attempt_dir / "Phase-2B")
-            elif gate_id == GateId.GATE_3:
-                freeze_phase_directory(attempt_dir / "Phase-3")
-            elif gate_id == GateId.GATE_4:
-                from stagecheck.core.dispositions import mark_waivers_finalized
-
-                mark_waivers_finalized(root, resolved_task_id, resolved_attempt)
-                freeze_phase_directory(attempt_dir)
-
-            return GateAdvanceResult(
-                gate_id=gate_id.value,
+            # Compute and write deterministic Merkle DAG seal.json
+            seal_record = compute_attempt_merkle_seal(
+                attempt_dir=attempt_dir,
+                workspace_root=root,
                 task_id=resolved_task_id,
-                attempt=resolved_attempt,
-                receipt_path=receipt_path,
-                receipt_sha256=live_hash,
-                from_phase=report.current_phase,
-                to_phase=target_phase,
-                turn=new_turn,
+                attempt_index=resolved_attempt,
+                verdict_data=verdict_data,
+                write_seal_file=True,
             )
+            journal.record_staged_write(seal_path)
 
-        except Exception as err:
-            # Rollback
-            if created_receipt and receipt_path.exists():
-                try:
-                    receipt_path.chmod(0o644)
-                    receipt_path.unlink()
-                except Exception:
-                    pass
+            # Index seal downstream in EVIDENCE_MANIFEST.json
+            index_seal_in_manifest(root, resolved_task_id, resolved_attempt, seal_record)
+            journal.record_staged_write(manifest_path)
+
+            # Update ACTIVE_STATE.json
+            state["phase"] = "COMPLETED"
+            state["status"] = "SEALED_PASSED"
+            state["turn"] = "IDLE"
+            state.setdefault("cleared_gates", {})[gate_id.value] = live_hash
+            save_active_state(root, state)
+            journal.record_staged_write(state_path)
+
+        # Freeze completed attempt directory hierarchy
+        freeze_phase_directory(attempt_dir)
+
+        return GateAdvanceResult(
+            gate_id=gate_id.value,
+            task_id=resolved_task_id,
+            attempt=resolved_attempt,
+            receipt_path=receipt_path,
+            receipt_sha256=live_hash,
+            from_phase=report.current_phase,
+            to_phase="SEALED_PASSED",
+            turn="IDLE",
+        )
+
+    # Snapshot state deeply for rollback
+    state_backup = copy.deepcopy(state)
+    created_receipt = False
+
+    try:
+        # Ensure parent directory is writable during receipt creation
+        parent_dir = receipt_path.parent
+        parent_dir.mkdir(parents=True, exist_ok=True)
+        parent_is_ro = not os.access(parent_dir, os.W_OK)
+        if parent_is_ro:
             try:
-                save_active_state(root, state_backup)
+                os.chmod(str(parent_dir), 0o755)
+            except OSError:
+                pass
+
+        content_str = json.dumps(receipt_data, indent=2) + "\n"
+        _write_receipt_no_follow(root, receipt_path, content_str)
+        created_receipt = True
+
+        # Calculate live receipt hash
+        live_hash = sha256_file(receipt_path)
+
+        # Update ACTIVE_STATE
+        state["phase"] = target_phase
+        state["turn"] = new_turn
+        state.setdefault("cleared_gates", {})[gate_id.value] = live_hash
+        if gate_id == GateId.GATE_4:
+            state["status"] = "SEALED_PASSED"
+
+        save_active_state(root, state)
+
+        # Update evidence manifest transactionally
+        update_evidence_manifest(root, [receipt_path])
+
+        # Freeze completed phase directory per Table 10 (defense-in-depth immutability)
+        attempt_dir = resolve_task_attempt_dir(root, resolved_task_id, resolved_attempt)
+        if gate_id == GateId.GATE_1:
+            freeze_phase_directory(attempt_dir / "Phase-1")
+        elif gate_id == GateId.GATE_2A:
+            freeze_phase_directory(attempt_dir / "Phase-2A")
+        elif gate_id == GateId.GATE_2B:
+            freeze_phase_directory(attempt_dir / "Phase-2B")
+        elif gate_id == GateId.GATE_3:
+            freeze_phase_directory(attempt_dir / "Phase-3")
+        elif gate_id == GateId.GATE_4:
+            from stagecheck.core.dispositions import mark_waivers_finalized
+
+            mark_waivers_finalized(root, resolved_task_id, resolved_attempt)
+            freeze_phase_directory(attempt_dir)
+
+        return GateAdvanceResult(
+            gate_id=gate_id.value,
+            task_id=resolved_task_id,
+            attempt=resolved_attempt,
+            receipt_path=receipt_path,
+            receipt_sha256=live_hash,
+            from_phase=report.current_phase,
+            to_phase=target_phase,
+            turn=new_turn,
+        )
+
+    except Exception as err:
+        # Rollback
+        if created_receipt and receipt_path.exists():
+            try:
+                receipt_path.chmod(0o644)
+                receipt_path.unlink()
             except Exception:
                 pass
-            raise GateError(f"Atomic gate advancement failed; state rolled back: {err}") from err
+        try:
+            save_active_state(root, state_backup)
+        except Exception:
+            pass
+        raise GateError(f"Atomic gate advancement failed; state rolled back: {err}") from err
 
 
 def verify_gate_receipts(
