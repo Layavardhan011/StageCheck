@@ -27,7 +27,7 @@ from stagecheck.core.paths import (
     write_text_nofollow,
 )
 from stagecheck.core.permissions import controlled_write_transaction
-from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest, sha256_file, strict_json_loads
+from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest, strict_json_loads
 
 
 class EvidenceTamperError(Exception):
@@ -237,19 +237,24 @@ def create_task_seal(
     if attempt > 1:
         prior_attempt = attempt - 1
         prior_seal_file = get_task_seal_path(workspace_root, task_id, prior_attempt)
-        if not prior_seal_file.is_file():
+        if prior_seal_file.is_symlink() or not prior_seal_file.is_file():
             raise SealChainBrokenError(
-                f"Cannot seal attempt {attempt}: Prior attempt {prior_attempt} seal.json is missing."
+                f"Cannot seal attempt {attempt}: Prior attempt {prior_attempt} seal.json is missing or symlinked."
             )
-        prior_seal_sha256 = sha256_file(prior_seal_file)
+        prior_seal_sha256 = sha256_file_nofollow(prior_seal_file)
 
     # 2. Extract verdict sha256
-    verdict_path = attempt_dir / "Phase-3" / "verdict.json"
-    if not verdict_path.is_file():
+    p3_dir = attempt_dir / "Phase-3"
+    if p3_dir.is_symlink():
+        raise EvidenceTamperError(f"Refusing to follow symlinked Phase-3 directory '{p3_dir}'.")
+    verdict_path = p3_dir / "verdict.json"
+    if not verdict_path.exists() and not verdict_path.is_symlink():
         verdict_path = attempt_dir / "verdict.json"
+    if verdict_path.is_symlink():
+        raise EvidenceTamperError(f"Refusing to follow symlinked verdict file '{verdict_path}'.")
     verdict_sha256 = "0" * 64
     if verdict_path.is_file():
-        verdict_sha256 = sha256_file(verdict_path)
+        verdict_sha256 = sha256_file_nofollow(verdict_path)
 
     # 3. Payload and manifest calculation
     payload_to_hash = {
@@ -264,9 +269,11 @@ def create_task_seal(
 
     # Initial manifest sha256
     manifest_path = get_manifest_path(workspace_root)
+    if manifest_path.is_symlink():
+        raise EvidenceTamperError(f"Refusing to follow symlinked manifest '{manifest_path}'.")
     manifest_sha256 = "0" * 64
     if manifest_path.is_file():
-        manifest_sha256 = sha256_file(manifest_path)
+        manifest_sha256 = sha256_file_nofollow(manifest_path)
 
     seal_data = {
         "schema_version": "2.0",

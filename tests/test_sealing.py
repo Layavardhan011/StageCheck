@@ -207,6 +207,25 @@ class TestAcyclicMerkleSealing(unittest.TestCase):
         self.assertFalse(is_valid)
         self.assertTrue(any("Unrecorded file present" in v for v in violations))
 
+    def test_create_task_seal_rejects_symlinked_verdict(self) -> None:
+        """Verify create_task_seal uses nofollow and rejects symlinked verdict.json."""
+        from stagecheck.core.evidence import EvidenceTamperError, create_task_seal
+
+        outside = self.ws / "outside_verdict.json"
+        outside.write_text('{"result": "CLEAR"}', encoding="utf-8")
+        p3_dir = self.attempt_dir / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        (p3_dir / "verdict.json").symlink_to(outside)
+
+        with self.assertRaises(EvidenceTamperError):
+            create_task_seal(
+                workspace_root=self.ws,
+                task_id=self.task_id,
+                attempt=1,
+                verdict_data={"result": "CLEAR"},
+                checked_heads={"backend": "a" * 40},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
