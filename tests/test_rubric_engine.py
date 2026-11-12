@@ -1262,6 +1262,49 @@ class TestRubricEngine(unittest.TestCase):
             f"Unexpected TEST_ADEQUACY failure from untouched common_test.go: {[e for e in ta_evals if e['status'] not in ('PASS', 'NOT_APPLICABLE')]}",
         )
 
+    def test_automated_rule_honors_provenance_verified_human_waiver(self) -> None:
+        """Verify AUTOMATED rules honor provenance-verified APPROVED waivers in controls/DISPOSITIONS.json."""
+        from stagecheck.core.agents_md import write_agents_contract
+        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.utils import canonical_json_dumps
+
+        self._seed_full_compliant_workspace()
+        # Introduce unpinned dependency -> UPSTREAM_REUSE-001 FAILs in Phase-2A
+        (self.repo_dir / "requirements.txt").write_text("requests>=2.0.0\n", encoding="utf-8")
+
+        payload_fail, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
+        by_id_fail = {e["rule_id"]: e for e in payload_fail["evaluations"]}
+        self.assertEqual(by_id_fail["UPSTREAM_REUSE-001"]["status"], "FAIL")
+
+        # Add provenance-verified APPROVED waiver for UPSTREAM_REUSE-001
+        waiver_evidence = self.workspace / "evidence" / "waiver_upstream.txt"
+        waiver_evidence.parent.mkdir(parents=True, exist_ok=True)
+        waiver_evidence.write_text("Approved unpinned dependency waiver.\n", encoding="utf-8")
+        entry = build_waiver_entry(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            defect_id="UPSTREAM_REUSE-001",
+            rule_id="UPSTREAM_REUSE-001",
+            waived_rules=["UPSTREAM_REUSE-001"],
+            rationale="Temporary unpinned range approved by owner.",
+            authorized_by="owner@stagecheck.local",
+            evidence_path="evidence/waiver_upstream.txt",
+        )
+        record_waiver_in_replay_ledger(self.workspace, entry)
+        with controlled_write_transaction(self.workspace / "controls"):
+            (self.workspace / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps({"schema_version": "2.0", "dispositions": [entry]}),
+                encoding="utf-8",
+            )
+            write_agents_contract(self.workspace)
+
+        payload_waived, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
+        by_id_waived = {e["rule_id"]: e for e in payload_waived["evaluations"]}
+        self.assertEqual(by_id_waived["UPSTREAM_REUSE-001"]["status"], "PASS")
+        self.assertIn("Waived by provenance-verified human disposition", by_id_waived["UPSTREAM_REUSE-001"]["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3522,6 +3522,26 @@ def evaluate_rubric_rule(
         result = handler(rule, workspace_root, repo_path, ctx)
         if not result.evaluation_strategy:
             result.evaluation_strategy = strategy_name
+
+        # 7. Honor provenance-verified APPROVED human waivers in controls/DISPOSITIONS.json for non-HUMAN_WAIVER rules
+        if (
+            rule.category != "HUMAN_WAIVER"
+            and result.status in ("FAIL", "BLOCKED", "NOT_EVALUATED")
+            and isinstance(ctx.get("human_waivers"), dict)
+            and rule.rule_id in ctx["human_waivers"]
+        ):
+            waiver_res = _evaluate_human_waiver(rule, ctx)
+            if waiver_res.status == "PASS":
+                return RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    domain=rule.domain,
+                    category=rule.category,
+                    status="PASS",
+                    evaluator=result.evaluator or evaluator_impl,
+                    evaluation_strategy=result.evaluation_strategy or strategy_name,
+                    witness=waiver_res.witness,
+                    message=f"Waived by provenance-verified human disposition ({waiver_res.message}) [prior: {result.status}: {result.message}]",
+                )
         return result
 
     except InvalidRubricExemptionError:
