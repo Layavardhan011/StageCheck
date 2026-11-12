@@ -354,6 +354,55 @@ class TestGateCLIAndPrerequisites(unittest.TestCase):
         ])
         self.assertEqual(rc_tampered, 1, "Tampered gate receipt must block execution fail-closed")
 
+    def test_gate2a_2b_3_reject_symlinks_and_gate3_checks_verdict_binding(self) -> None:
+        """Verify Gate 2A/2B/3 reject symlinked deliverables and Gate 3 validates verdict task_id/attempt."""
+        from stagecheck.core.gate_engine import (
+            evaluate_gate_2a_criteria,
+            evaluate_gate_2b_criteria,
+            evaluate_gate_3_criteria,
+        )
+
+        attempt_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}"
+        outside = self.workspace / "outside.json"
+        outside.write_text('{"status": "APPROVED", "result": "CLEAR", "counts": {"blocking": 0}}', encoding="utf-8")
+
+        # 1. Symlinked Phase-2A/pre_commit_status.json rejected in Gate 2A
+        p2a_dir = attempt_dir / "Phase-2A"
+        p2a_dir.mkdir(parents=True, exist_ok=True)
+        (p2a_dir / "pre_commit_status.json").symlink_to(outside)
+        c2a, _ = evaluate_gate_2a_criteria(self.workspace, self.task_id, self.attempt)
+        self.assertTrue(any(c.status == "FAILED" and "Symlinked" in c.message for c in c2a))
+
+        # 2. Symlinked Phase-2B/report.md rejected in Gate 2B
+        p2b_dir = attempt_dir / "Phase-2B"
+        p2b_dir.mkdir(parents=True, exist_ok=True)
+        (p2b_dir / "report.md").symlink_to(outside)
+        c2b, _ = evaluate_gate_2b_criteria(self.workspace, self.task_id, self.attempt)
+        self.assertTrue(any(c.status == "FAILED" and "Symlinked" in c.message for c in c2b))
+
+        # 3. Symlinked Phase-3/verdict.json and mismatched task_id/attempt rejected in Gate 3
+        p3_dir = attempt_dir / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        verdict_path = p3_dir / "verdict.json"
+        verdict_path.symlink_to(outside)
+        c3_sym, _ = evaluate_gate_3_criteria(self.workspace, self.task_id, self.attempt)
+        self.assertTrue(any(c.status == "FAILED" and "Symlinked" in c.message for c in c3_sym))
+
+        verdict_path.unlink()
+        verdict_path.write_text(
+            json.dumps({"task_id": "other-task", "iteration": self.attempt, "result": "CLEAR", "counts": {"blocking": 0}}),
+            encoding="utf-8",
+        )
+        c3_task, _ = evaluate_gate_3_criteria(self.workspace, self.task_id, self.attempt)
+        self.assertTrue(any(c.criterion_id == "gate3.verdict_binding" and c.status == "FAILED" for c in c3_task))
+
+        verdict_path.write_text(
+            json.dumps({"task_id": self.task_id, "iteration": 99, "result": "CLEAR", "counts": {"blocking": 0}}),
+            encoding="utf-8",
+        )
+        c3_att, _ = evaluate_gate_3_criteria(self.workspace, self.task_id, self.attempt)
+        self.assertTrue(any(c.criterion_id == "gate3.verdict_binding" and c.status == "FAILED" for c in c3_att))
+
 
 if __name__ == "__main__":
     unittest.main()

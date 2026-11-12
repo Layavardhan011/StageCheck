@@ -31,7 +31,7 @@ from stagecheck.core.git import (
     get_repo_remote_push_urls,
 )
 from stagecheck.core.locking import acquire_runtime_lock
-from stagecheck.core.paths import safe_resolve, validate_task_id
+from stagecheck.core.paths import StageCheckPathError, safe_resolve, sha256_file_nofollow, validate_task_id
 from stagecheck.core.permissions import freeze_phase_directory
 from stagecheck.core.state import load_active_state, save_active_state
 from stagecheck.core.utils import (
@@ -350,13 +350,35 @@ def evaluate_gate_2a_criteria(
     1. pre_commit_status.json submitted by Agent 2 with status AWAITING_REVIEW.
     2. pre_commit_review.json generated with status APPROVED.
     """
-    p2a_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt) / "Phase-2A"
+    attempt_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt)
+    p2a_dir = attempt_dir / "Phase-2A"
     criteria: List[GateCriterion] = []
     deliverables: List[Dict[str, str]] = []
 
+    if p2a_dir.is_symlink():
+        criteria.append(GateCriterion(
+            criterion_id="gate2a.symlink_rejected",
+            description="Phase-2A directory must not be a symbolic link",
+            status="FAILED",
+            message=f"Refusing symlinked Phase-2A directory '{p2a_dir}'.",
+        ))
+        return criteria, deliverables
+
     # 1. pre_commit_status.json
-    status_file = p2a_dir / "pre_commit_status.json"
-    if not status_file.is_file():
+    try:
+        status_file = safe_resolve("Phase-2A/pre_commit_status.json", attempt_dir, allow_symlinks=False)
+    except StageCheckPathError as err:
+        criteria.append(GateCriterion(
+            criterion_id="gate2a.status_submitted",
+            description="Agent 2 pre-commit status deliverable submitted",
+            status="FAILED",
+            message=f"Symlinked or unsafe pre_commit_status.json: {err}",
+        ))
+        status_file = None
+
+    if status_file is None:
+        pass
+    elif not status_file.is_file():
         criteria.append(GateCriterion(
             criterion_id="gate2a.status_submitted",
             description="Agent 2 pre-commit status deliverable submitted",
@@ -366,7 +388,7 @@ def evaluate_gate_2a_criteria(
     else:
         try:
             st_data = load_json_file(status_file)
-            st_hash = sha256_file(status_file)
+            st_hash = sha256_file_nofollow(status_file)
             deliverables.append({"path": str(status_file.relative_to(workspace_root)), "sha256": st_hash, "status": "VALID"})
             criteria.append(GateCriterion(
                 criterion_id="gate2a.status_submitted",
@@ -383,8 +405,20 @@ def evaluate_gate_2a_criteria(
             ))
 
     # 2. pre_commit_review.json
-    rev_file = p2a_dir / "pre_commit_review.json"
-    if not rev_file.is_file():
+    try:
+        rev_file = safe_resolve("Phase-2A/pre_commit_review.json", attempt_dir, allow_symlinks=False)
+    except StageCheckPathError as err:
+        criteria.append(GateCriterion(
+            criterion_id="gate2a.review_approved",
+            description="Pre-commit cooperative review approved",
+            status="FAILED",
+            message=f"Symlinked or unsafe pre_commit_review.json: {err}",
+        ))
+        rev_file = None
+
+    if rev_file is None:
+        pass
+    elif not rev_file.is_file():
         criteria.append(GateCriterion(
             criterion_id="gate2a.review_approved",
             description="Pre-commit cooperative review approved",
@@ -403,7 +437,7 @@ def evaluate_gate_2a_criteria(
                     message=f"pre_commit_review.json status is '{r_status}', not 'APPROVED'.",
                 ))
             else:
-                rev_hash = sha256_file(rev_file)
+                rev_hash = sha256_file_nofollow(rev_file)
                 deliverables.append({"path": str(rev_file.relative_to(workspace_root)), "sha256": rev_hash, "status": "VALID"})
                 criteria.append(GateCriterion(
                     criterion_id="gate2a.review_approved",
@@ -469,15 +503,37 @@ def evaluate_gate_2b_criteria(
     6. Git remotes comply with authorized whitelist endpoints (approved_remote).
     7. Agent 2 zero remote push policy verified.
     """
-    p2a_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt) / "Phase-2A"
-    p2b_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt) / "Phase-2B"
+    attempt_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt)
+    p2a_dir = attempt_dir / "Phase-2A"
+    p2b_dir = attempt_dir / "Phase-2B"
     criteria: List[GateCriterion] = []
     deliverables: List[Dict[str, str]] = []
 
+    if p2a_dir.is_symlink() or p2b_dir.is_symlink():
+        criteria.append(GateCriterion(
+            criterion_id="gate2b.symlink_rejected",
+            description="Phase-2A and Phase-2B directories must not be symbolic links",
+            status="FAILED",
+            message="Refusing symlinked Phase-2A or Phase-2B directory.",
+        ))
+        return criteria, deliverables
+
     # 1. Gate 2A review approval
-    rev_file = p2a_dir / "pre_commit_review.json"
+    try:
+        rev_file = safe_resolve("Phase-2A/pre_commit_review.json", attempt_dir, allow_symlinks=False)
+    except StageCheckPathError as err:
+        criteria.append(GateCriterion(
+            criterion_id="gate2b.prior_review_approved",
+            description="Phase 2A pre-commit review must be approved prior to Gate 2B",
+            status="FAILED",
+            message=f"Symlinked or unsafe pre_commit_review.json: {err}",
+        ))
+        rev_file = None
+
     rev_data: Optional[Dict[str, Any]] = None
-    if not rev_file.is_file():
+    if rev_file is None:
+        pass
+    elif not rev_file.is_file():
         criteria.append(GateCriterion(
             criterion_id="gate2b.prior_review_approved",
             description="Phase 2A pre-commit review must be approved prior to Gate 2B",
@@ -496,7 +552,7 @@ def evaluate_gate_2b_criteria(
                     message=f"pre_commit_review.json status is '{r_status}', not 'APPROVED'.",
                 ))
             else:
-                rev_hash = sha256_file(rev_file)
+                rev_hash = sha256_file_nofollow(rev_file)
                 deliverables.append({
                     "path": str(rev_file.relative_to(workspace_root)),
                     "sha256": rev_hash,
@@ -517,8 +573,20 @@ def evaluate_gate_2b_criteria(
             ))
 
     # 2. Phase 2B delivery report
-    report_file = p2b_dir / "report.md"
-    if not report_file.is_file():
+    try:
+        report_file = safe_resolve("Phase-2B/report.md", attempt_dir, allow_symlinks=False)
+    except StageCheckPathError as err:
+        criteria.append(GateCriterion(
+            criterion_id="gate2b.delivery_report_exists",
+            description="Phase 2B delivery report exists",
+            status="FAILED",
+            message=f"Symlinked or unsafe report.md: {err}",
+        ))
+        report_file = None
+
+    if report_file is None:
+        pass
+    elif not report_file.is_file():
         criteria.append(GateCriterion(
             criterion_id="gate2b.delivery_report_exists",
             description="Phase 2B delivery report exists",
@@ -526,7 +594,7 @@ def evaluate_gate_2b_criteria(
             message=f"Missing delivery report at '{report_file.relative_to(workspace_root)}'",
         ))
     else:
-        rep_hash = sha256_file(report_file)
+        rep_hash = sha256_file_nofollow(report_file)
         deliverables.append({
             "path": str(report_file.relative_to(workspace_root)),
             "sha256": rep_hash,
@@ -541,11 +609,20 @@ def evaluate_gate_2b_criteria(
 
     # 3. Optional Phase 2B deliverables
     for opt_name in ["claims.json", "git_commit_log.json"]:
-        opt_path = p2b_dir / opt_name
+        try:
+            opt_path = safe_resolve(f"Phase-2B/{opt_name}", attempt_dir, allow_symlinks=False)
+        except StageCheckPathError as err:
+            criteria.append(GateCriterion(
+                criterion_id=f"gate2b.optional_{opt_name}_symlink",
+                description=f"Phase-2B/{opt_name} must not be a symlink",
+                status="FAILED",
+                message=f"Symlinked deliverable Phase-2B/{opt_name}: {err}",
+            ))
+            continue
         if opt_path.is_file():
             deliverables.append({
                 "path": str(opt_path.relative_to(workspace_root)),
-                "sha256": sha256_file(opt_path),
+                "sha256": sha256_file_nofollow(opt_path),
                 "status": "VALID",
             })
 
@@ -744,12 +821,34 @@ def evaluate_gate_3_criteria(
     1. Phase-3/verdict.json exists.
     2. verdict.json status is PASSED or CLEAR (0 blocking defects).
     """
-    p3_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt) / "Phase-3"
+    attempt_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt)
+    p3_dir = attempt_dir / "Phase-3"
     criteria: List[GateCriterion] = []
     deliverables: List[Dict[str, str]] = []
 
-    verdict_file = p3_dir / "verdict.json"
-    if not verdict_file.is_file():
+    if p3_dir.is_symlink():
+        criteria.append(GateCriterion(
+            criterion_id="gate3.symlink_rejected",
+            description="Phase-3 directory must not be a symbolic link",
+            status="FAILED",
+            message=f"Refusing symlinked Phase-3 directory '{p3_dir}'.",
+        ))
+        return criteria, deliverables
+
+    try:
+        verdict_file = safe_resolve("Phase-3/verdict.json", attempt_dir, allow_symlinks=False)
+    except StageCheckPathError as err:
+        criteria.append(GateCriterion(
+            criterion_id="gate3.verdict_exists",
+            description="Phase 3 audit verdict exists",
+            status="FAILED",
+            message=f"Symlinked or unsafe verdict.json: {err}",
+        ))
+        verdict_file = None
+
+    if verdict_file is None:
+        pass
+    elif not verdict_file.is_file():
         criteria.append(GateCriterion(
             criterion_id="gate3.verdict_exists",
             description="Phase 3 audit verdict exists",
@@ -759,25 +858,42 @@ def evaluate_gate_3_criteria(
     else:
         try:
             v_data = load_json_file(verdict_file)
-            v_status = v_data.get("result") or v_data.get("status")
-            v_hash = sha256_file(verdict_file)
-            deliverables.append({"path": str(verdict_file.relative_to(workspace_root)), "sha256": v_hash, "status": "VALID"})
-
-            blocking_count = v_data.get("counts", {}).get("blocking", 0)
-            if v_status in ("PASSED", "CLEAR") and blocking_count == 0:
+            v_task = v_data.get("task_id")
+            v_iter = v_data.get("iteration") if "iteration" in v_data else v_data.get("attempt")
+            if v_task is not None and v_task != task_id:
                 criteria.append(GateCriterion(
-                    criterion_id="gate3.verdict_passed",
-                    description="Phase 3 independent audit verdict passed",
-                    status="MET",
-                    message=f"verdict.json result is {v_status} with 0 blocking defects.",
+                    criterion_id="gate3.verdict_binding",
+                    description="Phase 3 audit verdict bound to active task",
+                    status="FAILED",
+                    message=f"verdict.json task_id mismatch: expected '{task_id}', got {v_task!r}.",
+                ))
+            elif v_iter is not None and (isinstance(v_iter, bool) or not isinstance(v_iter, int) or int(v_iter) != int(attempt)):
+                criteria.append(GateCriterion(
+                    criterion_id="gate3.verdict_binding",
+                    description="Phase 3 audit verdict bound to active attempt",
+                    status="FAILED",
+                    message=f"verdict.json iteration/attempt mismatch: expected {attempt}, got {v_iter!r}.",
                 ))
             else:
-                criteria.append(GateCriterion(
-                    criterion_id="gate3.verdict_passed",
-                    description="Phase 3 independent audit verdict passed",
-                    status="FAILED",
-                    message=f"verdict.json failed with status '{v_status}' and {blocking_count} blocking defects.",
-                ))
+                v_status = v_data.get("result") or v_data.get("status")
+                v_hash = sha256_file_nofollow(verdict_file)
+                deliverables.append({"path": str(verdict_file.relative_to(workspace_root)), "sha256": v_hash, "status": "VALID"})
+
+                blocking_count = v_data.get("counts", {}).get("blocking", 0)
+                if v_status in ("PASSED", "CLEAR") and blocking_count == 0:
+                    criteria.append(GateCriterion(
+                        criterion_id="gate3.verdict_passed",
+                        description="Phase 3 independent audit verdict passed",
+                        status="MET",
+                        message=f"verdict.json result is {v_status} with 0 blocking defects.",
+                    ))
+                else:
+                    criteria.append(GateCriterion(
+                        criterion_id="gate3.verdict_passed",
+                        description="Phase 3 independent audit verdict passed",
+                        status="FAILED",
+                        message=f"verdict.json failed with status '{v_status}' and {blocking_count} blocking defects.",
+                    ))
         except Exception as err:
             criteria.append(GateCriterion(
                 criterion_id="gate3.verdict_format",
@@ -814,11 +930,20 @@ def evaluate_gate_3_criteria(
 
     # Also capture other Phase 3 audit artifacts as deliverables if present
     for art_name in ["test_execution.json", "scanner_report.json", "rubric_evaluation.json"]:
-        art_file = p3_dir / art_name
+        try:
+            art_file = safe_resolve(f"Phase-3/{art_name}", attempt_dir, allow_symlinks=False)
+        except StageCheckPathError as err:
+            criteria.append(GateCriterion(
+                criterion_id=f"gate3.artifact_{art_name}_symlink",
+                description=f"Phase-3/{art_name} must not be a symlink",
+                status="FAILED",
+                message=f"Symlinked Phase-3 artifact '{art_name}': {err}",
+            ))
+            continue
         if art_file.is_file():
             deliverables.append({
                 "path": str(art_file.relative_to(workspace_root)),
-                "sha256": sha256_file(art_file),
+                "sha256": sha256_file_nofollow(art_file),
                 "status": "VALID",
             })
 
