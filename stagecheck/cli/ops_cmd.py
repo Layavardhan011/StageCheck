@@ -53,12 +53,11 @@ def run_unlock(
             return 1
 
     try:
-        commit_safe_teardown(workspace_root, abort_active=abort_active, force=force)
+        commit_safe_teardown(workspace_root, abort_active=abort_active, force=force, elevate=True)
     except Exception as err:
         print(f"ERROR: [unlock.teardown_commit_error] {err}", file=sys.stderr)
         return 1
 
-    elevate_permissions_for_teardown(workspace_root)
     print(f"SUCCESS: Elevated workspace permissions for '{workspace_root}'. Ready for clean teardown.")
     return 0
 

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 from stagecheck.core.locking import LockCollisionError, acquire_runtime_lock
+from stagecheck.core.paths import StageCheckPathError, safe_resolve, write_text_nofollow
 from stagecheck.core.paths import StageCheckPathError, safe_resolve
 from stagecheck.core.permissions import (
     apply_at_rest_permissions,
@@ -83,8 +84,21 @@ class TransactionJournal:
         self.is_rolled_back: bool = False
 
     def start(self) -> None:
-        """Initialize the journal directory and write the initial active transaction record."""
+        """Initialize the journal directory and write the initial active transaction record safely."""
+        if self.journal_dir.is_symlink():
+            raise JournalError(f"Symlinked journal directory '{self.journal_dir}' rejected.")
         self.journal_dir.mkdir(mode=0o700, exist_ok=True)
+        if self.journal_dir.is_symlink() or not self.journal_dir.is_dir():
+            raise JournalError(f"Unsafe journal directory '{self.journal_dir}' rejected.")
+        try:
+            self.journal_dir = safe_resolve(".stagecheck_journal", self.workspace_root, allow_symlinks=False)
+            self.journal_file = safe_resolve(
+                f".stagecheck_journal/{self.txn_id}.active.json",
+                self.workspace_root,
+                allow_symlinks=False,
+            )
+        except StageCheckPathError as err:
+            raise JournalError(f"Unsafe journal path rejected: {err}") from err
         # Ensure directory permissions are 0700
         try:
             os.chmod(self.journal_dir, 0o700)
@@ -103,7 +117,7 @@ class TransactionJournal:
             "pre_encodings": {},
             "staged_paths": [],
         }
-        self.journal_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        write_text_nofollow(self.journal_file, json.dumps(data, indent=2), append=False, mode=0o600)
 
     def _validated_rel_path(self, target_path: Union[str, Path]) -> Tuple[Path, str]:
         """Resolve target_path strictly inside workspace_root without following symlinks."""
@@ -176,9 +190,9 @@ class TransactionJournal:
             "pre_encodings": self.pre_encodings,
             "staged_paths": self.staged_paths,
         }
-        temp_journal = self.journal_file.with_suffix(".tmp")
-        temp_journal.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        temp_journal.replace(self.journal_file)
+        if self.journal_dir.is_symlink() or self.journal_file.is_symlink():
+            raise JournalError(f"Refusing to flush journal across symlink '{self.journal_file}'.")
+        write_text_nofollow(self.journal_file, json.dumps(data, indent=2), append=False, mode=0o600)
 
     def commit(self) -> None:
         """Commit transaction: remove the active journal file and mark committed (idempotent)."""
@@ -205,16 +219,19 @@ class TransactionJournal:
             )
         self.is_rolled_back = True
 
-        restored, removed = _restore_pre_images(
-            self.workspace_root,
-            self.pre_images,
-            self.pre_modes,
-            self.pre_encodings,
-        )
+        try:
+            restored, removed = _restore_pre_images(
+                self.workspace_root,
+                self.pre_images,
+                self.pre_modes,
+                self.pre_encodings,
+            )
 
-        # Unlink journal active file
-        if self.journal_file.exists():
-            self.journal_file.unlink()
+            # Unlink journal active file
+            if self.journal_file.exists():
+                self.journal_file.unlink()
+        finally:
+            apply_at_rest_permissions(self.workspace_root)
 
         return RecoveryRecord(
             txn_id=self.txn_id,
@@ -359,7 +376,9 @@ def recover_interrupted_transactions(
     """
     ws = Path(workspace_root).resolve()
     journal_dir = ws / ".stagecheck_journal"
-    if not journal_dir.is_dir() or journal_dir.is_symlink():
+    if journal_dir.is_symlink():
+        raise JournalError(f"Symlinked journal directory '{journal_dir}' rejected.")
+    if not journal_dir.is_dir():
         return []
 
     records: List[RecoveryRecord] = []
@@ -416,6 +435,21 @@ def recover_interrupted_transactions(
                 pre_images = data.get("pre_images", {})
                 pre_modes = data.get("pre_modes", {})
                 pre_encodings = data.get("pre_encodings", {})
+                if (
+                    not isinstance(pre_images, dict)
+                    or not isinstance(pre_modes, dict)
+                    or not isinstance(pre_encodings, dict)
+                ):
+                    records.append(RecoveryRecord(
+                        txn_id=str(txn_id),
+                        operation=str(operation),
+                        files_restored=[],
+                        files_removed=[],
+                        status="CORRUPTED",
+                        message=f"Malformed pre-image metadata in active journal record '{item.name}' quarantined.",
+                    ))
+                    item.unlink(missing_ok=True)
+                    continue
 
                 restored, removed = _restore_pre_images(ws, pre_images, pre_modes, pre_encodings)
                 processed_any = True

@@ -17,9 +17,17 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.locking import acquire_runtime_lock
-from stagecheck.core.paths import find_workspace_root, resolve_task_dir, safe_resolve
+from stagecheck.core.paths import (
+    StageCheckPathError,
+    find_workspace_root,
+    read_bytes_nofollow,
+    resolve_task_dir,
+    safe_resolve,
+    sha256_file_nofollow,
+    write_text_nofollow,
+)
 from stagecheck.core.permissions import controlled_write_transaction
-from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest, sha256_file
+from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest, sha256_file, strict_json_loads
 
 
 class EvidenceTamperError(Exception):
@@ -35,8 +43,10 @@ def get_manifest_path(workspace_root: Path) -> Path:
 
 
 def load_evidence_manifest(workspace_root: Path) -> Dict[str, Any]:
-    """Load or initialize the EVIDENCE_MANIFEST.json structure."""
+    """Load or initialize the EVIDENCE_MANIFEST.json structure without following symlinks."""
     manifest_path = get_manifest_path(workspace_root)
+    if manifest_path.is_symlink():
+        raise EvidenceTamperError(f"Symlinked EVIDENCE_MANIFEST.json rejected: '{manifest_path}'.")
     if not manifest_path.is_file():
         return {
             "schema_version": "2.0",
@@ -45,8 +55,8 @@ def load_evidence_manifest(workspace_root: Path) -> Dict[str, Any]:
             "entries": {},
         }
     try:
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        raw = read_bytes_nofollow(manifest_path).decode("utf-8")
+        return strict_json_loads(raw, source=str(manifest_path))
     except Exception as err:
         raise EvidenceTamperError(f"Corrupted or unreadable EVIDENCE_MANIFEST.json: {err}") from err
 
@@ -56,15 +66,19 @@ def update_evidence_manifest(
     file_paths: List[Union[str, Path]],
 ) -> Path:
     """Hash given evidence files and update EVIDENCE_MANIFEST.json atomically."""
-    manifest = load_evidence_manifest(workspace_root)
+    ws_root = Path(workspace_root).resolve()
+    manifest = load_evidence_manifest(ws_root)
     entries = manifest.setdefault("entries", {})
 
     for p in file_paths:
-        abs_p = (workspace_root / p).resolve()
-        if not abs_p.is_file():
+        try:
+            abs_p = safe_resolve(p, ws_root, allow_symlinks=False)
+        except StageCheckPathError as err:
+            raise EvidenceTamperError(f"Refusing unsafe/symlinked evidence path '{p}': {err}") from err
+        if abs_p.is_symlink() or not abs_p.is_file():
             continue
-        rel_posix = str(abs_p.relative_to(workspace_root.resolve())).replace("\\", "/")
-        digest = sha256_file(abs_p)
+        rel_posix = str(abs_p.relative_to(ws_root)).replace("\\", "/")
+        digest = sha256_file_nofollow(abs_p)
         size_bytes = abs_p.stat().st_size
 
         entries[rel_posix] = {
@@ -74,7 +88,7 @@ def update_evidence_manifest(
         }
 
     manifest["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    manifest_path = get_manifest_path(workspace_root)
+    manifest_path = safe_resolve("evidence/EVIDENCE_MANIFEST.json", ws_root, allow_symlinks=False)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Temporary file write + atomic replace under controlled permission transaction
@@ -84,10 +98,7 @@ def update_evidence_manifest(
         os.chmod(manifest_dir, 0o755)
 
     try:
-        temp_path = manifest_path.with_suffix(".tmp")
-        with open(temp_path, "w", encoding="utf-8") as f:
-            f.write(pretty_json_dumps(manifest))
-        os.replace(temp_path, manifest_path)
+        write_text_nofollow(manifest_path, pretty_json_dumps(manifest), append=False, mode=0o644)
         manifest_path.chmod(0o444)
     finally:
         if is_ro:
@@ -97,17 +108,17 @@ def update_evidence_manifest(
 
 
 def verify_evidence_manifest(workspace_root: Path) -> Tuple[bool, List[str]]:
-    """Verify that all recorded evidence files exist and match their SHA-256 digests.
-
-    Returns:
-        (is_valid, list_of_defect_messages)
-    """
-    manifest_path = get_manifest_path(workspace_root)
-    if not manifest_path.is_file():
-        return False, ["EVIDENCE_MANIFEST.json is missing."]
+    """Verify that all recorded evidence files and sealed_tasks exist and match SHA-256 digests."""
+    ws_root = Path(workspace_root).resolve()
+    try:
+        manifest_path = safe_resolve("evidence/EVIDENCE_MANIFEST.json", ws_root, allow_symlinks=False)
+    except StageCheckPathError as err:
+        return False, [f"EVIDENCE_MANIFEST.json unsafe path/symlink: {err}"]
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        return False, ["EVIDENCE_MANIFEST.json is missing or symlinked."]
 
     try:
-        manifest = load_evidence_manifest(workspace_root)
+        manifest = load_evidence_manifest(ws_root)
     except EvidenceTamperError as err:
         return False, [str(err)]
 
@@ -115,12 +126,19 @@ def verify_evidence_manifest(workspace_root: Path) -> Tuple[bool, List[str]]:
     violations: List[str] = []
 
     for rel_path, meta in entries.items():
+        if not isinstance(meta, dict):
+            violations.append(f"Tamper defect: Malformed manifest entry metadata for '{rel_path}'.")
+            continue
         expected_hash = meta.get("sha256")
         expected_size = meta.get("size_bytes")
-        abs_path = workspace_root / rel_path
+        try:
+            abs_path = safe_resolve(rel_path, ws_root, allow_symlinks=False)
+        except StageCheckPathError as err:
+            violations.append(f"Tamper defect: Evidence file '{rel_path}' failed containment/symlink check: {err}")
+            continue
 
-        if not abs_path.is_file():
-            violations.append(f"Tamper defect: Evidence file '{rel_path}' is missing.")
+        if abs_path.is_symlink() or not abs_path.is_file():
+            violations.append(f"Tamper defect: Evidence file '{rel_path}' is missing or symlinked.")
             continue
 
         actual_size = abs_path.stat().st_size
@@ -130,11 +148,64 @@ def verify_evidence_manifest(workspace_root: Path) -> Tuple[bool, List[str]]:
             )
             continue
 
-        actual_hash = sha256_file(abs_path)
+        actual_hash = sha256_file_nofollow(abs_path)
         if actual_hash != expected_hash:
             violations.append(
                 f"Tamper defect: Evidence file '{rel_path}' SHA-256 mismatch ({actual_hash[:12]} != {expected_hash[:12]})."
             )
+
+    sealed_tasks = manifest.get("sealed_tasks", {})
+    if isinstance(sealed_tasks, dict):
+        def _verify_indexed_seal(seal_ref: Union[str, Path], expected_sha: Any, label: str) -> None:
+            if not isinstance(expected_sha, str) or not expected_sha:
+                violations.append(f"Tamper defect: sealed_tasks entry '{label}' missing seal_sha256.")
+                return
+            try:
+                seal_abs = safe_resolve(seal_ref, ws_root, allow_symlinks=False)
+            except StageCheckPathError as err:
+                violations.append(f"Tamper defect: Sealed path '{seal_ref}' failed containment/symlink check: {err}")
+                return
+            if seal_abs.is_symlink() or not seal_abs.is_file():
+                violations.append(f"Tamper defect: Indexed seal '{seal_ref}' is missing or symlinked.")
+                return
+            actual_seal_sha = sha256_file_nofollow(seal_abs)
+            if actual_seal_sha != expected_sha:
+                violations.append(
+                    f"Tamper defect: Indexed seal '{seal_ref}' SHA-256 mismatch ({actual_seal_sha[:12]} != {expected_sha[:12]})."
+                )
+
+        for sealed_key, smeta in sealed_tasks.items():
+            if not isinstance(smeta, dict):
+                violations.append(f"Tamper defect: Malformed sealed_tasks metadata for '{sealed_key}'.")
+                continue
+            if "seal_path" in smeta or "seal_sha256" in smeta:
+                seal_rel = smeta.get("seal_path")
+                if not isinstance(seal_rel, str) or not seal_rel:
+                    violations.append(f"Tamper defect: sealed_tasks entry '{sealed_key}' missing seal_path.")
+                    continue
+                _verify_indexed_seal(seal_rel, smeta.get("seal_sha256"), sealed_key)
+                continue
+
+            for attempt_key, ameta in smeta.items():
+                if not isinstance(ameta, dict):
+                    violations.append(
+                        f"Tamper defect: Malformed sealed_tasks attempt metadata for '{sealed_key}.{attempt_key}'."
+                    )
+                    continue
+                if not isinstance(attempt_key, str) or not attempt_key.startswith("attempt_") or not attempt_key[8:].isdigit():
+                    violations.append(
+                        f"Tamper defect: Invalid sealed_tasks attempt key '{attempt_key}' for '{sealed_key}'."
+                    )
+                    continue
+                attempt_idx = int(attempt_key[8:])
+                try:
+                    seal_target = resolve_task_attempt_dir(ws_root, str(sealed_key), attempt_idx) / "seal.json"
+                except Exception as err:
+                    violations.append(
+                        f"Tamper defect: Invalid sealed_tasks target '{sealed_key}.{attempt_key}': {err}"
+                    )
+                    continue
+                _verify_indexed_seal(seal_target, ameta.get("seal_sha256"), f"{sealed_key}.{attempt_key}")
 
     return (len(violations) == 0, violations)
 
@@ -292,15 +363,20 @@ def verify_seal_chain(
     violations: List[str] = []
     prior_expected_hash = "0" * 64
 
+    ws_root = Path(workspace_root).resolve()
     for att in range(1, max_attempt + 1):
-        seal_path = get_task_seal_path(workspace_root, task_id, att)
-        if not seal_path.is_file():
-            violations.append(f"Broken seal chain: Attempt {att} seal.json is missing.")
+        try:
+            seal_path = safe_resolve(f"evidence/tasks/{task_id}/attempt_{att}/seal.json", ws_root, allow_symlinks=False)
+        except StageCheckPathError as err:
+            violations.append(f"Broken seal chain: Attempt {att} seal.json unsafe path/symlink: {err}")
+            break
+        if seal_path.is_symlink() or not seal_path.is_file():
+            violations.append(f"Broken seal chain: Attempt {att} seal.json is missing or symlinked.")
             break
 
         try:
-            with open(seal_path, "r", encoding="utf-8") as f:
-                seal_data = json.load(f)
+            seal_raw = read_bytes_nofollow(seal_path).decode("utf-8")
+            seal_data = strict_json_loads(seal_raw, source=str(seal_path))
         except Exception as err:
             violations.append(f"Broken seal chain: Attempt {att} seal.json unreadable: {err}")
             break
@@ -319,10 +395,10 @@ def verify_seal_chain(
                 violations.append(
                     f"Attempt {att} seal attempt_index mismatch: '{seal_data.get('attempt_index')}' != {att}."
                 )
-            ok, seal_violations = verify_attempt_merkle_seal(seal_path.parent, workspace_root)
+            ok, seal_violations = verify_attempt_merkle_seal(seal_path.parent, ws_root)
             if not ok:
                 violations.extend(seal_violations)
-            prior_expected_hash = sha256_file(seal_path)
+            prior_expected_hash = sha256_file_nofollow(seal_path)
             continue
 
         # Validate metadata fields explicitly (fail closed)
@@ -351,18 +427,34 @@ def verify_seal_chain(
                     f"({recorded_prior[:12]}) does not match attempt {att-1} actual hash ({prior_expected_hash[:12]})."
                 )
 
-        # Verify verdict_sha256 against Phase-3/verdict.json if present
+        # Verify verdict_sha256 against Phase-3/verdict.json (fail closed if recorded non-zero but missing/symlinked)
         attempt_dir = seal_path.parent
-        verdict_path = attempt_dir / "Phase-3" / "verdict.json"
-        if not verdict_path.is_file():
-            verdict_path = attempt_dir / "verdict.json"
         recorded_verdict_sha = seal_data.get("verdict_sha256", "")
-        if verdict_path.is_file():
-            actual_verdict_sha = sha256_file(verdict_path)
+        verdict_candidates = (
+            f"evidence/tasks/{task_id}/attempt_{att}/Phase-3/verdict.json",
+            f"evidence/tasks/{task_id}/attempt_{att}/verdict.json",
+        )
+        verdict_path: Optional[Path] = None
+        for vc in verdict_candidates:
+            try:
+                vp = safe_resolve(vc, ws_root, allow_symlinks=False)
+                if vp.is_file():
+                    verdict_path = vp
+                    break
+            except StageCheckPathError as err:
+                violations.append(f"Attempt {att} verdict.json unsafe path/symlink: {err}")
+                verdict_path = None
+                break
+        if verdict_path is not None:
+            actual_verdict_sha = sha256_file_nofollow(verdict_path)
             if not isinstance(recorded_verdict_sha, str) or not hmac.compare_digest(
                 recorded_verdict_sha, actual_verdict_sha
             ):
                 violations.append(f"Attempt {att} seal verdict_sha256 mismatch against verdict.json.")
+        elif isinstance(recorded_verdict_sha, str) and recorded_verdict_sha and recorded_verdict_sha != "0" * 64:
+            violations.append(
+                f"Attempt {att} seal records non-zero verdict_sha256 but verdict.json is missing."
+            )
 
         # Recompute and verify payload_sha256 over canonical payload fields
         checked_heads = seal_data.get("checked_heads")
@@ -390,7 +482,7 @@ def verify_seal_chain(
                 )
 
         # Update prior_expected_hash for next iteration
-        prior_expected_hash = sha256_file(seal_path)
+        prior_expected_hash = sha256_file_nofollow(seal_path)
 
     return (len(violations) == 0, violations)
 
@@ -404,8 +496,9 @@ def append_issue_history(
 ) -> Path:
     """Append verification results to cumulative TASK_<ID>_ISSUE_HISTORY.md ledger."""
     task_dir = resolve_task_dir(workspace_root, task_id)
+    safe_resolve(f"evidence/tasks/{task_id}", workspace_root, allow_symlinks=False)
     task_dir.mkdir(parents=True, exist_ok=True)
-    history_file = task_dir / f"TASK_{task_id}_ISSUE_HISTORY.md"
+    history_file = safe_resolve(f"evidence/tasks/{task_id}/TASK_{task_id}_ISSUE_HISTORY.md", workspace_root, allow_symlinks=False)
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     lines = [
@@ -430,8 +523,7 @@ def append_issue_history(
         lines.append("All 9 verification stages passed with zero defects.\n")
 
     content_to_append = "".join(lines)
-    with open(history_file, "a", encoding="utf-8") as f:
-        f.write(content_to_append)
+    write_text_nofollow(history_file, content_to_append, append=True, mode=0o644)
 
     # Index history file in evidence manifest
     update_evidence_manifest(workspace_root, [history_file])

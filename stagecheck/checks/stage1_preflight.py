@@ -116,27 +116,30 @@ def run_stage1_preflight(ctx: AuditContext) -> StageResult:
                     )
                 )
 
-    # 4. Check for unresolved placeholders in touched repositories
+    # 4. Check for unresolved placeholders in touched repositories (reject symlinks & >20 MiB reads)
+    max_preflight_bytes = 20 * 1024 * 1024
     for repo_name in ctx.touched_repos:
         repo_dir = ctx.workspace_root / "repos" / repo_name
-        if repo_dir.is_dir():
+        if repo_dir.is_dir() and not repo_dir.is_symlink():
             for p in repo_dir.rglob("*"):
-                if p.is_file() and not any(part.startswith(".") for part in p.relative_to(repo_dir).parts):
-                    try:
-                        text = p.read_text(encoding="utf-8", errors="ignore")
-                        if _PLACEHOLDER_PATTERN.search(text):
-                            defects.append(
-                                Defect(
-                                    defect_id="preflight.unresolved_placeholder",
-                                    message=f"Unresolved template placeholder detected in '{p.relative_to(ctx.workspace_root)}'.",
-                                    stage=stage_id,
-                                    severity="CRITICAL",
-                                    blocking=True,
-                                    repo=repo_name,
-                                )
+                if p.is_symlink() or not p.is_file() or any(part.startswith(".") for part in p.relative_to(repo_dir).parts):
+                    continue
+                try:
+                    from stagecheck.core.paths import read_bytes_nofollow
+                    text = read_bytes_nofollow(p, max_bytes=max_preflight_bytes).decode("utf-8", errors="ignore")
+                    if _PLACEHOLDER_PATTERN.search(text):
+                        defects.append(
+                            Defect(
+                                defect_id="preflight.unresolved_placeholder",
+                                message=f"Unresolved template placeholder detected in '{p.relative_to(ctx.workspace_root)}'.",
+                                stage=stage_id,
+                                severity="CRITICAL",
+                                blocking=True,
+                                repo=repo_name,
                             )
-                    except Exception:
-                        pass
+                        )
+                except Exception:
+                    pass
 
     # 5. Gitleaks Binary & Version Check (SEC-L2) - Fail Closed
     from stagecheck.core.scanner import SecretScanner

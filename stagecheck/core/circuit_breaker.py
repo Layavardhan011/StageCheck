@@ -227,9 +227,12 @@ def write_escalation_report(
     defects: List[Dict[str, Any]],
 ) -> Path:
     """Generate diagnostic escalation_report.md under evidence/tasks/<task_id>/."""
-    task_dir = resolve_task_dir(workspace_root, task_id)
+    from stagecheck.core.paths import find_workspace_root, resolve_task_dir, safe_resolve, write_text_nofollow
+    ws_root = Path(workspace_root).resolve()
+    safe_resolve(f"evidence/tasks/{task_id}", ws_root, allow_symlinks=False)
+    task_dir = resolve_task_dir(ws_root, task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
-    report_file = task_dir / "escalation_report.md"
+    report_file = safe_resolve(f"evidence/tasks/{task_id}/escalation_report.md", ws_root, allow_symlinks=False)
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     lines = [
@@ -265,7 +268,7 @@ def write_escalation_report(
         "- **Option D (Permanent Halt):** Discontinue task; all commits and evidence remain permanently preserved.\n",
     ])
 
-    report_file.write_text("".join(lines), encoding="utf-8")
+    write_text_nofollow(report_file, "".join(lines), append=False, mode=0o644)
     return report_file
 
 

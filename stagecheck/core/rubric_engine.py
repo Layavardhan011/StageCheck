@@ -1864,28 +1864,47 @@ def _collect_rubric_context(
     else:
         start_manifest_err = "Missing specs/START_MANIFEST.md"
 
-    # Phase artifacts
-    prompt_md_ok = (p1_dir / "prompt.md").is_file() and (p1_dir / "prompt.md").stat().st_size > 0
-    declared_scope, declared_scope_err = _safe_load_json(p1_dir / "declared_scope.json")
+    # Phase artifacts (reject symlinks & oversized files)
+    from stagecheck.core.paths import StageCheckPathError, read_bytes_nofollow, safe_resolve, sha256_file_nofollow
+
+    prompt_file = p1_dir / "prompt.md"
+    scope_file = p1_dir / "declared_scope.json"
+    verified_file = p1_dir / "prompt_verified.json"
+    prompt_md_ok = False
+    if not prompt_file.is_symlink() and prompt_file.is_file():
+        try:
+            prompt_md_ok = len(read_bytes_nofollow(prompt_file, max_bytes=20 * 1024 * 1024)) > 0
+        except StageCheckPathError:
+            prompt_md_ok = False
+    declared_scope, declared_scope_err = (None, "symlinked declared_scope.json") if scope_file.is_symlink() else _safe_load_json(scope_file)
     if declared_scope is not None:
         try:
             validate_schema(declared_scope, _get_cached_schema("declared_scope.schema.json"))
         except Exception as err:
             declared_scope_err = str(err)
-    prompt_verified, prompt_verified_err = _safe_load_json(p1_dir / "prompt_verified.json")
-    if prompt_verified is not None and prompt_md_ok and (p1_dir / "declared_scope.json").is_file():
-        exp_p = prompt_verified.get("prompt_sha256")
-        if exp_p and exp_p != sha256_file(p1_dir / "prompt.md"):
-            prompt_verified_err = "prompt.md modified after prompt_verified.json freeze"
-        exp_s = prompt_verified.get("scope_sha256")
-        if exp_s and exp_s != sha256_file(p1_dir / "declared_scope.json"):
-            prompt_verified_err = "declared_scope.json modified after prompt_verified.json freeze"
+    prompt_verified, prompt_verified_err = (None, "symlinked prompt_verified.json") if verified_file.is_symlink() else _safe_load_json(verified_file)
+    if prompt_verified is not None and prompt_md_ok and not scope_file.is_symlink() and scope_file.is_file():
+        try:
+            exp_p = prompt_verified.get("prompt_sha256")
+            if exp_p and exp_p != sha256_file_nofollow(prompt_file):
+                prompt_verified_err = "prompt.md modified after prompt_verified.json freeze"
+            exp_s = prompt_verified.get("scope_sha256")
+            if exp_s and exp_s != sha256_file_nofollow(scope_file):
+                prompt_verified_err = "declared_scope.json modified after prompt_verified.json freeze"
+        except StageCheckPathError as err:
+            prompt_verified_err = f"symlinked prompt artifact rejected: {err}"
 
     pre_commit_status, pre_commit_status_err = _safe_load_json(p2a_dir / "pre_commit_status.json")
     pre_commit_review, pre_commit_review_err = _safe_load_json(p2a_dir / "pre_commit_review.json")
     agent_reviews_doc, _ = _safe_load_json(p2a_dir / "agent_reviews.json")
 
-    report_md_ok = (p2b_dir / "report.md").is_file() and (p2b_dir / "report.md").stat().st_size > 0
+    report_file = p2b_dir / "report.md"
+    report_md_ok = False
+    if not report_file.is_symlink() and report_file.is_file():
+        try:
+            report_md_ok = len(read_bytes_nofollow(report_file, max_bytes=20 * 1024 * 1024)) > 0
+        except StageCheckPathError:
+            report_md_ok = False
     claims_doc, claims_err = _safe_load_json(p2b_dir / "claims.json")
     if claims_doc is not None and isinstance(claims_doc.get("claims"), list):
         try:

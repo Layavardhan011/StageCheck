@@ -139,38 +139,43 @@ def commit_safe_teardown(
     workspace_root: Union[str, Path],
     abort_active: bool = False,
     force: bool = False,
+    elevate: bool = False,
 ) -> None:
-    """Commit active-task abort, Sentinel termination, and teardown audit log after confirmation."""
+    """Commit active-task abort, Sentinel termination, teardown log, and optional unlock under runtime lock."""
     root = Path(workspace_root).resolve()
     from stagecheck.core.locking import acquire_runtime_lock
     from stagecheck.core.state import load_active_state, save_active_state
 
     controls_dir = root / "controls"
-    task_id: Optional[str] = None
-    aborted = False
-
-    if controls_dir.is_dir():
-        with acquire_runtime_lock(controls_dir):
-            state = load_active_state(root)
-            task_id = state.get("task_id")
-            if _is_active_task_state(state) and abort_active:
+    lock_target = controls_dir if controls_dir.is_dir() else root
+    with acquire_runtime_lock(lock_target):
+        state = load_active_state(root)
+        task_id = state.get("task_id")
+        aborted = False
+        if _is_active_task_state(state):
+            if not abort_active:
+                raise ActiveTaskTeardownBlockedError(
+                    f"Teardown blocked: Task '{task_id}' is currently IN_PROGRESS. "
+                    "Unlocking the workspace would compromise active audit evidence. "
+                    "To force termination, supply explicit flag: --abort-active-task"
+                )
+            if controls_dir.is_dir():
                 with controlled_write_transaction(controls_dir):
                     state["phase"] = "ABORTED"
                     state["status"] = "ABORTED"
                     state["turn"] = "IDLE"
                     save_active_state(root, state)
                 aborted = True
-    else:
-        state = load_active_state(root)
-        task_id = state.get("task_id")
 
-    # Guard 3: Structured audit record & sentinel termination
-    log_teardown_audit_event(
-        workspace_root=root,
-        task_id=task_id,
-        aborted=aborted,
-        forced=force,
-    )
+        # Guard 3: Structured audit record & sentinel termination
+        log_teardown_audit_event(
+            workspace_root=root,
+            task_id=task_id,
+            aborted=aborted,
+            forced=force,
+        )
+        if elevate:
+            elevate_permissions_for_teardown(root)
 
 
 def log_teardown_audit_event(
@@ -256,11 +261,13 @@ def apply_at_rest_permissions(workspace_root: Union[str, Path]) -> None:
     tasks_dir = evidence_dir / "tasks"
 
     # 1. Protect controls/
-    if controls_dir.is_dir():
+    if controls_dir.is_dir() and not controls_dir.is_symlink():
         # First ensure directory is writable so we can chmod files inside it
         try:
             os.chmod(str(controls_dir), MODE_DIR_RW)
             for item in controls_dir.iterdir():
+                if item.is_symlink():
+                    continue
                 if item.is_file():
                     if item.name.endswith(".lock"):
                         os.chmod(str(item), 0o600)
@@ -270,12 +277,14 @@ def apply_at_rest_permissions(workspace_root: Union[str, Path]) -> None:
             os.chmod(str(controls_dir), MODE_DIR_RO)
 
     # 2. Protect evidence/
-    if evidence_dir.is_dir():
+    if evidence_dir.is_dir() and not evidence_dir.is_symlink():
         try:
             os.chmod(str(evidence_dir), MODE_DIR_RW)
-            if tasks_dir.is_dir():
+            if tasks_dir.is_dir() and not tasks_dir.is_symlink():
                 os.chmod(str(tasks_dir), MODE_DIR_RW)
             for item in evidence_dir.iterdir():
+                if item.is_symlink():
+                    continue
                 if item.is_file():
                     if item.name.startswith("sentinel"):
                         os.chmod(str(item), MODE_FILE_RW)
@@ -309,12 +318,14 @@ def elevate_permissions_for_teardown(workspace_root: Union[str, Path]) -> None:
     root = Path(workspace_root).resolve()
     for dir_name in ["controls", "evidence"]:
         target_dir = root / dir_name
-        if target_dir.is_dir():
+        if target_dir.is_dir() and not target_dir.is_symlink():
             try:
                 os.chmod(str(target_dir), MODE_DIR_RW)
             except OSError:
                 pass
             for item in target_dir.rglob("*"):
+                if item.is_symlink():
+                    continue
                 try:
                     if item.is_file():
                         os.chmod(str(item), MODE_FILE_RW)
@@ -326,10 +337,15 @@ def elevate_permissions_for_teardown(workspace_root: Union[str, Path]) -> None:
 
 def freeze_phase_directory(phase_dir: Union[str, Path]) -> None:
     """Freeze a completed phase or attempt directory (0555 dir / 0444 files) per Table 10."""
-    p = Path(phase_dir).resolve()
+    raw_p = Path(phase_dir)
+    if raw_p.is_symlink():
+        return
+    p = raw_p.resolve()
     if not p.is_dir():
         return
     for item in p.rglob("*"):
+        if item.is_symlink():
+            continue
         try:
             if item.is_file():
                 os.chmod(str(item), MODE_FILE_RO)
@@ -350,7 +366,10 @@ def controlled_write_transaction(target_dir: Path) -> Generator[None, None, None
     Args:
         target_dir: Directory to temporarily unlock (e.g. controls/ or evidence/).
     """
-    directory = Path(target_dir).resolve()
+    raw_dir = Path(target_dir)
+    if raw_dir.is_symlink():
+        raise TeardownError(f"Security violation: '{raw_dir}' is a symbolic link.")
+    directory = raw_dir.resolve()
     if not directory.is_dir():
         yield
         return
@@ -358,6 +377,8 @@ def controlled_write_transaction(target_dir: Path) -> Generator[None, None, None
     # Temporarily elevate directory to 0755 and existing files to 0644
     os.chmod(str(directory), MODE_DIR_RW)
     for item in directory.iterdir():
+        if item.is_symlink():
+            continue
         if item.is_file() and not item.name.endswith(".lock"):
             try:
                 os.chmod(str(item), MODE_FILE_RW)
@@ -368,6 +389,8 @@ def controlled_write_transaction(target_dir: Path) -> Generator[None, None, None
     finally:
         # Re-apply read-only mode to files and restore directory mode to 0555
         for item in directory.iterdir():
+            if item.is_symlink():
+                continue
             if item.is_file() and not item.name.endswith(".lock"):
                 try:
                     if item.name.startswith("sentinel"):

@@ -92,7 +92,7 @@ def validate_worktree_hierarchy(
     Raises:
         InvalidWorktreePathError: If task_id is invalid or paths escape workspace boundary.
     """
-    if not TASK_ID_REGEX.match(task_id):
+    if not TASK_ID_REGEX.match(task_id) or task_id in (".", "..") or ".." in task_id:
         raise InvalidWorktreePathError(
             f"Invalid task_id '{task_id}'. Must match pattern ^[a-zA-Z0-9._-]+$"
         )
@@ -103,24 +103,11 @@ def validate_worktree_hierarchy(
         )
 
     ws = Path(workspace_root).resolve()
-    base_wt = (ws / ".stagecheck_worktrees").resolve()
-
-    target_repos_dir = base_wt / task_id / f"attempt_{attempt_index}" / "repos"
-
-    # Pre-resolution boundary check
-    if ".." in task_id:
-        raise InvalidWorktreePathError(
-            f"Path traversal detected in task_id '{task_id}'"
-        )
-
+    rel_repos = f".stagecheck_worktrees/{task_id}/attempt_{attempt_index}/repos"
     try:
-        target_repos_dir.relative_to(base_wt)
-    except ValueError:
-        raise InvalidWorktreePathError(
-            f"Target worktree repos directory '{target_repos_dir}' escapes '{base_wt}'"
-        )
-
-    return target_repos_dir
+        return safe_resolve(rel_repos, ws, allow_symlinks=False)
+    except StageCheckPathError as err:
+        raise InvalidWorktreePathError(str(err)) from err
 
 
 class TopologyWorktreeManager:
@@ -176,7 +163,8 @@ class TopologyWorktreeManager:
         if not registered:
             raise WorktreeTopologyError("No registered repositories found for worktree setup.")
 
-        # Ensure container directory exists
+        # Re-validate worktree hierarchy and ensure container directory exists without symlinks
+        validate_worktree_hierarchy(self.workspace_root, self.task_id, self.attempt_index)
         self.repos_container.mkdir(parents=True, exist_ok=True)
 
         layout = TopologyWorktreeLayout(
@@ -214,7 +202,14 @@ class TopologyWorktreeManager:
                         f"No valid baseline commit found for repository '{repo_name}'"
                     )
 
-                worktree_dest = self.repos_container / repo_name
+                try:
+                    worktree_dest = safe_resolve(
+                        f".stagecheck_worktrees/{self.task_id}/attempt_{self.attempt_index}/repos/{repo_name}",
+                        self.workspace_root,
+                        allow_symlinks=False,
+                    )
+                except StageCheckPathError as err:
+                    raise InvalidWorktreePathError(str(err)) from err
                 layout.baselines[repo_name] = baseline.to_dict()
 
                 # Always create detached ephemeral Git worktrees at baseline commit (never symlink live repos/)
@@ -260,7 +255,10 @@ class TopologyWorktreeManager:
 
     def _teardown_items(self, items: List[EphemeralRepoWorktree]) -> None:
         """Internal helper to dismantle worktree items and prune git worktrees."""
-        base_wt = (self.workspace_root / ".stagecheck_worktrees").resolve()
+        try:
+            base_wt = safe_resolve(".stagecheck_worktrees", self.workspace_root, allow_symlinks=False)
+        except StageCheckPathError:
+            return
 
         for item in items:
             if not item.is_active:
@@ -268,38 +266,46 @@ class TopologyWorktreeManager:
 
             try:
                 dest = item.worktree_path
-                # Security: verify parent is strictly within base_wt before symlink check
-                if not dest.parent.resolve().is_relative_to(base_wt):
+                if os.path.islink(dest):
+                    if not os.path.islink(dest.parent) and dest.parent.resolve().is_relative_to(base_wt):
+                        dest.unlink(missing_ok=True)
                     continue
-
-                if item.is_symlink or os.path.islink(dest):
-                    dest.unlink(missing_ok=True)
-                else:
-                    if not dest.resolve().is_relative_to(base_wt):
-                        continue
-                    run_safe_git(
-                        item.original_path,
-                        ["worktree", "remove", "--force", str(dest)],
-                        check=False,
-                    )
-                    run_safe_git(
-                        item.original_path,
-                        ["worktree", "prune"],
-                        check=False,
-                    )
+                resolved_dest = safe_resolve(
+                    dest.relative_to(self.workspace_root),
+                    self.workspace_root,
+                    allow_symlinks=False,
+                )
+                if not resolved_dest.is_relative_to(base_wt):
+                    continue
+                run_safe_git(
+                    item.original_path,
+                    ["worktree", "remove", "--force", str(resolved_dest)],
+                    check=False,
+                )
+                run_safe_git(
+                    item.original_path,
+                    ["worktree", "prune"],
+                    check=False,
+                )
             except Exception:
                 pass
             finally:
                 item.is_active = False
 
         # Finally, remove attempt directory if empty or leftover
-        if self.attempt_root.exists():
+        if self.attempt_root.exists() and not os.path.islink(self.attempt_root):
             self._cleanup_directory_safely(self.attempt_root)
 
     def _cleanup_directory_safely(self, target_dir: Path) -> None:
         """Safely remove target directory verifying it does not escape .stagecheck_worktrees."""
-        base_wt = (self.workspace_root / ".stagecheck_worktrees").resolve()
-        resolved = target_dir.resolve()
+        if os.path.islink(target_dir):
+            return
+        try:
+            base_wt = safe_resolve(".stagecheck_worktrees", self.workspace_root, allow_symlinks=False)
+            rel_target = target_dir.relative_to(self.workspace_root)
+            resolved = safe_resolve(rel_target, self.workspace_root, allow_symlinks=False)
+        except (StageCheckPathError, ValueError):
+            return
         if resolved != base_wt and resolved.is_relative_to(base_wt):
             shutil.rmtree(resolved, ignore_errors=True)
 
@@ -331,11 +337,11 @@ def prune_abandoned_worktrees(workspace_root: Union[str, Path]) -> None:
     """Crash recovery helper: clean orphaned worktree directories and prune stale git worktrees."""
     ws = Path(workspace_root).resolve()
 
-    # Clean orphaned worktrees on disk first
+    # Clean orphaned worktrees on disk first (rejecting symlinks at root and entries)
     wt_dir = ws / ".stagecheck_worktrees"
-    if wt_dir.is_dir():
+    if not os.path.islink(wt_dir) and wt_dir.is_dir():
         for item in wt_dir.iterdir():
-            if item.is_dir():
+            if not os.path.islink(item) and item.is_dir():
                 shutil.rmtree(item, ignore_errors=True)
 
     # Prune git internal worktree tracking records

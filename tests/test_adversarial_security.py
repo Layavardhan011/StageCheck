@@ -520,6 +520,165 @@ class TestAdversarialSecurity(unittest.TestCase):
         self.assertFalse(is_valid)
         self.assertTrue(len(violations) > 0)
 
+    def test_adversarial_batch4_symlink_lockfile_rejected(self) -> None:
+        """Symlinked runtime or bootstrap lockfile must fail closed with LockError."""
+        from stagecheck.core.locking import LockError, acquire_bootstrap_lock
+        lock_path = self.ws / ".stagecheck.lock"
+        lock_path.unlink(missing_ok=True)
+        lock_path.symlink_to(self.ws / "controls" / "ACTIVE_STATE.json")
+        with self.assertRaises(LockError):
+            with acquire_runtime_lock(self.ws / "controls"):
+                pass
+        lock_path.unlink(missing_ok=True)
+
+        boot_lock = self.ws / ".stagecheck-init.lock"
+        boot_lock.unlink(missing_ok=True)
+        boot_lock.symlink_to(self.ws / "README_NONEXISTENT.md")
+        with self.assertRaises(LockError):
+            with acquire_bootstrap_lock(self.ws):
+                pass
+        boot_lock.unlink(missing_ok=True)
+
+    def test_adversarial_batch4_teardown_active_task_guard(self) -> None:
+        """commit_safe_teardown blocks active IN_PROGRESS task unless abort_active=True."""
+        from stagecheck.core.permissions import ActiveTaskTeardownBlockedError, commit_safe_teardown
+        with controlled_write_transaction(self.ws / "controls"):
+            state = load_active_state(self.ws)
+            state["task_id"] = "task-active-teardown"
+            state["phase"] = "PHASE_2A_CODING"
+            state["status"] = "IN_PROGRESS"
+            save_active_state(self.ws, state)
+
+        with self.assertRaises(ActiveTaskTeardownBlockedError):
+            commit_safe_teardown(self.ws, abort_active=False)
+
+        commit_safe_teardown(self.ws, abort_active=True, elevate=True)
+        final_state = load_active_state(self.ws)
+        self.assertEqual(final_state["status"], "ABORTED")
+
+    def test_adversarial_batch4_topology_and_stage4_stage7_symlinks(self) -> None:
+        """Topology, Stage 4 report lint, and Stage 7 qual naming must reject symlinks."""
+        from stagecheck.checks.base import AuditContext
+        from stagecheck.checks.stage4_report_lint import run_stage4_report_lint
+        from stagecheck.checks.stage7_qual_naming import run_stage7_qual_naming
+        from stagecheck.core.paths import StageCheckPathError
+        from stagecheck.core.topology import validate_worktree_hierarchy
+
+        wt_root = self.ws / ".stagecheck_worktrees"
+        outside = Path(self.temp_dir.name) / "outside_dir"
+        outside.mkdir(parents=True, exist_ok=True)
+        if wt_root.exists() or wt_root.is_symlink():
+            if wt_root.is_symlink() or wt_root.is_file():
+                wt_root.unlink()
+            else:
+                shutil.rmtree(wt_root)
+        wt_root.symlink_to(outside)
+        with self.assertRaises((StageCheckPathError, Exception)):
+            validate_worktree_hierarchy(self.ws, wt_root)
+
+        task_dir = resolve_task_attempt_dir(self.ws, "task-sym-47", 1)
+        p3_dir = task_dir / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        target_secret = self.ws / "repos" / "backend" / "README.md"
+        (p3_dir / "report.md").symlink_to(target_secret)
+
+        ctx = AuditContext(
+            workspace_root=self.ws,
+            task_id="task-sym-47",
+            attempt=1,
+            touched_repos=["backend"],
+            all_registered_repos=["backend", "frontend"],
+        )
+        res4 = run_stage4_report_lint(ctx)
+        self.assertFalse(res4.is_clear)
+
+        qual_dir = task_dir / "qual"
+        qual_dir.mkdir(parents=True, exist_ok=True)
+        (qual_dir / "test_fake.py").symlink_to(target_secret)
+        res7 = run_stage7_qual_naming(ctx)
+        self.assertFalse(res7.is_clear)
+
+    def test_adversarial_batch4_prompt_gate_and_evidence_symlink_guards(self) -> None:
+        """Prompt gate rejects symlinked prompt.md and mismatched task_id scope; manifest rejects missing seal."""
+        from stagecheck.core.evidence import verify_evidence_manifest
+        from stagecheck.core.prompt_gate import PromptGateError, freeze_prompt_and_scope
+
+        p1_dir = self.ws / "evidence" / "tasks" / "task-pg-sym" / "attempt_1" / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").symlink_to(self.ws / "repos" / "backend" / "README.md")
+        (p1_dir / "declared_scope.json").write_text(
+            json.dumps({"schema_version": "2.0.0", "task_id": "task-pg-sym", "allowed_paths": ["repos/backend/README.md"]}),
+            encoding="utf-8",
+        )
+        with self.assertRaises(PromptGateError):
+            freeze_prompt_and_scope(self.ws, "task-pg-sym", 1)
+
+        (p1_dir / "prompt.md").unlink()
+        (p1_dir / "prompt.md").write_text("# Valid prompt\n", encoding="utf-8")
+        (p1_dir / "declared_scope.json").write_text(
+            json.dumps({"schema_version": "2.0.0", "task_id": "other-task", "allowed_paths": ["repos/backend/README.md"]}),
+            encoding="utf-8",
+        )
+        with self.assertRaises(PromptGateError):
+            freeze_prompt_and_scope(self.ws, "task-pg-sym", 1)
+
+        # EVIDENCE_MANIFEST.json indexing a missing seal.json fails closed
+        manifest_file = self.ws / "evidence" / "EVIDENCE_MANIFEST.json"
+        with controlled_write_transaction(self.ws / "evidence"):
+            manifest_file.write_text(
+                json.dumps({
+                    "schema_version": "2.0.0",
+                    "sealed_tasks": {
+                        "task-missing-seal": {
+                            "attempt_1": {
+                                "seal_sha256": "a" * 64,
+                                "merkle_root_sha256": "b" * 64,
+                                "total_files": 0,
+                            }
+                        }
+                    },
+                }),
+                encoding="utf-8",
+            )
+        is_valid, violations = verify_evidence_manifest(self.ws)
+        self.assertFalse(is_valid)
+        self.assertTrue(any("missing or symlinked" in v for v in violations))
+
+    def test_adversarial_batch4_journal_symlink_and_corrupt_preimages_quarantined(self) -> None:
+        """Symlinked journal fails closed; non-dict pre_images quarantined; rollback restores read-only mode."""
+        from stagecheck.core.journal import JournalError
+
+        controls_file = self.ws / "controls" / "ACTIVE_STATE.json"
+        orig_text = controls_file.read_text(encoding="utf-8")
+        with self.assertRaises(RuntimeError):
+            with write_ahead_transaction(self.ws, "ROLLBACK_MODE_CHECK") as j:
+                j.record_pre_image(controls_file)
+                controls_file.chmod(0o644)
+                controls_file.write_text("{}", encoding="utf-8")
+                raise RuntimeError("boom")
+        self.assertEqual(controls_file.read_text(encoding="utf-8"), orig_text)
+        self.assertEqual(controls_file.stat().st_mode & 0o777, 0o444)
+
+        jdir = self.ws / ".stagecheck_journal"
+        jdir.mkdir(parents=True, exist_ok=True)
+        bad_txn = jdir / "bad_txn.active.json"
+        bad_txn.write_text(json.dumps({
+            "txn_id": "bad-01",
+            "operation": "TEST",
+            "pre_images": ["not-a-dict"],
+            "pre_modes": {},
+        }), encoding="utf-8")
+        recs = recover_interrupted_transactions(self.ws)
+        self.assertTrue(any(r.txn_id == "bad-01" and r.status == "CORRUPTED" for r in recs))
+        self.assertFalse(bad_txn.exists())
+
+        shutil.rmtree(jdir)
+        outside = Path(self.temp_dir.name) / "outside_journal"
+        outside.mkdir(parents=True, exist_ok=True)
+        jdir.symlink_to(outside)
+        with self.assertRaises(JournalError):
+            recover_interrupted_transactions(self.ws)
+
 
 if __name__ == "__main__":
     unittest.main()

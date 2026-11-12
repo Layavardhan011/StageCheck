@@ -8,11 +8,17 @@ with milestone-aware empty-suite semantics (GAP-B2, GAP-AE1).
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 from pathlib import Path
 from typing import Any, Dict, List
 
 from stagecheck.checks.base import AuditContext, Defect, StageResult
+from stagecheck.core.paths import StageCheckPathError, is_path_contained, safe_resolve
+
+MAX_QUAL_SCAN_ENTRIES = 10000
+MAX_QUAL_SCAN_DEPTH = 32
 
 # Supported qualification test file patterns across major language ecosystems
 QUAL_TEST_NAME_PATTERNS = [
@@ -75,8 +81,46 @@ def run_stage7_qual_naming(ctx: AuditContext) -> StageResult:
     if ctx.declared_scope and "requires_qualification_tests" in ctx.declared_scope:
         requires_qualification_tests = bool(ctx.declared_scope["requires_qualification_tests"])
 
-    qual_dir = ctx.workspace_root / qual_root_rel
-    if not qual_dir.exists() or not qual_dir.is_dir():
+    if not isinstance(qual_root_rel, str) or not qual_root_rel.strip() or Path(qual_root_rel).is_absolute():
+        defects.append(
+            Defect(
+                defect_id="qual_naming.unsafe_root",
+                message=f"Invalid qualification_root: '{qual_root_rel}'",
+                stage=stage_id,
+                severity="CRITICAL",
+                blocking=True,
+            )
+        )
+        return StageResult(stage_id=stage_id, status="FAIL", defects=defects, errors=errors)
+
+    resolved_ws = ctx.workspace_root.resolve()
+    try:
+        qual_dir = safe_resolve(qual_root_rel, resolved_ws, allow_symlinks=False)
+    except StageCheckPathError as err:
+        defects.append(
+            Defect(
+                defect_id="qual_naming.unsafe_root",
+                message=f"Qualification root failed symlink/containment check: {err}",
+                stage=stage_id,
+                severity="CRITICAL",
+                blocking=True,
+            )
+        )
+        return StageResult(stage_id=stage_id, status="FAIL", defects=defects, errors=errors)
+
+    if qual_dir == resolved_ws:
+        defects.append(
+            Defect(
+                defect_id="qual_naming.unsafe_root",
+                message="Qualification root cannot be workspace_root itself.",
+                stage=stage_id,
+                severity="CRITICAL",
+                blocking=True,
+            )
+        )
+        return StageResult(stage_id=stage_id, status="FAIL", defects=defects, errors=errors)
+
+    if qual_dir.is_symlink() or not qual_dir.exists() or not qual_dir.is_dir():
         defects.append(
             Defect(
                 defect_id="qual_naming.directory_missing",
@@ -88,28 +132,61 @@ def run_stage7_qual_naming(ctx: AuditContext) -> StageResult:
         )
         return StageResult(stage_id=stage_id, status="FAIL", defects=defects, errors=errors)
 
-    # 2. Enumerate qualification test files
+    # 2. Enumerate qualification test files (reject symlinks, cap depth and entry count)
     qual_test_files: List[Path] = []
     invalid_test_files: List[Path] = []
 
     try:
-        for path in qual_dir.rglob("*"):
-            if not path.is_file():
-                continue
-            fname = path.name
-            if _is_allowed_companion(fname):
-                continue
-            if _is_valid_qual_test_name(fname):
-                qual_test_files.append(path)
-            else:
-                # Potential code/test file that violates naming conventions
-                invalid_test_files.append(path)
+        scanned = 0
+        scan_aborted = False
+        for walk_root, dirs, files in os.walk(str(qual_dir), followlinks=False):
+            if len(Path(walk_root).relative_to(qual_dir).parts) >= MAX_QUAL_SCAN_DEPTH and dirs:
+                errors.append(f"Qualification directory scan exceeded max depth ({MAX_QUAL_SCAN_DEPTH}).")
+                dirs.clear()
+                scan_aborted = True
+                break
+            for name in list(dirs) + list(files):
+                scanned += 1
+                if scanned > MAX_QUAL_SCAN_ENTRIES:
+                    errors.append(f"Qualification directory scan exceeded entry limit ({MAX_QUAL_SCAN_ENTRIES}).")
+                    dirs.clear()
+                    scan_aborted = True
+                    break
+                entry = Path(walk_root) / name
+                st = os.lstat(str(entry))
+                if stat.S_ISLNK(st.st_mode) or not is_path_contained(entry, qual_dir):
+                    defects.append(
+                        Defect(
+                            defect_id="qual_naming.unauthorized_symlink",
+                            message=f"Symlink or out-of-bounds entry in qualification root: '{name}'",
+                            stage=stage_id,
+                            severity="CRITICAL",
+                            blocking=True,
+                        )
+                    )
+                    if name in dirs:
+                        dirs.remove(name)
+                    continue
+                if name in files and stat.S_ISREG(st.st_mode):
+                    fname = entry.name
+                    if _is_allowed_companion(fname):
+                        continue
+                    if _is_valid_qual_test_name(fname):
+                        qual_test_files.append(entry)
+                    else:
+                        invalid_test_files.append(entry)
+            if scan_aborted:
+                break
     except Exception as err:
         errors.append(f"Error scanning qualification directory '{qual_root_rel}': {err}")
 
     # 3. Check for naming violations
     for invalid_file in invalid_test_files:
-        rel_f = invalid_file.relative_to(ctx.workspace_root)
+        try:
+            rel_f = invalid_file.relative_to(resolved_ws)
+        except ValueError as err:
+            errors.append(f"Out-of-bounds qualification file '{invalid_file}': {err}")
+            continue
         defects.append(
             Defect(
                 defect_id="qual_naming.invalid_test_name",

@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
-from stagecheck.core.paths import is_path_contained, safe_resolve
-from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_file, validate_schema
+from stagecheck.core.paths import StageCheckPathError, is_path_contained, read_bytes_nofollow, safe_resolve, sha256_file_nofollow, write_text_nofollow
+from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_file, strict_json_loads, validate_schema
 from stagecheck.schemas import get_schema_path
 
 
@@ -176,28 +176,23 @@ def validate_declared_scope(
 
 
 def verify_prompt_blueprint(prompt_path: Path) -> str:
-    """Verify that prompt.md exists, is non-empty, and return its SHA-256 digest.
-
-    Args:
-        prompt_path: Path to prompt.md.
-
-    Returns:
-        Hex-encoded SHA-256 digest of the prompt file.
-
-    Raises:
-        PromptMissingError: If prompt.md is missing.
-        PromptGateError: If prompt.md is empty.
-    """
+    """Verify that prompt.md exists, is not a symlink, is non-empty, and return its SHA-256 digest."""
+    if prompt_path.is_symlink():
+        raise PromptTamperedError(f"Symlinked prompt blueprint rejected: '{prompt_path}'.")
     if not prompt_path.is_file():
         raise PromptMissingError(f"Prompt blueprint file not found: '{prompt_path}'.")
 
-    content = prompt_path.read_text(encoding="utf-8").strip()
+    try:
+        raw = read_bytes_nofollow(prompt_path, max_bytes=20 * 1024 * 1024)
+    except StageCheckPathError as err:
+        raise PromptTamperedError(f"Unsafe prompt blueprint '{prompt_path}': {err}") from err
+    content = raw.decode("utf-8").strip()
     if len(content) < 10:
         raise PromptGateError(
             f"Prompt blueprint '{prompt_path}' is empty or trivial (<10 characters)."
         )
 
-    return sha256_file(prompt_path)
+    return sha256_file_nofollow(prompt_path)
 
 
 def freeze_prompt_and_scope(
@@ -207,50 +202,46 @@ def freeze_prompt_and_scope(
     target_repositories: Optional[List[str]] = None,
     freeze_reason: str = "INOTIFY_SILENCE_30S",
 ) -> Path:
-    """Validate prompt.md and declared_scope.json, and generate prompt_verified.json record.
-
-    Freezes the prompt by calculating digests and locking file permissions to 0444.
-
-    Args:
-        workspace_root: Root workspace path.
-        task_id: Task identifier (e.g. task-101).
-        attempt: Attempt number.
-        target_repositories: Optional approved repos list.
-
-    Returns:
-        Path to generated prompt_verified.json.
-    """
+    """Validate prompt.md and declared_scope.json, and generate prompt_verified.json record."""
     root = Path(workspace_root).resolve()
-    attempt_dir = resolve_task_attempt_dir(root, task_id, attempt, ensure_exists=True)
-    phase1_dir = attempt_dir / "Phase-1"
-    phase1_dir.mkdir(parents=True, exist_ok=True)
+    resolve_task_attempt_dir(root, task_id, attempt, ensure_exists=True)
+    rel_p1 = f"evidence/tasks/{task_id}/attempt_{attempt}/Phase-1"
+    try:
+        phase1_dir = safe_resolve(rel_p1, root, allow_symlinks=False)
+        phase1_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = safe_resolve(f"{rel_p1}/prompt.md", root, allow_symlinks=False)
+        scope_path = safe_resolve(f"{rel_p1}/declared_scope.json", root, allow_symlinks=False)
+        verified_record_path = safe_resolve(f"{rel_p1}/prompt_verified.json", root, allow_symlinks=False)
+    except StageCheckPathError as err:
+        raise PromptTamperedError(f"Symlink or path escape in Phase-1 directory: {err}") from err
 
-    prompt_path = phase1_dir / "prompt.md"
-    scope_path = phase1_dir / "declared_scope.json"
-    verified_record_path = phase1_dir / "prompt_verified.json"
-
-    if not prompt_path.is_file():
+    if prompt_path.is_symlink() or not prompt_path.is_file():
         raise PromptMissingError(
-            f"Missing required blueprint '{prompt_path}'. Cannot verify prompt."
+            f"Missing required regular file '{prompt_path}'. Cannot verify prompt."
         )
 
-    if not scope_path.is_file():
+    if scope_path.is_symlink() or not scope_path.is_file():
         raise PromptMissingError(
-            f"Missing required scope declaration '{scope_path}'. Cannot verify prompt."
+            f"Missing required regular file '{scope_path}'. Cannot verify prompt."
         )
 
     # 1. Validate prompt
     prompt_sha256 = verify_prompt_blueprint(prompt_path)
 
-    # 2. Validate declared scope against authoritative target_repositories
+    # 2. Validate declared scope against authoritative target_repositories & task binding
     try:
-        scope_data = json.loads(scope_path.read_text(encoding="utf-8"))
+        scope_raw = read_bytes_nofollow(scope_path, max_bytes=20 * 1024 * 1024).decode("utf-8")
+        scope_data = strict_json_loads(scope_raw, source=str(scope_path))
     except Exception as err:
         raise ScopeValidationError(f"declared_scope.json is not valid JSON: {err}") from err
 
     resolved_targets = target_repositories if target_repositories is not None else _resolve_target_repositories(root)
     validate_declared_scope(root, scope_data, target_repositories=resolved_targets)
-    scope_sha256 = sha256_file(scope_path)
+    if scope_data.get("task_id") != task_id:
+        raise ScopeValidationError(
+            f"declared_scope.json task_id '{scope_data.get('task_id')}' does not match active task '{task_id}'."
+        )
+    scope_sha256 = sha256_file_nofollow(scope_path)
 
     # 3. Create prompt_verified.json
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -271,17 +262,16 @@ def freeze_prompt_and_scope(
         rec_schema = json.load(f)
     validate_schema(record_data, rec_schema)
 
-    # Write atomically
-    tmp_path = phase1_dir / f".prompt_verified.tmp.{os.getpid()}"
-    tmp_path.write_text(pretty_json_dumps(record_data), encoding="utf-8")
-    os.replace(tmp_path, verified_record_path)
+    # Write atomically without following symlinks
+    write_text_nofollow(verified_record_path, pretty_json_dumps(record_data), append=False, mode=0o644)
 
-    # Apply read-only mode to frozen Phase-1 files (defense-in-depth)
+    # Apply read-only mode to frozen regular Phase-1 files (defense-in-depth)
     for p in [prompt_path, scope_path, verified_record_path]:
-        try:
-            os.chmod(str(p), 0o444)
-        except OSError:
-            pass
+        if not p.is_symlink():
+            try:
+                os.chmod(str(p), 0o444)
+            except OSError:
+                pass
 
     return verified_record_path
 
@@ -291,28 +281,20 @@ def assert_prompt_invariance(
     task_id: str,
     attempt: int = 1,
 ) -> Dict[str, Any]:
-    """Assert that prompt.md and declared_scope.json match the frozen prompt_verified.json.
-
-    Args:
-        workspace_root: Root workspace path.
-        task_id: Task identifier.
-        attempt: Attempt number.
-
-    Returns:
-        Verified record data if matches.
-
-    Raises:
-        PromptNotVerifiedError: If prompt_verified.json is absent.
-        PromptTamperedError: If prompt.md or declared_scope.json was modified.
-    """
+    """Assert that prompt.md and declared_scope.json match the frozen prompt_verified.json."""
     root = Path(workspace_root).resolve()
-    attempt_dir = resolve_task_attempt_dir(root, task_id, attempt)
-    phase1_dir = attempt_dir / "Phase-1"
+    resolve_task_attempt_dir(root, task_id, attempt)
+    rel_p1 = f"evidence/tasks/{task_id}/attempt_{attempt}/Phase-1"
+    try:
+        safe_resolve(rel_p1, root, allow_symlinks=False)
+        prompt_path = safe_resolve(f"{rel_p1}/prompt.md", root, allow_symlinks=False)
+        scope_path = safe_resolve(f"{rel_p1}/declared_scope.json", root, allow_symlinks=False)
+        verified_record_path = safe_resolve(f"{rel_p1}/prompt_verified.json", root, allow_symlinks=False)
+    except StageCheckPathError as err:
+        raise PromptTamperedError(f"Symlink or path escape in Phase-1 artifacts: {err}") from err
 
-    prompt_path = phase1_dir / "prompt.md"
-    scope_path = phase1_dir / "declared_scope.json"
-    verified_record_path = phase1_dir / "prompt_verified.json"
-
+    if verified_record_path.is_symlink():
+        raise PromptTamperedError(f"Symlinked prompt_verified.json rejected: '{verified_record_path}'.")
     if not verified_record_path.is_file():
         raise PromptNotVerifiedError(
             f"Gate failure: Prompt blueprint has not been verified for task '{task_id}', "
@@ -320,19 +302,26 @@ def assert_prompt_invariance(
         )
 
     try:
-        record_data = json.loads(verified_record_path.read_text(encoding="utf-8"))
+        rec_raw = read_bytes_nofollow(verified_record_path, max_bytes=5 * 1024 * 1024).decode("utf-8")
+        record_data = strict_json_loads(rec_raw, source=str(verified_record_path))
     except Exception as err:
         raise PromptTamperedError(
             f"Prompt verification record '{verified_record_path}' is corrupted: {err}"
         ) from err
 
-    if not prompt_path.is_file():
+    if record_data.get("task_id") != task_id or record_data.get("attempt") != attempt:
         raise PromptTamperedError(
             f"Preflight defect [preflight.prompt_tampered_post_verification]: "
-            f"Verified prompt '{prompt_path}' was deleted post-verification."
+            f"prompt_verified.json task_id/attempt binding mismatch ({record_data.get('task_id')!r}/{record_data.get('attempt')!r} != {task_id!r}/{attempt!r})."
         )
 
-    current_prompt_sha256 = sha256_file(prompt_path)
+    if prompt_path.is_symlink() or not prompt_path.is_file():
+        raise PromptTamperedError(
+            f"Preflight defect [preflight.prompt_tampered_post_verification]: "
+            f"Verified prompt '{prompt_path}' was deleted or replaced with symlink post-verification."
+        )
+
+    current_prompt_sha256 = sha256_file_nofollow(prompt_path)
     if current_prompt_sha256 != record_data.get("prompt_sha256"):
         raise PromptTamperedError(
             f"Preflight defect [preflight.prompt_tampered_post_verification]: "
@@ -340,13 +329,13 @@ def assert_prompt_invariance(
             f"'{record_data.get('prompt_sha256')}'."
         )
 
-    if not scope_path.is_file():
+    if scope_path.is_symlink() or not scope_path.is_file():
         raise PromptTamperedError(
             f"Preflight defect [preflight.prompt_tampered_post_verification]: "
-            f"Verified declared_scope.json '{scope_path}' was deleted post-verification."
+            f"Verified declared_scope.json '{scope_path}' was deleted or replaced with symlink post-verification."
         )
 
-    current_scope_sha256 = sha256_file(scope_path)
+    current_scope_sha256 = sha256_file_nofollow(scope_path)
     if current_scope_sha256 != record_data.get("scope_sha256"):
         raise PromptTamperedError(
             f"Preflight defect [preflight.prompt_tampered_post_verification]: "

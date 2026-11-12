@@ -24,7 +24,7 @@
       "required": ["qualification_root"],
       "additionalProperties": false,
       "properties": {
-        "qualification_root": {"type": "string"}
+        "qualification_root": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*\\.\\.(?:/|$)).+$"}
       }
     },
     "dispositions": {

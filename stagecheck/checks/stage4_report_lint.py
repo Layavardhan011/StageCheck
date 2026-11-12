@@ -7,6 +7,9 @@ from pathlib import Path
 
 from stagecheck.checks.base import AuditContext, Defect, StageResult
 from stagecheck.core.agents import resolve_task_attempt_dir
+from stagecheck.core.paths import StageCheckPathError, read_bytes_nofollow, safe_resolve
+
+MAX_REPORT_BYTES = 20 * 1024 * 1024  # 20 MiB
 
 _INJECTION_PATTERNS = [
     re.compile(r"ignore\s+(?:all\s+)?(?:previous\s+)?instructions", re.IGNORECASE),
@@ -21,14 +24,26 @@ def run_stage4_report_lint(ctx: AuditContext) -> StageResult:
     defects = []
     errors = []
 
-    attempt_dir = resolve_task_attempt_dir(ctx.workspace_root, ctx.task_id, ctx.attempt)
-    report_file = attempt_dir / "Phase-2B" / "report.md"
+    rel_report = f"evidence/tasks/{ctx.task_id}/attempt_{ctx.attempt}/Phase-2B/report.md"
+    try:
+        report_file = safe_resolve(rel_report, ctx.workspace_root, allow_symlinks=False)
+    except StageCheckPathError as err:
+        defects.append(
+            Defect(
+                defect_id="report_lint.unsafe_delivery_report_path",
+                message=f"Delivery report path failed symlink/containment validation: {err}",
+                stage=stage_id,
+                severity="CRITICAL",
+                blocking=True,
+            )
+        )
+        return StageResult(stage_id=stage_id, status="FAIL", defects=defects, errors=errors)
 
-    if not report_file.is_file():
+    if report_file.is_symlink() or not report_file.is_file():
         defects.append(
             Defect(
                 defect_id="report_lint.missing_delivery_report",
-                message=f"Delivery report '{report_file.relative_to(ctx.workspace_root)}' is missing.",
+                message=f"Delivery report '{report_file.relative_to(ctx.workspace_root.resolve())}' is missing or symlinked.",
                 stage=stage_id,
                 severity="HIGH",
                 blocking=True,
@@ -37,7 +52,7 @@ def run_stage4_report_lint(ctx: AuditContext) -> StageResult:
         return StageResult(stage_id=stage_id, status="FAIL", defects=defects, errors=errors)
 
     try:
-        content = report_file.read_text(encoding="utf-8")
+        content = read_bytes_nofollow(report_file, max_bytes=MAX_REPORT_BYTES).decode("utf-8")
         if len(content.strip()) < 20:
             defects.append(
                 Defect(
