@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
-from stagecheck.core.git import SAFE_GIT_SECURITY_FLAGS, run_safe_git, run_safe_git_bytes
+from stagecheck.core.git import SAFE_GIT_SECURITY_FLAGS, run_safe_git, run_safe_git_bytes, split_git_nul_paths
 from stagecheck.core.paths import StageCheckPathError, resolve_task_dir, safe_resolve
 from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest, validate_schema
 from stagecheck.schemas import get_schema_path
@@ -138,10 +138,10 @@ def inspect_untracked_files(repo_path: Path) -> Tuple[List[str], int, int]:
 
     res = run_safe_git(
         repo_path,
-        ["ls-files", "--others", "--exclude-standard"],
+        ["ls-files", "--others", "--exclude-standard", "-z"],
         check=True,
     )
-    untracked = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+    untracked = split_git_nul_paths(res.stdout)
 
     if len(untracked) > MAX_UNTRACKED_COUNT:
         raise UntrackedCountExceededError(
@@ -216,23 +216,23 @@ def verify_precommit_scope(
 
         modified_files: Set[str] = set()
 
-        res_tracked = run_safe_git(repo_path, ["diff", "--name-only", "--end-of-options", base_commit, "--"])
+        res_tracked = run_safe_git(repo_path, ["diff", "--name-only", "-z", "--end-of-options", base_commit, "--"])
         if res_tracked.returncode != 0:
             violations.append(f"Failed git diff in '{repo_name}' against base '{base_commit}': {res_tracked.stderr.strip()}")
             continue
-        for f in res_tracked.stdout.splitlines():
-            if f.strip():
-                modified_files.add(f.strip())
+        modified_files.update(split_git_nul_paths(res_tracked.stdout))
 
-        res_staged = run_safe_git(repo_path, ["diff", "--cached", "--name-only"])
-        for f in res_staged.stdout.splitlines():
-            if f.strip():
-                modified_files.add(f.strip())
+        res_staged = run_safe_git(repo_path, ["diff", "--cached", "--name-only", "-z", "--end-of-options"])
+        if res_staged.returncode != 0:
+            violations.append(f"Failed git diff --cached in '{repo_name}': {res_staged.stderr.strip()}")
+            continue
+        modified_files.update(split_git_nul_paths(res_staged.stdout))
 
-        res_untracked = run_safe_git(repo_path, ["ls-files", "--others", "--exclude-standard"])
-        for f in res_untracked.stdout.splitlines():
-            if f.strip():
-                modified_files.add(f.strip())
+        res_untracked = run_safe_git(repo_path, ["ls-files", "--others", "--exclude-standard", "-z"])
+        if res_untracked.returncode != 0:
+            violations.append(f"Failed git ls-files in '{repo_name}': {res_untracked.stderr.strip()}")
+            continue
+        modified_files.update(split_git_nul_paths(res_untracked.stdout))
 
         for rel_file in sorted(modified_files):
             ws_rel = f"repos/{repo_name}/{rel_file}"

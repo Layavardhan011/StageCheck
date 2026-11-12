@@ -1017,7 +1017,7 @@ def compute_uncommitted_state_digest(
     uncommitted_diffs: Optional[Dict[str, str]] = None,
 ) -> Tuple[Dict[str, str], str]:
     """Compute per-repo HEAD map and deterministic SHA-256 over uncommitted working-tree state."""
-    from stagecheck.core.git import run_safe_git
+    from stagecheck.core.git import parse_git_porcelain_z, run_safe_git
 
     root = Path(workspace_root).resolve()
     if repo_dirs is None:
@@ -1036,19 +1036,22 @@ def compute_uncommitted_state_digest(
             if head_res.returncode == 0:
                 heads[r_dir.name] = head_res.stdout.strip()
         if uncommitted_diffs is None:
-            st_res = run_safe_git(r_dir, ["status", "--porcelain=v1", "--untracked-files=all"])
-            if st_res.returncode == 0 and st_res.stdout.rstrip("\r\n"):
-                porcelain_map[r_dir.name] = st_res.stdout.rstrip("\r\n")
+            st_res = run_safe_git(r_dir, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+            if st_res.returncode == 0 and st_res.stdout:
+                porcelain_map[r_dir.name] = st_res.stdout
 
         raw_porcelain = porcelain_map.get(r_dir.name, "")
         if raw_porcelain:
-            for line in raw_porcelain.splitlines():
-                raw_line = line.rstrip("\r\n")
-                if not raw_line or len(raw_line) <= 3:
-                    continue
-                rel_p = raw_line[3:].strip()
-                if " -> " in rel_p:
-                    rel_p = rel_p.split(" -> ")[1].strip()
+            rel_paths = (
+                parse_git_porcelain_z(raw_porcelain, include_rename_sources=True)
+                if "\0" in raw_porcelain
+                else [
+                    (l[3:].strip().split(" -> ")[1].strip() if " -> " in l[3:].strip() else l[3:].strip())
+                    for l in raw_porcelain.splitlines()
+                    if len(l.rstrip("\r\n")) > 3
+                ]
+            )
+            for rel_p in rel_paths:
                 fpath = r_dir / rel_p
                 key = f"{r_dir.name}/{rel_p}"
                 if fpath.is_symlink():
@@ -1192,7 +1195,7 @@ def _verify_clean_post_approval_commit(
         return False, "Approved pre_commit_review.json lacks base_commits/approved_diff_hashes."
 
     from stagecheck.core.cooperative_review import validate_commit_sha
-    from stagecheck.core.git import run_safe_git_bytes
+    from stagecheck.core.git import parse_git_porcelain_z, run_safe_git_bytes
 
     for r_name, cur_head in repo_heads.items():
         reviewed_head = doc_heads.get(r_name)
@@ -1805,7 +1808,7 @@ def _collect_rubric_context(
     existing_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Gather comprehensive live workspace, controls, git, AST, and artifact context in a single fast pass."""
-    from stagecheck.core.git import run_safe_git
+    from stagecheck.core.git import parse_git_porcelain_z, run_safe_git
     from stagecheck.core.prompt_gate import is_path_in_scope
     from stagecheck.core.start_manifest import verify_spec_manifest
 
@@ -2013,17 +2016,13 @@ def _collect_rubric_context(
                 head_res = run_safe_git(r_dir, ["rev-parse", "HEAD"])
                 if head_res.returncode == 0:
                     repo_heads[r_dir.name] = head_res.stdout.strip()
-                res = run_safe_git(r_dir, ["status", "--porcelain=v1", "--untracked-files=all"])
-                if res.returncode == 0 and res.stdout.strip():
-                    uncommitted_diffs[r_dir.name] = res.stdout.strip()
+                from stagecheck.core.git import parse_git_porcelain_z, split_git_nul_paths
+                res = run_safe_git(r_dir, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+                if res.returncode == 0 and res.stdout:
+                    uncommitted_diffs[r_dir.name] = res.stdout
                     if touched_repo_names is not None and r_dir.name not in touched_repo_names:
                         untouched_dirty.append(r_dir.name)
-                    for line in res.stdout.splitlines():
-                        if not line.strip():
-                            continue
-                        rel_p = line[3:].strip()
-                        if " -> " in rel_p:
-                            rel_p = rel_p.split(" -> ")[1].strip()
+                    for rel_p in parse_git_porcelain_z(res.stdout, include_rename_sources=True):
                         ws_rel = f"repos/{r_dir.name}/{rel_p}"
                         if declared_scope and not is_path_in_scope(ws_rel, declared_scope):
                             out_of_scope_files.append(ws_rel)
@@ -2040,12 +2039,9 @@ def _collect_rubric_context(
                 base_sha = registered_repos.get(r_dir.name, {}).get("baseline_head")
                 cur_sha = repo_heads.get(r_dir.name)
                 if base_sha and cur_sha and base_sha.lower() != cur_sha.lower():
-                    d_names = run_safe_git(r_dir, ["diff", "--name-only", f"{base_sha}..{cur_sha}"])
+                    d_names = run_safe_git(r_dir, ["diff", "--name-only", "-z", "--end-of-options", f"{base_sha}..{cur_sha}", "--"])
                     if d_names.returncode == 0:
-                        for changed_rel in d_names.stdout.splitlines():
-                            changed_rel = changed_rel.strip()
-                            if not changed_rel:
-                                continue
+                        for changed_rel in split_git_nul_paths(d_names.stdout):
                             ws_rel = f"repos/{r_dir.name}/{changed_rel}"
                             if declared_scope and not is_path_in_scope(ws_rel, declared_scope):
                                 if ws_rel not in out_of_scope_files:

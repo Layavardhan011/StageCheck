@@ -6,13 +6,13 @@ unborn HEAD handling, commit baseline capture, and clean working tree validation
 
 from __future__ import annotations
 
-import configparser
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 from urllib.parse import urlparse
 
 
@@ -68,17 +68,80 @@ SAFE_GIT_SECURITY_FLAGS: List[str] = [
     "-c", "core.pager=cat",
     "-c", "core.hooksPath=/dev/null",
     "-c", "core.editor=cat",
+    "-c", "diff.external=",
+    "-c", "core.quotePath=false",
 ]
 
 
+def split_git_nul_paths(raw: str) -> List[str]:
+    """Split NUL-delimited Git path output preserving exact filename bytes."""
+    return [p for p in raw.split("\0") if p]
+
+
+def parse_git_porcelain_z(raw: str, include_rename_sources: bool = True) -> List[str]:
+    """Parse NUL-delimited `git status --porcelain=v1 -z` records into paths.
+
+    Args:
+        raw: Raw stdout from `git status --porcelain=v1 -z`.
+        include_rename_sources: When True, includes the extra NUL-terminated original
+            path emitted for rename ('R') entries so renames out of forbidden paths
+            cannot evade scope checks.
+    """
+    paths: List[str] = []
+    entries = raw.split("\0")
+    idx = 0
+    while idx < len(entries):
+        entry = entries[idx]
+        idx += 1
+        if not entry:
+            continue
+        if len(entry) >= 4:
+            paths.append(entry[3:])
+        x_stat = entry[0]
+        y_stat = entry[1] if len(entry) > 1 else " "
+        is_rename = x_stat == "R" or y_stat == "R"
+        is_copy = x_stat == "C" or y_stat == "C"
+        if is_rename or is_copy:
+            if idx < len(entries):
+                src = entries[idx]
+                idx += 1
+                if include_rename_sources and is_rename and src:
+                    paths.append(src)
+    return paths
+
+
+def _find_repo_root_for_config(path: Path) -> Path:
+    """Walk upward from path to find the nearest governing .git directory or file."""
+    cur = Path(path).resolve()
+    for candidate in (cur, *cur.parents):
+        git_marker = candidate / ".git"
+        if git_marker.is_symlink() or git_marker.exists():
+            return candidate
+    return cur
+
+
+def _append_safe_cfg(configs: List[Path], candidate: Path) -> None:
+    if candidate.is_symlink():
+        raise GitError(
+            f"Security policy violation [UNSAFE_GIT_CONFIG]: Symlinked git config '{candidate}' prohibited."
+        )
+    if candidate.is_file() and candidate not in configs:
+        configs.append(candidate)
+
+
 def _resolve_git_config_files(repo_path: Path) -> List[Path]:
-    """Locate .git/config (and commondir/config for worktrees) without invoking git."""
-    git_entry = repo_path / ".git"
+    """Locate .git/config, worktree commondir/config, and submodule configs without invoking git."""
+    root = _find_repo_root_for_config(repo_path)
+    git_entry = root / ".git"
+    if git_entry.is_symlink():
+        raise GitError(
+            f"Security policy violation [UNSAFE_GIT_CONFIG]: Symlinked .git entry '{git_entry}' prohibited."
+        )
     configs: List[Path] = []
+    git_dirs: List[Path] = []
     if git_entry.is_dir():
-        cfg = git_entry / "config"
-        if cfg.is_file():
-            configs.append(cfg)
+        git_dirs.append(git_entry)
+        _append_safe_cfg(configs, git_entry / "config")
     elif git_entry.is_file():
         try:
             text = git_entry.read_text(encoding="utf-8", errors="replace").strip()
@@ -86,65 +149,216 @@ def _resolve_git_config_files(repo_path: Path) -> List[Path]:
             raise GitError(f"Failed to read gitdir pointer '{git_entry}': {err}") from err
         if text.startswith("gitdir:"):
             raw_dir = text.split(":", 1)[1].strip()
-            git_dir = (repo_path / raw_dir).resolve() if not os.path.isabs(raw_dir) else Path(raw_dir).resolve()
-            cfg = git_dir / "config"
-            if cfg.is_file():
-                configs.append(cfg)
+            git_dir = (root / raw_dir).resolve() if not os.path.isabs(raw_dir) else Path(raw_dir).resolve()
+            if (root / raw_dir).is_symlink():
+                raise GitError(
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Symlinked gitdir '{raw_dir}' prohibited."
+                )
+            git_dirs.append(git_dir)
+            _append_safe_cfg(configs, git_dir / "config")
             commondir_file = git_dir / "commondir"
+            if commondir_file.is_symlink():
+                raise GitError(
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Symlinked commondir '{commondir_file}' prohibited."
+                )
             if commondir_file.is_file():
                 raw_common = commondir_file.read_text(encoding="utf-8", errors="replace").strip()
                 common_dir = (git_dir / raw_common).resolve() if not os.path.isabs(raw_common) else Path(raw_common).resolve()
-                common_cfg = common_dir / "config"
-                if common_cfg.is_file() and common_cfg not in configs:
-                    configs.append(common_cfg)
+                git_dirs.append(common_dir)
+                _append_safe_cfg(configs, common_dir / "config")
+
+    # Inspect embedded submodule git configs (.git/modules/**/config)
+    for gd in git_dirs:
+        modules_dir = gd / "modules"
+        if modules_dir.is_symlink():
+            raise GitError(
+                f"Security policy violation [UNSAFE_GIT_CONFIG]: Symlinked modules dir '{modules_dir}' prohibited."
+            )
+        if modules_dir.is_dir():
+            for walk_root, dirs, files in os.walk(modules_dir, followlinks=False):
+                for d in dirs:
+                    dp = Path(walk_root) / d
+                    if dp.is_symlink():
+                        raise GitError(
+                            f"Security policy violation [UNSAFE_GIT_CONFIG]: Symlink inside modules '{dp}' prohibited."
+                        )
+                if "config" in files:
+                    _append_safe_cfg(configs, Path(walk_root) / "config")
+
     return configs
 
 
+_GIT_SECTION_HEADER_RE = re.compile(
+    r'^\[([A-Za-z0-9-]+)(?:[ \t]+"((?:[^"\\]|\\.)*)"|[ \t]+([A-Za-z0-9.-]+))?[ \t]*\](.*)$'
+)
+
+
+def _strip_git_config_comment(line: str) -> str:
+    """Strip unquoted # or ; comments from a git config line."""
+    in_quotes = False
+    escaped = False
+    for i, ch in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and in_quotes:
+            escaped = True
+            continue
+        if ch == '"':
+            in_quotes = not in_quotes
+            continue
+        if not in_quotes and ch in ("#", ";"):
+            return line[:i]
+    return line
+
+
+def _logical_git_config_lines(raw_text: str) -> List[str]:
+    """Join backslash-continued lines cleanly outside comments."""
+    lines: List[str] = []
+    buf = ""
+    for raw_line in raw_text.splitlines():
+        cleaned = _strip_git_config_comment(raw_line)
+        combined = buf + cleaned
+        # Count trailing backslashes
+        bs_count = 0
+        for ch in reversed(combined):
+            if ch == "\\":
+                bs_count += 1
+            else:
+                break
+        if bs_count % 2 == 1:
+            buf = combined[:-1]
+            continue
+        buf = ""
+        lines.append(combined)
+    if buf:
+        lines.append(buf)
+    return lines
+
+
+def _iter_git_config_entries(
+    raw_text: str, cfg_path: Path
+) -> List[Tuple[str, Optional[str], bool, str]]:
+    """Strictly tokenize git config sections and (section, key, has_value, value) entries.
+
+    Handles leading indentation on [section] headers (which Python RawConfigParser ignores),
+    inline assignments after ']', and fails closed on unparseable section headers or
+    include/includeIf directives.
+    """
+    entries: List[Tuple[str, Optional[str], bool, str]] = []
+    current_section: Optional[str] = None
+
+    for line in _logical_git_config_lines(raw_text):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        remainder = stripped
+        if stripped.startswith("["):
+            match = _GIT_SECTION_HEADER_RE.match(stripped)
+            if not match:
+                raise GitError(
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Malformed section header in '{cfg_path}'."
+                )
+            current_section = match.group(1).lower()
+            entries.append((current_section, None, False, ""))
+            remainder = match.group(4).strip()
+            if not remainder:
+                continue
+
+        if current_section is None:
+            raise GitError(
+                f"Security policy violation [UNSAFE_GIT_CONFIG]: Key outside section in '{cfg_path}'."
+            )
+
+        if "=" in remainder:
+            raw_key, raw_val = remainder.split("=", 1)
+            has_val = True
+            val = raw_val.strip()
+            if len(val) >= 2 and val.startswith('"') and val.endswith('"'):
+                val = val[1:-1]
+        else:
+            raw_key, val, has_val = remainder, "", False
+
+        key = raw_key.strip().lower()
+        if not key:
+            raise GitError(
+                f"Security policy violation [UNSAFE_GIT_CONFIG]: Empty config key in '{cfg_path}'."
+            )
+        entries.append((current_section, key, has_val, val))
+
+    return entries
+
+
 def assert_safe_repo_git_config(repo_path: Path) -> None:
-    """Parse repository-local git config safely in Python and fail closed on command-executing keys."""
+    """Parse repository-local git config strictly and fail closed on unsafe or redirective keys."""
     for cfg_path in _resolve_git_config_files(repo_path):
-        parser = configparser.RawConfigParser(allow_no_value=True, strict=False)
         try:
-            parser.read(cfg_path, encoding="utf-8")
+            raw_text = cfg_path.read_text(encoding="utf-8")
         except Exception as err:
             raise GitError(f"Unsafe or unparseable repository git config '{cfg_path}': {err}") from err
 
-        for section in parser.sections():
-            sec_lower = section.strip().lower()
-            sec_prefix = sec_lower.split()[0].split('"')[0]
-            keys = {k.strip().lower() for k in parser[section].keys()}
+        for sec_prefix, key, has_val, val in _iter_git_config_entries(raw_text, cfg_path):
+            if sec_prefix in ("include", "includeif"):
+                raise GitError(
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting [{sec_prefix}] directive in '{cfg_path}'."
+                )
+            if key is None:
+                continue
 
-            if sec_prefix == "filter" and keys & {"clean", "smudge", "process"}:
+            if sec_prefix == "filter" and key in {"clean", "smudge", "process"}:
                 raise GitError(
-                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting filter driver in '{cfg_path}' section [{section}]."
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting filter driver in '{cfg_path}' section [{sec_prefix}]."
                 )
-            if sec_prefix == "diff" and keys & {"command", "textconv"}:
+            if sec_prefix == "diff" and key in {"command", "textconv"}:
                 raise GitError(
-                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting diff driver in '{cfg_path}' section [{section}]."
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting diff driver in '{cfg_path}' section [{sec_prefix}]."
                 )
-            if sec_prefix == "merge" and "driver" in keys:
+            if sec_prefix == "merge" and key == "driver":
                 raise GitError(
-                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting merge driver in '{cfg_path}' section [{section}]."
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting merge driver in '{cfg_path}' section [{sec_prefix}]."
                 )
-            if sec_prefix == "alias" and keys:
+            if sec_prefix == "alias":
                 raise GitError(
                     f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting repo alias in '{cfg_path}'."
                 )
-            if sec_prefix == "credential" and "helper" in keys:
+            if sec_prefix == "credential" and key == "helper":
                 raise GitError(
                     f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting credential.helper in '{cfg_path}'."
                 )
-            if sec_prefix == "core" and keys & {"sshcommand", "gitproxy", "alternaterefscommand"}:
-                raise GitError(
-                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting command-executing core setting in '{cfg_path}'."
-                )
-            if sec_prefix == "gpg" and "program" in keys:
+            if sec_prefix == "core":
+                if key in {
+                    "sshcommand",
+                    "gitproxy",
+                    "alternaterefscommand",
+                    "worktree",
+                    "attributesfile",
+                    "excludesfile",
+                }:
+                    raise GitError(
+                        f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting unsafe core.{key} in '{cfg_path}'."
+                    )
+                if key == "bare" and (
+                    not has_val or val.strip().lower() not in {"false", "no", "off", "0"}
+                ):
+                    raise GitError(
+                        f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting core.bare in '{cfg_path}'."
+                    )
+            if sec_prefix == "gpg" and key == "program":
                 raise GitError(
                     f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting gpg.program in '{cfg_path}'."
                 )
-            if sec_prefix == "remote" and keys & {"uploadpack", "receivepack"}:
+            if sec_prefix == "remote" and key in {"uploadpack", "receivepack"}:
                 raise GitError(
                     f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting remote transport command in '{cfg_path}'."
+                )
+            if sec_prefix == "uploadpack" and key == "packobjectshook":
+                raise GitError(
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting uploadpack.packObjectsHook in '{cfg_path}'."
+                )
+            if sec_prefix == "sequence" and key == "editor":
+                raise GitError(
+                    f"Security policy violation [UNSAFE_GIT_CONFIG]: Prohibiting sequence.editor in '{cfg_path}'."
                 )
 
 
@@ -379,19 +593,24 @@ def get_repo_remote_push_urls(repo_path: Union[str, Path]) -> List[str]:
     if not (p / ".git").exists():
         return []
     remotes_proc = _run_git_cmd(p, ["remote"])
-    if remotes_proc.returncode != 0 or not remotes_proc.stdout.strip():
+    if remotes_proc.returncode != 0:
+        raise GitError(f"Failed to list git remotes in '{p}': {remotes_proc.stderr.strip()}")
+    if not remotes_proc.stdout.strip():
         return []
     push_urls: List[str] = []
     for remote_name in remotes_proc.stdout.splitlines():
         remote_name = remote_name.strip()
         if not remote_name:
             continue
-        url_proc = _run_git_cmd(p, ["remote", "get-url", "--push", "--all", remote_name])
-        if url_proc.returncode == 0:
-            for url_line in url_proc.stdout.splitlines():
-                u = url_line.strip()
-                if u:
-                    push_urls.append(u)
+        url_proc = _run_git_cmd(p, ["remote", "get-url", "--push", "--all", "--", remote_name])
+        if url_proc.returncode != 0:
+            raise GitError(
+                f"Failed to inspect remote '{remote_name}' in '{p}': {url_proc.stderr.strip()}"
+            )
+        for url_line in url_proc.stdout.splitlines():
+            u = url_line.strip()
+            if u:
+                push_urls.append(u)
     return push_urls
 
 

@@ -19,7 +19,7 @@ from stagecheck.core.branch_governance import (
     BranchGovernanceError,
     verify_multi_repo_governance,
 )
-from stagecheck.core.git import run_safe_git
+from stagecheck.core.git import parse_git_porcelain_z, run_safe_git, split_git_nul_paths
 from stagecheck.core.paths import is_path_contained, safe_resolve
 from stagecheck.core.prompt_gate import is_path_in_scope
 
@@ -123,23 +123,38 @@ def run_stage2_scope_paths(ctx: AuditContext) -> StageResult:
                     continue
                 res = run_safe_git(
                     repo_path,
-                    ["diff", "--name-only", "--end-of-options", f"{base_commit}..{target_commit}", "--"],
+                    ["diff", "--name-only", "-z", "--end-of-options", f"{base_commit}..{target_commit}", "--"],
                 )
-                if res.returncode == 0:
-                    for f in res.stdout.splitlines():
-                        if f.strip():
-                            changed_files.add(f.strip())
+                if res.returncode != 0:
+                    defects.append(
+                        Defect(
+                            defect_id="scope_paths.git_diff_failed",
+                            message=f"Git diff failed in '{repo_name}': {res.stderr.strip() or f'exit {res.returncode}'}",
+                            stage=stage_id,
+                            severity="CRITICAL",
+                            blocking=True,
+                            repo=repo_name,
+                        )
+                    )
+                else:
+                    changed_files.update(split_git_nul_paths(res.stdout))
 
             # B. Check working-tree uncommitted changes and untracked files
             if (repo_path / ".git").exists():
-                status_res = run_safe_git(repo_path, ["status", "--porcelain=v1", "--untracked-files=all"])
-                if status_res.returncode == 0:
-                    for line in status_res.stdout.splitlines():
-                        if line.strip():
-                            raw_path = line[3:].strip()
-                            if " -> " in raw_path:
-                                raw_path = raw_path.split(" -> ")[1].strip()
-                            changed_files.add(raw_path)
+                status_res = run_safe_git(repo_path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+                if status_res.returncode != 0:
+                    defects.append(
+                        Defect(
+                            defect_id="scope_paths.git_status_failed",
+                            message=f"Git status failed in '{repo_name}': {status_res.stderr.strip() or f'exit {status_res.returncode}'}",
+                            stage=stage_id,
+                            severity="CRITICAL",
+                            blocking=True,
+                            repo=repo_name,
+                        )
+                    )
+                else:
+                    changed_files.update(parse_git_porcelain_z(status_res.stdout, include_rename_sources=True))
 
             for changed in changed_files:
                 full_rel = f"repos/{repo_name}/{changed}" if repo_name != "root" else changed

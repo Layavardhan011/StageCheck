@@ -24,6 +24,7 @@ from stagecheck.core.cooperative_review import (
 )
 from stagecheck.core.evidence import update_evidence_manifest
 from stagecheck.core.git import (
+    GitError,
     _run_git_cmd,
     approved_remote,
     get_approved_remote_urls,
@@ -700,7 +701,16 @@ def evaluate_gate_2b_criteria(
                             ))
 
         # D. Remote Authority Whitelist (SR-08 / DEC-021 / FP-ORG)
-        push_urls = get_repo_remote_push_urls(repo_p)
+        try:
+            push_urls = get_repo_remote_push_urls(repo_p)
+        except GitError as err:
+            criteria.append(GateCriterion(
+                criterion_id=f"gate2b.remote_authority.{repo_name}",
+                description=f"Remote authority verified in '{repo_name}'",
+                status="FAILED",
+                message=f"Remote authority inspection failed in '{repo_name}': {err}",
+            ))
+            continue
         if not push_urls:
             criteria.append(GateCriterion(
                 criterion_id=f"gate2b.remote_authority.{repo_name}",

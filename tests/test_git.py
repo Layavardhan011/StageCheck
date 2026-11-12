@@ -253,6 +253,70 @@ class TestGitDiscovery(unittest.TestCase):
                 with self.assertRaises(GitError):
                     run_safe_git(test_repo, ["status", "--porcelain"])
 
+    def test_assert_safe_repo_git_config_blocks_indented_includes_worktree_and_subdirs(self) -> None:
+        """Regression test for indented headers, include/includeIf, core.worktree, core.bare, and subdirs."""
+        from stagecheck.core.git import assert_safe_repo_git_config
+
+        bypasses = [
+            ("indented-filter", "  [filter \"evil\"]\n    clean = evil-cmd\n"),
+            ("include", "[include]\n  path = /tmp/evil.cfg\n"),
+            ("includeIf", "[includeIf \"gitdir:/tmp/\"]\n  path = /tmp/evil.cfg\n"),
+            ("worktree", "[core]\n  worktree = /tmp/outside\n"),
+            ("bare-true", "[core]\n  bare = true\n"),
+            ("attributesfile", "[core]\n  attributesfile = /tmp/attrs\n"),
+            ("excludesfile", "[core]\n  excludesfile = /tmp/excl\n"),
+            ("uploadpack-hook", "[uploadpack]\n  packObjectsHook = /bin/evil\n"),
+        ]
+        for label, snippet in bypasses:
+            with self.subTest(case=label):
+                test_repo = self.workspace / "repos" / f"bypass-{label}"
+                self._init_git_repo(test_repo, initial_commit=True)
+                cfg_path = test_repo / ".git" / "config"
+                cfg_path.write_text(cfg_path.read_text(encoding="utf-8") + "\n" + snippet, encoding="utf-8")
+
+                with self.assertRaises(GitError):
+                    assert_safe_repo_git_config(test_repo)
+
+                subdir = test_repo / "nested" / "pkg"
+                subdir.mkdir(parents=True, exist_ok=True)
+                with self.assertRaises(GitError):
+                    assert_safe_repo_git_config(subdir)
+
+    def test_remote_name_dash_prefix_and_quotepath_nul_framing(self) -> None:
+        """Regression test for dash-prefixed remote names and C-quoted/special filenames."""
+        from stagecheck.core.git import (
+            get_repo_remote_push_urls,
+            parse_git_porcelain_z,
+            run_safe_git,
+            split_git_nul_paths,
+        )
+
+        repo_path = self.workspace / "repos" / "framing-repo"
+        self._init_git_repo(repo_path, initial_commit=True)
+
+        # 1. Dash-prefixed remote name must be inspected cleanly using '--'
+        subprocess.run(
+            ["git", "remote", "add", "--", "-evil", "https://evil.example.org/repo.git"],
+            cwd=str(repo_path), check=True, capture_output=True,
+        )
+        urls = get_repo_remote_push_urls(repo_path)
+        self.assertIn("https://evil.example.org/repo.git", urls)
+
+        # 2. Tab/quote/Unicode filenames must survive status -z and ls-files -z without C-quoting
+        secret_dir = repo_path / "secrets"
+        secret_dir.mkdir(exist_ok=True)
+        special_file = secret_dir / "key\t1.txt"
+        special_file.write_text("secret=val\n", encoding="utf-8")
+        st_res = run_safe_git(repo_path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], check=True)
+        parsed = parse_git_porcelain_z(st_res.stdout)
+        self.assertIn("secrets/key\t1.txt", parsed)
+        ls_res = run_safe_git(repo_path, ["ls-files", "--others", "--exclude-standard", "-z"], check=True)
+        self.assertIn("secrets/key\t1.txt", split_git_nul_paths(ls_res.stdout))
+
+        # 3. Renamed file should report both destination and source path from porcelain -z
+        sample_z = "R  new/dest.py\x00old/forbidden.py\x00"
+        self.assertEqual(parse_git_porcelain_z(sample_z), ["new/dest.py", "old/forbidden.py"])
+
 
 if __name__ == "__main__":
     unittest.main()

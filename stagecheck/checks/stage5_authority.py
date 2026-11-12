@@ -13,6 +13,7 @@ from stagecheck.core.cooperative_review import (
     verify_committed_diff_fidelity,
 )
 from stagecheck.core.git import (
+    GitError,
     approved_remote,
     get_approved_remote_urls,
     get_repo_remote_push_urls,
@@ -81,7 +82,19 @@ def run_stage5_authority(ctx: AuditContext) -> StageResult:
             )
             continue
         if (repo_p / ".git").exists():
-            push_urls = get_repo_remote_push_urls(repo_p)
+            try:
+                push_urls = get_repo_remote_push_urls(repo_p)
+            except GitError as err:
+                defects.append(
+                    Defect(
+                        defect_id="authority.remote_inspection_failed",
+                        message=str(err),
+                        stage=stage_id,
+                        severity="CRITICAL",
+                        blocking=True,
+                    )
+                )
+                continue
             for u in push_urls:
                 if not approved_remote(u, approved_urls):
                     defects.append(
