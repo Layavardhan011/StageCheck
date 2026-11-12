@@ -357,7 +357,7 @@ def append_to_cumulative_issue_history(
     """Append newly discovered defects to cumulative TASK_<ID>_ISSUE_HISTORY.md."""
     task_dir = resolve_task_dir(workspace_root, task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
-    history_file = task_dir / f"{task_id.upper()}_ISSUE_HISTORY.md"
+    history_file = safe_resolve(f"TASK_{task_id}_ISSUE_HISTORY.md", task_dir, allow_symlinks=False)
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
     lines = [f"\n### Attempt {attempt} - Cycle {cycle} Findings ({timestamp})\n"]

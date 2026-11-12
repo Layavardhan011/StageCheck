@@ -101,7 +101,7 @@ class TestCooperativeReview(unittest.TestCase):
         self.assertTrue(response_file.is_file())
 
         # Verify cumulative issue history updated
-        history_file = self.workspace / "evidence" / "tasks" / self.task_id / f"{self.task_id.upper()}_ISSUE_HISTORY.md"
+        history_file = self.workspace / "evidence" / "tasks" / self.task_id / f"TASK_{self.task_id}_ISSUE_HISTORY.md"
         self.assertTrue(history_file.is_file())
         history_text = history_file.read_text(encoding="utf-8")
         self.assertIn("ARCH-01", history_text)

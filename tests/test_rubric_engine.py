@@ -662,12 +662,23 @@ class TestRubricEngine(unittest.TestCase):
             self.assertIsNone(strat.get("exemption_predicate"), f"Rule {rid} must not carry bogus exemption predicate")
 
     def test_human_waiver_rules_require_real_approved_dispositions(self) -> None:
-        """Verify all 10 HUMAN_WAIVER rules return BLOCKED without task-scoped APPROVED waiver and PASS with one."""
+        """Verify clean tasks do not block on HUMAN_WAIVER (GOV-002), while required waivers enforce provenance."""
         from stagecheck.core.permissions import controlled_write_transaction
         from stagecheck.core.utils import canonical_json_dumps
 
-        # Without dispositions -> all 10 COMMON-001..010 are BLOCKED
-        payload_missing, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
+        # Clean task with no active waiver requirement -> COMMON-001..010 do NOT block (GOV-002)
+        payload_clean, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
+        waiver_clean = [e for e in payload_clean["evaluations"] if e["category"] == "HUMAN_WAIVER"]
+        self.assertEqual(len(waiver_clean), 10)
+        self.assertTrue(all(e["status"] == "PASS" for e in waiver_clean))
+
+        # When waivers ARE required without dispositions -> all 10 COMMON-001..010 are BLOCKED
+        payload_missing, _ = run_rubric_evaluation(
+            self.workspace,
+            self.task_id,
+            self.attempt,
+            context={"require_human_waivers": True},
+        )
         waiver_evals = [e for e in payload_missing["evaluations"] if e["category"] == "HUMAN_WAIVER"]
         self.assertEqual(len(waiver_evals), 10)
         self.assertTrue(all(e["status"] == "BLOCKED" for e in waiver_evals))
@@ -701,7 +712,12 @@ class TestRubricEngine(unittest.TestCase):
                 }),
                 encoding="utf-8",
             )
-        payload_wrong, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
+        payload_wrong, _ = run_rubric_evaluation(
+            self.workspace,
+            self.task_id,
+            self.attempt,
+            context={"require_human_waivers": True},
+        )
         waiver_wrong = [e for e in payload_wrong["evaluations"] if e["category"] == "HUMAN_WAIVER"]
         self.assertTrue(all(e["status"] in ("BLOCKED", "FAIL") for e in waiver_wrong))
 
@@ -818,6 +834,11 @@ class TestRubricEngine(unittest.TestCase):
         (self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2B" / "claims.json").unlink()
         # 4. Remove Phase-3/test_execution.json -> TEST_ADEQUACY-026 FAIL
         (self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-3" / "test_execution.json").unlink()
+
+        # Advance to PHASE_3_AUDIT so Phase-2B/Phase-3 artifact requirements are strictly enforced
+        state = load_active_state(self.workspace)
+        state["phase"] = "PHASE_3_AUDIT"
+        save_active_state(self.workspace, state)
 
         payload, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
         by_id = {e["rule_id"]: e for e in payload["evaluations"]}
@@ -1149,6 +1170,54 @@ class TestRubricEngine(unittest.TestCase):
                     "evaluation_strategy": "failure_class_observed_event_register_and_hygiene_check",
                 }
             ])
+
+    def test_phase2a_scope_defers_phase2b_and_phase3_artifacts(self) -> None:
+        """Verify PHASE_2A_CODING does not fail/deadlock on missing Phase-2B or Phase-3 artifacts (D-03 / GOV-004)."""
+        self._seed_full_compliant_workspace()
+        attempt_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}"
+        for rel_p in (
+            "Phase-2B/report.md",
+            "Phase-2B/claims.json",
+            "Phase-3/test_execution.json",
+            "Phase-3/scanner_report.json",
+            "Phase-3/verdict.json",
+        ):
+            target = attempt_dir / rel_p
+            if target.exists():
+                target.unlink()
+
+        payload, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
+        self.assertEqual(payload["overall_verdict"], "PASS", f"Expected PASS in PHASE_2A_CODING, got counts={payload['counts']}")
+
+    def test_go_repository_test_adequacy_supported(self) -> None:
+        """Verify Go repositories with *_test.go satisfy TEST_ADEQUACY without Python test files (GOV-003)."""
+        self._seed_full_compliant_workspace()
+        for py_file in self.repo_dir.glob("*.py"):
+            py_file.unlink()
+        (self.repo_dir / "go.mod").write_text("module example.com/zkready\n\ngo 1.26.0\n", encoding="utf-8")
+        (self.repo_dir / "main.go").write_text("package main\n\nfunc Add(a, b int) int { return a + b }\n", encoding="utf-8")
+        (self.repo_dir / "main_test.go").write_text(
+            "package main\n\nimport \"testing\"\n\n"
+            "func TestAddPositive(t *testing.T) {\n"
+            "    if got := Add(2, 3); got != 5 { t.Fatalf(\"unexpected %d\", got) }\n"
+            "}\n"
+            "func TestMalformedAndDuplicateInput(t *testing.T) {\n"
+            "    // malformed invalid input and duplicate replay idempotency guard\n"
+            "    var err error\n"
+            "    if err != nil { t.Error(err) }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "."], cwd=str(self.repo_dir), check=True)
+        subprocess.run(["git", "commit", "-m", "switch to go"], cwd=str(self.repo_dir), check=True, capture_output=True)
+
+        payload, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
+        ta_evals = [e for e in payload["evaluations"] if e["domain"] == "TEST_ADEQUACY"]
+        self.assertTrue(
+            all(e["status"] in ("PASS", "NOT_APPLICABLE") for e in ta_evals),
+            f"Non-passing TEST_ADEQUACY in Go repo: {[e for e in ta_evals if e['status'] not in ('PASS', 'NOT_APPLICABLE')]}",
+        )
+        self.assertTrue(any(e["status"] == "PASS" for e in ta_evals))
 
 
 if __name__ == "__main__":
