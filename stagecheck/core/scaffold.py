@@ -67,7 +67,7 @@ DEFAULT_AGENT1_INSTRUCTIONS_MD = """# Agent 1 Instructions: Prompt Architecture 
 Role: `prompt_and_audit`.
 
 ## Purpose
-Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define declared scope (`declared_scope.json`), perform Phase 2A pre-commit cooperative differential reviews, and conduct Phase 3 independent audit reviews.
+Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define declared scope (`declared_scope.json`), perform Phase 2A pre-commit cooperative differential reviews, conduct Phase 3 independent audit reviews, and monitor attempt/task completion progression.
 
 ## Inputs
 - `specs/TASK_PLAN.json`
@@ -79,6 +79,18 @@ Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define d
 - Verify task decomposition against architectural contracts.
 - Review uncommitted diffs for scope compliance and secret exposure.
 - Record defect history in `TASK_<ID>_ISSUE_HISTORY.md`.
+
+## Phase-2 Cooperative Review Protocol (JSON Status Loop)
+- During `PHASE_2A_CODING`, StageCheck does not interfere while Agent 1 and Agent 2 iterate; coordinate via `stagecheck turn --task <task_id> --json` (max 3 calls per 5s window) and Phase-2A JSON artifacts.
+- Wait until `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` has `"status": "AWAITING_REVIEW"` (or `active_turn == "AGENT_1"`).
+- Review the uncommitted diff (`git status`, `git diff`), tests, and scope compliance, then record `Phase-2A/agent_reviews.json` and run `stagecheck review-precommit --task <task_id> --attempt <N>`:
+  - If defects remain, write `"status": "REVISION_REQUIRED"` in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json` so `active_turn` returns to `AGENT_2`.
+  - Once all defects are resolved, approve via `stagecheck approve-review` (`"status": "APPROVED"`) so StageCheck can commit and advance Gate-2A / Gate-2B.
+
+## Attempt & Overall Task Monitoring
+- Monitor `controls/ACTIVE_STATE.json` (`phase`, `status`, `attempt_index`, `circuit_breaker_tripped`, `completed_tasks`) and `evidence/tasks/<task_id>/attempt_<N>/Phase-3/verdict.json` (`result`: `PASSED` vs `BLOCKED`).
+- If an attempt fails Phase-3 audit, track remaining attempt budget (`attempt_index <= 3`); if `phase == "AWAITING_HUMAN_DISPOSITION"` or `circuit_breaker_tripped == true`, pause for human disposition/reset.
+- Once the current task reaches `SEALED_PASSED` / `COMPLETED`, run `stagecheck plan next` (against `specs/TASK_PLAN.json`) to proceed to the next eligible task (`stagecheck start --task <next_task_id>`).
 
 ## Must Not
 - MUST NOT execute mutating Git commands (`git commit`, `git push`, `git merge`, `git rebase`).
@@ -103,6 +115,14 @@ Implement source code, unit tests, and regression coverage for approved tasks on
 - Ensure code satisfies declared scope without modifying forbidden paths.
 - Ensure all unit tests pass locally before submitting for Phase 2A review.
 - Run local Gitleaks secret check (`gitleaks protect --staged`) prior to commit.
+
+## Phase-2 Implementation & Cooperative Repair Loop (JSON Status)
+- Wait for Gate-1 to advance (`controls/ACTIVE_STATE.json` `phase == "PHASE_2A_CODING"` or `stagecheck turn --task <task_id> --json` reporting `active_turn == "AGENT_2"`).
+- Implement changes strictly within `Phase-1/declared_scope.json`, run local tests and `gitleaks protect --staged`, and write `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` with `"status": "AWAITING_REVIEW"`, `cycle`, `touched_repositories`, and `base_commits`.
+- Wait for Agent 1's review in `Phase-2A/pre_commit_review.json` (or poll `stagecheck turn --task <task_id> --json`, max 3 calls per 5s window):
+  - If `"status": "REVISION_REQUIRED"`, inspect the defects in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json`, fix the code/tests, increment `cycle`, and resubmit `Phase-2A/pre_commit_status.json`.
+  - Repeat until `Phase-2A/pre_commit_review.json` reports `"status": "APPROVED"`.
+- Once `phase == "PHASE_2B_COMMITTING"`, write `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/report.md` so StageCheck can advance Gate-2B to Phase 3.
 
 ## Must Not
 - MUST NOT execute remote push operations (`git push` is strictly forbidden).
@@ -155,6 +175,10 @@ def scaffold_agent_instructions(
                 f"- In planning/review phases, DO NOT write implementation code in `repos/*`.\n"
                 f"- NEVER execute remote push commands (`git push`).\n"
                 f"- Permitted Git commands during review are read-only: `git status`, `git log`, `git diff`, `git show`, `git blame`, `git branch`.\n\n"
+                f"### Phase-2 Review & Attempt/Task Monitoring\n"
+                f"- During `PHASE_2A_CODING`, coordinate via `stagecheck turn --task <task_id> --json` (max 3 calls per 5s window) and Phase-2A JSON status files without StageCheck interference.\n"
+                f"- After submitting `Phase-2A/pre_commit_status.json` (`\"status\": \"AWAITING_REVIEW\"`), switch to auditor role, author `Phase-2A/agent_reviews.json`, and run `stagecheck review-precommit`; iterate via `REVISION_REQUIRED` until `APPROVED`.\n"
+                f"- Monitor `controls/ACTIVE_STATE.json` (`phase`, `status`, `attempt_index`, `circuit_breaker_tripped`) and `Phase-3/verdict.json`; once `SEALED_PASSED` / `COMPLETED`, run `stagecheck plan next` to proceed to the next eligible task.\n\n"
                 f"---\n\n"
                 f"## Part 2: Code Implementation Responsibilities (Phase 2A Implementation & Delivery)\n\n"
                 f"### Purpose\n"
@@ -166,7 +190,8 @@ def scaffold_agent_instructions(
                 f"### Checks & Invariants\n"
                 f"- Ensure code satisfies declared scope without modifying forbidden paths.\n"
                 f"- Ensure all unit tests pass locally before submitting for Phase 2A review.\n"
-                f"- Run local secret check (`gitleaks protect --staged`) prior to local commit.\n\n"
+                f"- Run local secret check (`gitleaks protect --staged`) prior to local commit.\n"
+                f"- In Phase 2A/2B, submit `Phase-2A/pre_commit_status.json`, resolve any `REVISION_REQUIRED` feedback from `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json`, and write `Phase-2B/report.md` once committed.\n\n"
                 f"### Security Invariants & Negative Prohibitions\n"
                 f"- MUST NOT execute remote push operations (`git push` is strictly forbidden).\n"
                 f"- MUST NOT commit directly to `main` or `master` branch.\n"
