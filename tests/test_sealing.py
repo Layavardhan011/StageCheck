@@ -226,6 +226,35 @@ class TestAcyclicMerkleSealing(unittest.TestCase):
                 checked_heads={"backend": "a" * 40},
             )
 
+    def test_verify_attempt_merkle_seal_rejects_symlink_and_malformed_types(self) -> None:
+        """Verify verify_attempt_merkle_seal rejects symlinked seal.json and non-dict / non-int attempt_index."""
+        seal_file = self.attempt_dir / "seal.json"
+
+        # 1. Symlinked seal.json must be rejected before reading
+        outside_seal = self.ws / "outside_seal.json"
+        outside_seal.write_text('{"task_id": "task-01", "attempt_index": 1}', encoding="utf-8")
+        seal_file.symlink_to(outside_seal)
+        is_valid, violations = verify_attempt_merkle_seal(self.attempt_dir, self.ws)
+        self.assertFalse(is_valid)
+        self.assertTrue(any("symlink" in v.lower() for v in violations))
+        seal_file.unlink()
+
+        # 2. Non-dict root JSON must fail cleanly without AttributeError
+        seal_file.write_text('["not", "a", "dict"]', encoding="utf-8")
+        is_valid, violations = verify_attempt_merkle_seal(self.attempt_dir, self.ws)
+        self.assertFalse(is_valid)
+        self.assertTrue(any("object" in v.lower() for v in violations))
+
+        # 3. Non-int or bool attempt_index must fail cleanly without TypeError
+        for bad_attempt in ("1", True, None, [1]):
+            seal_file.write_text(
+                json.dumps({"task_id": self.task_id, "attempt_index": bad_attempt}),
+                encoding="utf-8",
+            )
+            is_valid, violations = verify_attempt_merkle_seal(self.attempt_dir, self.ws)
+            self.assertFalse(is_valid)
+            self.assertTrue(any("attempt_index" in v for v in violations))
+
 
 if __name__ == "__main__":
     unittest.main()

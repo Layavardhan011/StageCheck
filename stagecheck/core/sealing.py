@@ -260,13 +260,30 @@ def verify_attempt_merkle_seal(
         return False, [f"Symlink validation failure: {err}"]
 
     seal_file = attempt_path / "seal.json"
+    if seal_file.is_symlink():
+        return False, [f"Symlink validation failure: seal.json at '{seal_file}' is a symlink"]
     if not seal_file.is_file():
         return False, [f"Missing seal.json at '{seal_file}'"]
 
     try:
-        seal_data = json.loads(seal_file.read_text(encoding="utf-8"))
+        fd = os.open(seal_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            with os.fdopen(fd, "rb") as f:
+                seal_bytes = f.read()
+        except Exception:
+            raise
+        seal_data = json.loads(seal_bytes.decode("utf-8"))
     except Exception as err:
         return False, [f"Malformed seal.json: {err}"]
+
+    if not isinstance(seal_data, dict):
+        return False, ["Malformed seal.json: root JSON value must be an object"]
+
+    raw_attempt_index = seal_data.get("attempt_index")
+    if not isinstance(raw_attempt_index, int) or isinstance(raw_attempt_index, bool):
+        return False, [
+            f"Malformed seal.json: 'attempt_index' must be an integer, got {type(raw_attempt_index).__name__}"
+        ]
 
     expected_merkle_root = seal_data.get("merkle_root_sha256")
     recorded_leaves = seal_data.get("leaves", [])
@@ -281,9 +298,9 @@ def verify_attempt_merkle_seal(
         expected_attempt = int(attempt_path.name.split("_", 1)[1])
     except Exception:
         expected_attempt = None
-    if expected_attempt is not None and seal_data.get("attempt_index") != expected_attempt:
+    if expected_attempt is not None and raw_attempt_index != expected_attempt:
         violations.append(
-            f"Seal attempt_index mismatch: recorded '{seal_data.get('attempt_index')}', expected {expected_attempt}"
+            f"Seal attempt_index mismatch: recorded '{raw_attempt_index}', expected {expected_attempt}"
         )
 
     # Verify total_files_sealed
@@ -293,7 +310,7 @@ def verify_attempt_merkle_seal(
             attempt_dir=attempt_path,
             workspace_root=ws_root,
             task_id=str(seal_data.get("task_id", "")),
-            attempt_index=seal_data.get("attempt_index", 1),
+            attempt_index=raw_attempt_index,
             verdict_data=seal_data.get("verdict"),
             write_seal_file=False,
         )
