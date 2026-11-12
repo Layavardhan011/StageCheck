@@ -201,6 +201,53 @@ class TestUtils(unittest.TestCase):
             validate_schema({"task_id": "invalid-format"}, schema)
         self.assertIn("does not match pattern", str(ctx.exception))
 
+    def test_strict_json_rejects_nan_and_duplicate_keys(self) -> None:
+        from stagecheck.core.utils import SerializationError, pretty_json_dumps
+
+        dup_file = self.temp_path / "dup.json"
+        dup_file.write_text('{"a": 1, "a": 2}\n', encoding="utf-8")
+        with self.assertRaises(JSONParseError):
+            load_json_file(dup_file)
+
+        nan_file = self.temp_path / "nan.json"
+        nan_file.write_text('{"score": NaN}\n', encoding="utf-8")
+        with self.assertRaises(JSONParseError):
+            load_json_file(nan_file)
+
+        with self.assertRaises(SerializationError):
+            pretty_json_dumps({"score": float("nan")})
+
+    def test_validate_schema_enforces_unions_number_minlength_maxitems_enum_and_newline_anchor(self) -> None:
+        # Union type list & null
+        union_schema = {"type": ["string", "null"]}
+        validate_schema(None, union_schema)
+        validate_schema("ok", union_schema)
+        with self.assertRaises(SchemaValidationError):
+            validate_schema(123, union_schema)
+
+        # number minimum/maximum (rejecting bool)
+        num_schema = {"type": "number", "minimum": 0.0, "maximum": 1.0}
+        validate_schema(0.5, num_schema)
+        with self.assertRaises(SchemaValidationError):
+            validate_schema(True, num_schema)
+        with self.assertRaises(SchemaValidationError):
+            validate_schema(1.5, num_schema)
+
+        # Top-level enum without type
+        with self.assertRaises(SchemaValidationError):
+            validate_schema("INVALID", {"enum": ["A", "B"]})
+
+        # minLength, maxItems, trailing newline against $
+        str_schema = {"type": "string", "minLength": 2, "pattern": "^[a-z]+$"}
+        with self.assertRaises(SchemaValidationError):
+            validate_schema("a", str_schema)
+        with self.assertRaises(SchemaValidationError):
+            validate_schema("abc\n", str_schema)
+
+        arr_schema = {"type": "array", "maxItems": 2}
+        with self.assertRaises(SchemaValidationError):
+            validate_schema([1, 2, 3], arr_schema)
+
 
 if __name__ == "__main__":
     unittest.main()

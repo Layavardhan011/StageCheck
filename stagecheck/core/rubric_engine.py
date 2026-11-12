@@ -28,7 +28,14 @@ from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.dispositions import parse_owner_grants, validate_waiver_provenance
 from stagecheck.core.paths import StageCheckPathError, safe_resolve
 from stagecheck.core.state import load_active_state
-from stagecheck.core.utils import canonical_json_dumps, load_json_file, sha256_file, validate_schema
+from stagecheck.core.utils import (
+    JSONParseError,
+    SerializationError,
+    canonical_json_dumps,
+    load_json_file,
+    sha256_file,
+    validate_schema,
+)
 from stagecheck.schemas import get_schema_path
 from stagecheck.schemas.validator import (
     validate_active_state,
@@ -3490,6 +3497,8 @@ def update_rubric_artifacts(
                     })
             review_file.write_text(canonical_json_dumps(rev_data), encoding="utf-8")
             updated_review = review_file
+        except (SerializationError, JSONParseError):
+            raise
         except Exception:
             pass
 

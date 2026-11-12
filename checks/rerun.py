@@ -113,13 +113,22 @@ def execute_copy(ctx, auto, cite, module, rel):
         tmp = Path(tmp)
         copy = tmp / 'module'
         shutil.copytree(module, copy, symlinks=True, ignore=shutil.ignore_patterns('.git'))
-        for d in ('gotmp', 'home'):
-            (tmp / d).mkdir()
-        env = {k: v for k, v in os.environ.items() if not k.startswith(('LD_', 'ANTHROPIC_')) and not k.startswith('GO') and k not in ['CGO_CFLAGS', 'CGO_CPPFLAGS', 'CGO_CXXFLAGS', 'CGO_LDFLAGS']}
-        env.update(auto['environment'])
+        tool_root = str(Path(__file__).resolve().parents[1])
+        if tool_root not in sys.path:
+            sys.path.insert(0, tool_root)
+        from stagecheck.core.commands import build_sanitized_environment
+        from stagecheck.core.isolation import IsolationError, SandboxPolicy, prepare_isolated_command
         # The configured build cache is reused; -count=1 below keeps test results from ever being served from it.
-        env.update(GOTOOLCHAIN='local', GOPROXY='off', GOWORK='off', GOENV='off', GOFLAGS='-mod=readonly',
-                   GOTMPDIR=str(tmp / 'gotmp'), HOME=str(tmp / 'home'))
+        env = build_sanitized_environment({
+            **auto['environment'],
+            'GOTOOLCHAIN': 'local',
+            'GOPROXY': 'off',
+            'GOWORK': 'off',
+            'GOENV': 'off',
+            'GOFLAGS': '-mod=readonly',
+            'GOTMPDIR': '/tmp',
+            'HOME': '/tmp',
+        })
         argv = list(cite['argv'])
         if argv[1] == 'test':
             rest, i = [], 2
@@ -137,8 +146,16 @@ def execute_copy(ctx, auto, cite, module, rel):
                     i += 1
             argv = [argv[0], argv[1], '-count=1'] + rest
         try:
-            return ctx.run_command(argv, copy / rel, timeout=auto['timeout_seconds'], env=env)
-        except ToolError:
+            policy = SandboxPolicy(
+                working_directory=copy / rel,
+                workspace_root=ctx.root,
+                allow_cwd_write=True,
+                unshare_net=True,
+                mask_governance_dirs=True,
+            )
+            iso_argv, _ = prepare_isolated_command(argv, policy=policy, mandatory=True)
+            return ctx.run_command(iso_argv, copy / rel, timeout=auto['timeout_seconds'], env=env)
+        except (ToolError, IsolationError):
             return None
 
 
@@ -192,13 +209,36 @@ def check(ctx, value):
         for path, sha in selected['inputs'].items():
             if digest(ctx.read(path)) != sha:
                 raise ToolError('rerun input differs: '+path)
-        clean_env = {k:v for k,v in os.environ.items() if not k.startswith(('LD_','ANTHROPIC_')) and k not in ['GOROOT','GODEBUG','GOEXPERIMENT','CGO_CFLAGS','CGO_CPPFLAGS','CGO_CXXFLAGS','CGO_LDFLAGS']}
-        clean_env.update(env)
-        clean_env.update(GOTOOLCHAIN='local',GOPROXY='off',GOWORK='off',GOENV='off')
-        smoke = ctx.run_command(selected['smoke_argv'],selected['cwd'],timeout=selected['smoke_timeout_seconds'],env=clean_env)
+        tool_root = str(Path(__file__).resolve().parents[1])
+        if tool_root not in sys.path:
+            sys.path.insert(0, tool_root)
+        from stagecheck.core.commands import build_sanitized_environment
+        from stagecheck.core.isolation import IsolationError, SandboxPolicy, prepare_isolated_command
+        clean_env = build_sanitized_environment({
+            **env,
+            'GOTOOLCHAIN': 'local',
+            'GOPROXY': 'off',
+            'GOWORK': 'off',
+            'GOENV': 'off',
+            'HOME': '/tmp',
+            'GOTMPDIR': '/tmp',
+        })
+        policy = SandboxPolicy(
+            working_directory=Path(selected['cwd']),
+            workspace_root=ctx.root,
+            allow_cwd_write=True,
+            unshare_net=True,
+            mask_governance_dirs=True,
+        )
+        try:
+            iso_smoke, _ = prepare_isolated_command(selected['smoke_argv'], policy=policy, mandatory=True)
+            iso_argv, _ = prepare_isolated_command(argv, policy=policy, mandatory=True)
+        except IsolationError as exc:
+            raise ToolError('rerun isolation failed: ' + str(exc)) from exc
+        smoke = ctx.run_command(iso_smoke, selected['cwd'], timeout=selected['smoke_timeout_seconds'], env=clean_env)
         if smoke['exit_status']:
             raise ToolError('smoke check failed; full rerun was not executed')
-        execution = ctx.run_command(argv,selected['cwd'],timeout=selected['timeout_seconds'],env=clean_env)
+        execution = ctx.run_command(iso_argv, selected['cwd'], timeout=selected['timeout_seconds'], env=clean_env)
         for path, sha in selected['inputs'].items():
             if digest(ctx.read(path)) != sha:
                 raise ToolError('rerun changed an input: '+path)

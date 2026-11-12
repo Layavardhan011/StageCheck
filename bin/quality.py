@@ -11,6 +11,8 @@ from common import *
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'checks'))
 
 CHECKS=('preflight','scope_paths','citations','report_lint','authority','secrets','qual_naming','rerun','carry_forward')
+CHECK_SOURCES={c:{'checks/'+c+'.py'} for c in CHECKS}
+CHECK_SOURCES['secrets'].add('checks/secret_findings.py')
 ADDED={'bin/quality.py','bin/quality_write.py','bin/quality_seeds.py','bin/quality_measure.py','schemas/quality_record.schema.json','evals/test_quality.py','config/quality_targets.json'}
 ZERO='0'*64
 
@@ -244,7 +246,7 @@ def validate_record(ctx,r,known,runs,current=None,override_only=False):
         check(s['check']);version(s['check'],s['version']);matches=[]
         for x in runs.values():
             v=x['value'];cs={c['id']:c.get('version') for c in v['checks']}
-            if v['task_id']==s['task'] and cs.get(s['check'])==s['version'] and any(d['defect_id']==s['defect_id'] and d['source']=='checks/'+s['check']+'.py' for d in v['defects']):matches.append(x['path'])
+            if v['task_id']==s['task'] and cs.get(s['check'])==s['version'] and any(d['defect_id']==s['defect_id'] and d['source'] in CHECK_SOURCES[s['check']] for d in v['defects']):matches.append(x['path'])
         if not matches or not any(isinstance(e,dict) and e.get('path') in matches for e in r['evidence']):raise ToolError('finding/version not witnessed in a cited real verdict')
     elif kind=='coverage':
         if set(s)!={'verdicts'} or not isinstance(s['verdicts'],list) or not s['verdicts']:raise ToolError('coverage subject differs')
@@ -446,7 +448,7 @@ def precision(ctx,runs,decisions,current):
         for sha,r in runs.items():
             v=r['value'];version=next((c.get('version') for c in v['checks'] if c['id']==check),None)
             for f in v['defects']:
-                if f['source']!='checks/'+check+'.py' or not version:continue
+                if f['source'] not in CHECK_SOURCES[check] or not version:continue
                 if version not in accepted:earlier=True;continue
                 key=(v['task_id'],f['defect_id'])
                 item=findings.setdefault(key,{'versions':set(),'covered':False,'rule':f['check_id']})
@@ -556,8 +558,8 @@ def blocking_evidence(ctx,exclude,current_defects):
                 entry=value['checks'][name]
                 c=measured['checks'][name] if measured else None
                 earlier=c['pending_count'] if c else len(stats[name]['pending'])
-                observed={(r['value']['task_id'],d['defect_id']) for r in runs.values() for d in r['value']['defects'] if d['source']=='checks/'+name+'.py' and any(x['id']==name and x.get('version')==current[name]['sha256'] for x in r['value']['checks'])}
-                own={(ctx.run['task_id'],d['defect_id']) for d in current_defects if d['source']=='checks/'+name+'.py'}-observed
+                observed={(r['value']['task_id'],d['defect_id']) for r in runs.values() for d in r['value']['defects'] if d['source'] in CHECK_SOURCES[name] and any(x['id']==name and x.get('version')==current[name]['sha256'] for x in r['value']['checks'])}
+                own={(ctx.run['task_id'],d['defect_id']) for d in current_defects if d['source'] in CHECK_SOURCES[name]}-observed
                 entry.update(earlier_pending_count=earlier,current_pending_count=len(own),pending_count=earlier+len(own))
                 override=any(d['record']['kind']=='blocking_override' and d['deciding_actor']=='owner' and d['record']['subject']['check']==name and d['record']['subject']['version'] in {'all',current[name]['sha256']} for d in overrides)
                 if override:entry.update(source='override',reason='owner override');continue

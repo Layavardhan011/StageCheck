@@ -133,7 +133,7 @@ def pretty_json_dumps(obj: Any, indent: int = 2) -> str:
       6. Output always ends with a newline.
     """
     try:
-        return json.dumps(obj, indent=indent, ensure_ascii=False) + "\n"
+        return json.dumps(obj, indent=indent, ensure_ascii=False, allow_nan=False) + "\n"
     except (TypeError, ValueError) as err:
         raise SerializationError(f"Failed to serialize object to formatted JSON: {err}") from err
 
@@ -175,35 +175,88 @@ def sha256_file(path: Union[str, Path]) -> str:
 # 3. JSON PARSING & SCHEMA VALIDATION
 # ==========================================
 
+def _reject_duplicate_json_keys(pairs: List[tuple]) -> Dict[str, Any]:
+    """Object pairs hook that rejects duplicate keys in JSON objects."""
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise JSONParseError(f"Duplicate JSON key '{key}' is not permitted.")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json_constant(constant: str) -> Any:
+    """Reject non-RFC-8259 JSON numeric constants (NaN, Infinity, -Infinity)."""
+    raise JSONParseError(f"Non-standard JSON constant '{constant}' is not permitted.")
+
+
+def strict_json_loads(content: str, source: str = "<memory>") -> Any:
+    """Parse JSON string strictly per RFC 8259 (rejects duplicate keys and NaN/Infinity)."""
+    try:
+        return json.loads(
+            content,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+    except JSONParseError:
+        raise
+    except json.JSONDecodeError as err:
+        raise JSONParseError(
+            f"Malformed JSON in '{source}' at line {err.lineno}, col {err.colno}: {err.msg}"
+        ) from err
+
+
 def load_json_file(path: Union[str, Path]) -> Any:
-    """Load and parse JSON from a file with descriptive error handling."""
+    """Load and parse JSON from a file with strict RFC 8259 enforcement."""
     file_path = Path(path)
     if not file_path.is_file():
         raise FileNotFoundError(f"JSON file does not exist: {file_path}")
 
     try:
         content = file_path.read_text(encoding="utf-8")
-        return json.loads(content)
-    except json.JSONDecodeError as err:
-        raise JSONParseError(
-            f"Malformed JSON in '{file_path}' at line {err.lineno}, col {err.colno}: {err.msg}"
-        ) from err
+        return strict_json_loads(content, source=str(file_path))
     except UnicodeDecodeError as err:
         raise JSONParseError(f"UTF-8 decoding failed for '{file_path}': {err}") from err
 
 
-def validate_schema(data: Any, schema: Dict[str, Any]) -> None:
-    """Lightweight built-in JSON schema validator for core structures.
+def _matches_json_type(data: Any, type_name: str) -> bool:
+    if type_name == "object":
+        return isinstance(data, dict)
+    if type_name == "array":
+        return isinstance(data, list)
+    if type_name == "string":
+        return isinstance(data, str)
+    if type_name == "integer":
+        return isinstance(data, int) and not isinstance(data, bool)
+    if type_name == "number":
+        return isinstance(data, (int, float)) and not isinstance(data, bool)
+    if type_name == "boolean":
+        return isinstance(data, bool)
+    if type_name == "null":
+        return data is None
+    raise SchemaValidationError(f"Unsupported schema type '{type_name}'.")
 
-    Validates types, required object fields, pattern regexes, enums,
-    minProperties, minItems, additionalProperties, const, oneOf, and anyOf.
+
+def validate_schema(data: Any, schema: Dict[str, Any]) -> None:
+    """Strict built-in JSON schema validator for core structures.
+
+    Validates types (including union lists and number), enum, const, oneOf, anyOf,
+    required, minProperties, additionalProperties, minLength, maxLength, pattern,
+    minimum, maximum, minItems, maxItems, and items.
     """
     if not isinstance(schema, dict):
         raise SchemaValidationError("Schema must be a dictionary.")
 
     if "const" in schema:
-        if data != schema["const"]:
+        if data != schema["const"] or type(data) is not type(schema["const"]):
             raise SchemaValidationError(f"Expected const value '{schema['const']}', got '{data}'.")
+
+    if "enum" in schema:
+        enum_values = schema["enum"]
+        if not any(data == ev and type(data) is type(ev) for ev in enum_values):
+            raise SchemaValidationError(
+                f"Value '{data}' not in allowed enum: {enum_values}."
+            )
 
     if "oneOf" in schema:
         matches = 0
@@ -233,10 +286,14 @@ def validate_schema(data: Any, schema: Dict[str, Any]) -> None:
         return
 
     expected_type = schema.get("type")
-    if expected_type == "object":
-        if not isinstance(data, dict):
-            raise SchemaValidationError(f"Expected object, got {type(data).__name__}.")
+    if expected_type is not None:
+        allowed_types = expected_type if isinstance(expected_type, list) else [expected_type]
+        if not allowed_types or not any(_matches_json_type(data, t) for t in allowed_types):
+            raise SchemaValidationError(
+                f"Expected type {expected_type!r}, got {type(data).__name__}."
+            )
 
+    if isinstance(data, dict):
         min_props = schema.get("minProperties")
         if min_props is not None and len(data) < min_props:
             raise SchemaValidationError(f"Object has {len(data)} properties, minimum required is {min_props}.")
@@ -257,36 +314,41 @@ def validate_schema(data: Any, schema: Dict[str, Any]) -> None:
             elif additional_props is False:
                 raise SchemaValidationError(f"Unexpected additional property '{key}' not allowed by schema.")
 
-    elif expected_type == "string":
-        if not isinstance(data, str):
-            raise SchemaValidationError(f"Expected string, got {type(data).__name__}.")
+    elif isinstance(data, str):
+        min_length = schema.get("minLength")
+        if min_length is not None and len(data) < min_length:
+            raise SchemaValidationError(
+                f"String length {len(data)} is less than minLength {min_length}."
+            )
+        max_length = schema.get("maxLength")
+        if max_length is not None and len(data) > max_length:
+            raise SchemaValidationError(
+                f"String length {len(data)} exceeds maxLength {max_length}."
+            )
         pattern = schema.get("pattern")
-        if pattern and not re.search(pattern, data):
-            raise SchemaValidationError(
-                f"String '{data}' does not match pattern '{pattern}'."
-            )
-        enum_values = schema.get("enum")
-        if enum_values and data not in enum_values:
-            raise SchemaValidationError(
-                f"Value '{data}' not in allowed enum: {enum_values}."
-            )
+        if pattern is not None:
+            if not re.search(pattern, data) or (
+                pattern.endswith("$") and not pattern.endswith(r"\$") and data.endswith("\n")
+            ):
+                raise SchemaValidationError(
+                    f"String '{data}' does not match pattern '{pattern}'."
+                )
 
-    elif expected_type == "integer":
-        if not isinstance(data, int) or isinstance(data, bool):
-            raise SchemaValidationError(f"Expected integer, got {type(data).__name__}.")
+    elif isinstance(data, (int, float)) and not isinstance(data, bool):
         minimum = schema.get("minimum")
         if minimum is not None and data < minimum:
-            raise SchemaValidationError(f"Integer {data} is less than minimum {minimum}.")
+            raise SchemaValidationError(f"Number {data} is less than minimum {minimum}.")
         maximum = schema.get("maximum")
         if maximum is not None and data > maximum:
-            raise SchemaValidationError(f"Integer {data} exceeds maximum {maximum}.")
+            raise SchemaValidationError(f"Number {data} exceeds maximum {maximum}.")
 
-    elif expected_type == "array":
-        if not isinstance(data, list):
-            raise SchemaValidationError(f"Expected array, got {type(data).__name__}.")
+    elif isinstance(data, list):
         min_items = schema.get("minItems")
         if min_items is not None and len(data) < min_items:
             raise SchemaValidationError(f"Array has {len(data)} items, minimum required is {min_items}.")
+        max_items = schema.get("maxItems")
+        if max_items is not None and len(data) > max_items:
+            raise SchemaValidationError(f"Array has {len(data)} items, maximum allowed is {max_items}.")
         items_schema = schema.get("items")
         if items_schema:
             for idx, item in enumerate(data):
@@ -294,9 +356,5 @@ def validate_schema(data: Any, schema: Dict[str, Any]) -> None:
                     validate_schema(item, items_schema)
                 except SchemaValidationError as err:
                     raise SchemaValidationError(f"Array item at index {idx} invalid: {err}") from err
-
-    elif expected_type == "boolean":
-        if not isinstance(data, bool):
-            raise SchemaValidationError(f"Expected boolean, got {type(data).__name__}.")
 
 

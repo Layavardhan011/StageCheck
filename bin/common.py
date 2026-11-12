@@ -121,6 +121,7 @@ SAFE_GIT_FLAGS = [
     '-c', 'core.pager=cat',
     '-c', 'core.hooksPath=/dev/null',
     '-c', 'core.editor=cat',
+    '-c', 'diff.external=',
 ]
 
 
@@ -137,6 +138,14 @@ def command(argv, cwd, timeout=30, env=None):
 
 
 def safe_git(args, cwd, timeout=30):
+    tool_root = str(Path(__file__).resolve().parent.parent)
+    if tool_root not in sys.path:
+        sys.path.insert(0, tool_root)
+    from stagecheck.core.git import GitError, assert_safe_repo_git_config
+    try:
+        assert_safe_repo_git_config(Path(cwd))
+    except GitError as exc:
+        raise ToolError('unsafe repository git config: ' + str(exc)) from exc
     effective = list(args)
     if effective and effective[0] == 'diff':
         for flag in ('--no-textconv', '--no-ext-diff'):

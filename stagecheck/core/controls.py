@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from stagecheck.core.utils import load_json_file
 from stagecheck.schemas.validator import validate_control_descriptor
 
 
@@ -98,8 +99,7 @@ def validate_controls_registry(
         # Validate content & schema
         if name.endswith(".json"):
             try:
-                content = control_path.read_text(encoding="utf-8")
-                data = json.loads(content)
+                data = load_json_file(control_path)
                 validate_control_descriptor(name, data)
                 validated.append(name)
             except Exception as err:

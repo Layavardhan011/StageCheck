@@ -174,6 +174,17 @@ def run_stage3_citations(ctx: AuditContext) -> StageResult:
                                 citation=cite,
                             )
                         )
+            elif cite_type not in ("upstream", "command"):
+                defects.append(
+                    Defect(
+                        defect_id="citations.unsupported_type",
+                        message=f"Unsupported citation type '{cite_type}'.",
+                        stage=stage_id,
+                        severity="HIGH",
+                        blocking=True,
+                        citation=cite,
+                    )
+                )
 
     status = "FAIL" if (errors or any(d.blocking for d in defects)) else "CLEAR"
     return StageResult(stage_id=stage_id, status=status, defects=defects, errors=errors)

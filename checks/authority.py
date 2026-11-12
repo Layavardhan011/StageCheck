@@ -176,8 +176,7 @@ def consequential(argv):
         return False
     if name == 'sort':
         return any(
-            x == '--compress-program'
-            or x.startswith(('--output', '--compress-program='))
+            x.startswith(('--o', '--co'))
             or (x.startswith('-') and not x.startswith('--') and 'o' in x[1:])
             for x in args
         )

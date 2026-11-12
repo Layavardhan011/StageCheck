@@ -414,6 +414,19 @@ class TestNineStageVerification(unittest.TestCase):
         self.assertFalse(res_fail.is_clear)
         self.assertTrue(any("citation" in d.defect_id for d in res_fail.defects))
 
+        # Unknown citation types must fail closed
+        ctx_unknown = AuditContext(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            touched_repos=["app"],
+            all_registered_repos=["app"],
+            claims={"claims": [{"id": "c3", "citations": [{"type": "bogus_kind"}]}]},
+        )
+        res_unknown = run_stage3_citations(ctx_unknown)
+        self.assertFalse(res_unknown.is_clear)
+        self.assertTrue(any(d.defect_id == "citations.unsupported_type" for d in res_unknown.defects))
+
     def test_stage4_report_lint_and_injection(self):
         """Test Stage 4 enforces delivery report presence and anti-prompt injection."""
         ctx = AuditContext(

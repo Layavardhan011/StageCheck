@@ -1,7 +1,7 @@
 """Unit Tests for Dynamic Git Remote Authority Whitelist (FP-STAGECHECK-REMOTE-ORG / SR-08 / DEC-021)."""
 
 import unittest
-from checks.authority import approved_remote
+from checks.authority import approved_remote, consequential
 
 
 class TestAuthorityRemote(unittest.TestCase):
@@ -49,6 +49,20 @@ class TestAuthorityRemote(unittest.TestCase):
                 approved_remote(bad_url, approved | blacklisted),
                 f"Expected blacklisted endpoint '{bad_url}' to be rejected",
             )
+
+    def test_sort_abbreviated_long_options_classified_consequential(self):
+        """Verify GNU sort unambiguous abbreviated --o* / --co* flags are consequential."""
+        self.assertFalse(consequential(["sort", "-u", "input.txt"]))
+        self.assertFalse(consequential(["sort", "--check", "input.txt"]))
+        for argv in (
+            ["sort", "--o=out.txt", "in.txt"],
+            ["sort", "--out=out.txt", "in.txt"],
+            ["sort", "--out", "out.txt", "in.txt"],
+            ["sort", "--co=sh", "in.txt"],
+            ["sort", "--compress=sh", "in.txt"],
+            ["sort", "--compress", "sh", "in.txt"],
+        ):
+            self.assertTrue(consequential(argv), f"Expected consequential=True for {argv}")
 
 
 if __name__ == "__main__":

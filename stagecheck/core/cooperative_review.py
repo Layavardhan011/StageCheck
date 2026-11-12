@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.git import SAFE_GIT_SECURITY_FLAGS, run_safe_git, run_safe_git_bytes, split_git_nul_paths
 from stagecheck.core.paths import StageCheckPathError, resolve_task_dir, safe_resolve
-from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest, validate_schema
+from stagecheck.core.utils import canonical_json_dumps, load_json_file, pretty_json_dumps, sha256_digest, validate_schema
 from stagecheck.schemas import get_schema_path
 
 _REPO_NAME_RE = re.compile(r"\A[a-zA-Z0-9._-]+\Z")
@@ -537,7 +537,7 @@ def assert_commit_authorization(
         )
 
     try:
-        data = json.loads(review_file.read_text(encoding="utf-8"))
+        data = load_json_file(review_file)
     except Exception as err:
         raise CommitUnauthorizedError(f"Corrupted pre_commit_review.json: {err}") from err
 
