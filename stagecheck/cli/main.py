@@ -211,6 +211,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_super.add_argument("--timeout", type=float, default=1800.0, help="Watchdog timeout seconds.")
     p_super.add_argument("--phase-delay", type=float, default=30.0, help="Sleep seconds between phase transitions (default: 30s).")
     p_super.add_argument("--json", action="store_true", dest="json_output", help="Emit JSON output.")
+    p_super.add_argument("--color", dest="color", action="store_const", const=True, default=None, help="Force colored terminal output.")
+    p_super.add_argument("--no-color", dest="color", action="store_const", const=False, help="Disable colored terminal output.")
     p_super.add_argument("--workspace", help="Explicit workspace root path.")
 
     return parser
@@ -488,6 +490,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             timeout=getattr(args, "timeout", 1800.0),
             phase_delay=getattr(args, "phase_delay", 30.0),
             output_json=getattr(args, "json_output", False),
+            color=getattr(args, "color", None),
         )
 
     # In Phase 2, subcommands acknowledge dispatch; full execution wired in Phase 3-4

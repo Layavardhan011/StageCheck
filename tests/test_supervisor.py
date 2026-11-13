@@ -624,6 +624,99 @@ class TestSupervisorCLI(unittest.TestCase):
         # 4. Phase transition notice displayed
         self.assertIn("[TRANSITION] Phase advanced to PHASE_2A_CODING.", output)
 
+    def test_supervisor_terminal_colors_formatting(self) -> None:
+        """Verify color formatting for statuses (WAITING=yellow, ADVANCED=green, etc.) and phases (PHASE-01=cyan, etc.)."""
+        from stagecheck.cli.supervisor_cmd import (
+            color_phase,
+            color_status,
+            format_attempt_banner,
+            format_completed_line,
+            format_status_line,
+            format_transition_line,
+        )
+
+        # Statuses: WAITING is yellow (\033[1;33m), ADVANCED is green (\033[1;32m), HALTED is red (\033[1;31m)
+        self.assertIn("\033[1;33m[WAITING]\033[0m", color_status("WAITING", enabled=True))
+        self.assertIn("\033[1;33m[WARNING]\033[0m", color_status("WARNING", enabled=True))
+        self.assertIn("\033[1;32m[ADVANCED]\033[0m", color_status("ADVANCED", enabled=True))
+        self.assertIn("\033[1;35m[TRANSITION]\033[0m", color_status("TRANSITION", enabled=True))
+        self.assertIn("\033[1;36m[IDLE]\033[0m", color_status("IDLE", enabled=True))
+        self.assertIn("\033[1;92m[COMPLETED]\033[0m", color_status("COMPLETED", enabled=True))
+        self.assertIn("\033[1;31m[HALTED]\033[0m", color_status("HALTED", enabled=True))
+
+        # Phases: Phase 1 is cyan (\033[1;36m), Phase 2A is blue (\033[1;94m), Phase 2B is magenta (\033[1;35m), Phase 3 is yellow (\033[1;33m)
+        self.assertIn("\033[1;36mPHASE_1_PLANNING\033[0m", color_phase("PHASE_1_PLANNING", enabled=True))
+        self.assertIn("\033[1;36mPHASE-01\033[0m", color_phase("PHASE-01", enabled=True))
+        self.assertIn("\033[1;94mPHASE_2A_CODING\033[0m", color_phase("PHASE_2A_CODING", enabled=True))
+        self.assertIn("\033[1;94mPHASE-02A\033[0m", color_phase("PHASE-02A", enabled=True))
+        self.assertIn("\033[1;35mPHASE_2B_COMMITTING\033[0m", color_phase("PHASE_2B_COMMITTING", enabled=True))
+        self.assertIn("\033[1;35mPHASE-02B\033[0m", color_phase("PHASE-02B", enabled=True))
+        self.assertIn("\033[1;33mPHASE_3_AUDIT\033[0m", color_phase("PHASE_3_AUDIT", enabled=True))
+        self.assertIn("\033[1;33mPHASE-03\033[0m", color_phase("PHASE-03", enabled=True))
+
+        # Formatted status line contains colored status and phase
+        line = format_status_line("WAITING", "PHASE_1_PLANNING", "WAITING_FOR_BLUEPRINT", "Waiting for Agent 1", enabled=True)
+        self.assertIn("\033[1;33m[WAITING]\033[0m", line)
+        self.assertIn("\033[1;36mPHASE_1_PLANNING\033[0m", line)
+
+        # Transition line contains colored TRANSITION and phase
+        trans = format_transition_line("PHASE_2B_COMMITTING", 30, enabled=True)
+        self.assertIn("\033[1;35m[TRANSITION]\033[0m", trans)
+        self.assertIn("\033[1;35mPHASE_2B_COMMITTING\033[0m", trans)
+
+        # Completed line contains cyan prefix and duration
+        comp = format_completed_line("Completed", "30 sec", enabled=True)
+        self.assertIn("30 sec", comp)
+
+        # Attempt banner contains yellow attempt title
+        banner = format_attempt_banner(2, "task-01", enabled=True)
+        self.assertIn("ADVANCING TO ATTEMPT 2", banner)
+        self.assertIn("\033[1;93m", banner)
+
+    def test_supervisor_watch_with_forced_color(self) -> None:
+        """Verify supervisor --watch emits ANSI colors when color is forced."""
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+        from stagecheck.cli.supervisor_cmd import run_supervisor_cmd
+        from stagecheck.core.supervisor import SupervisorStepResult
+
+        step_results = [
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=1,
+                current_phase="PHASE_1_PLANNING",
+                action_taken="WAITING_FOR_BLUEPRINT",
+                status="WAITING",
+                message="Waiting for Agent 1.",
+            ),
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=1,
+                current_phase="SEALED_PASSED",
+                action_taken="GATE4_SEALED",
+                status="COMPLETED",
+                message="Task completed and sealed.",
+            ),
+        ]
+
+        buf = io.StringIO()
+        with patch("stagecheck.cli.supervisor_cmd.SupervisorEngine.step", side_effect=step_results):
+            with patch("time.sleep", return_value=None):
+                with redirect_stdout(buf):
+                    rc = run_supervisor_cmd(
+                        workspace=str(self.ws),
+                        watch=True,
+                        phase_delay=0.01,
+                        color=True,
+                    )
+
+        output = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("\033[1;33m[WAITING]\033[0m", output)
+        self.assertIn("\033[1;36mPHASE_1_PLANNING\033[0m", output)
+        self.assertIn("\033[1;92m[COMPLETED]\033[0m", output)
+
 
 if __name__ == "__main__":
     unittest.main()
