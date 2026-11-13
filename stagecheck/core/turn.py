@@ -165,7 +165,7 @@ def compute_turn_status(
         elif prompt_file.is_file():
             active_turn = "STAGECHECK"
             waiting_for = "prompt_verified.json"
-            instructions = "Phase-1/prompt.md detected. StageCheck supervisor will verify prompt and freeze scope after 30s stability."
+            instructions = "Phase-1/prompt.md detected. StageCheck supervisor will verify prompt and freeze scope after 1 min stability."
             preceding_status = {"file": "Phase-1/prompt.md", "status": "DRAFTED"}
         else:
             active_turn = "AGENT_1"

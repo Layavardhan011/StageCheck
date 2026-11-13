@@ -24,6 +24,18 @@ from stagecheck.core.supervisor import (
 )
 
 
+def format_duration(seconds: float) -> str:
+    """Format duration nicely in seconds and minutes."""
+    secs = int(round(seconds))
+    if secs < 60:
+        return f"{secs} sec"
+    mins = secs // 60
+    rem = secs % 60
+    if rem == 0:
+        return f"{mins} min ({secs} sec)"
+    return f"{mins} min {rem} sec ({secs} sec)"
+
+
 def run_supervisor_cmd(
     action: Optional[str] = None,
     task: Optional[str] = None,
@@ -32,9 +44,10 @@ def run_supervisor_cmd(
     watch: bool = False,
     once: bool = False,
     file_path: Optional[str] = None,
-    seconds: float = 30.0,
+    seconds: float = 60.0,
     ceiling: float = 300.0,
     timeout: float = 1800.0,
+    phase_delay: float = 30.0,
     output_json: bool = False,
 ) -> int:
     """Execute supervisor commands and workflows."""
@@ -123,17 +136,58 @@ def run_supervisor_cmd(
     # 4. Standard step execution or continuous loop
     if watch:
         print("Starting continuous autonomous supervisor loop (press Ctrl+C to stop)...")
+        last_state_key: Optional[Tuple[str, str, str, str]] = None
+        action_start_time: float = time.time()
+        last_attempt: Optional[int] = None
+        last_phase: Optional[str] = None
+
         try:
             while True:
                 res = engine.step(task_id=task, attempt=attempt)
+                current_time = time.time()
+                state_key = (res.status, res.current_phase, res.action_taken, res.message)
+
+                # Highlight moving to next attempt prominently
+                if last_attempt is not None and res.attempt != last_attempt:
+                    print("\n" + "=" * 80)
+                    print(f"            >>> ADVANCING TO ATTEMPT {res.attempt} (Task: {res.task_id}) <<<")
+                    print("=" * 80 + "\n")
+                last_attempt = res.attempt
+
                 if output_json:
-                    print(json.dumps(res.__dict__))
+                    if state_key != last_state_key:
+                        print(json.dumps(res.__dict__))
+                        last_state_key = state_key
                 else:
-                    print(f"[{res.status}] Phase: {res.current_phase} | Action: {res.action_taken} -> {res.message}")
+                    if state_key != last_state_key:
+                        # Display duration of previous action when transitioning to a new action
+                        if last_state_key is not None:
+                            elapsed = current_time - action_start_time
+                            prev_status, _, _, _ = last_state_key
+                            if prev_status == "WAITING" or elapsed >= 1.0:
+                                print(f"  └── Completed in {format_duration(elapsed)}")
+
+                        # Display new status line once
+                        print(f"[{res.status}] Phase: {res.current_phase} | Action: {res.action_taken} -> {res.message}")
+                        action_start_time = current_time
+                        last_state_key = state_key
 
                 if res.status in ("COMPLETED", "HALTED", "DEFECTS_DETECTED"):
+                    if not output_json and last_state_key is not None:
+                        elapsed = time.time() - action_start_time
+                        if elapsed >= 1.0:
+                            print(f"  └── Finished in {format_duration(elapsed)}")
                     return 0 if res.status == "COMPLETED" else 1
 
+                # Sleep time between phase changes (e.g. 30 sec between each phase)
+                if res.status == "ADVANCED" or (last_phase is not None and res.current_phase != last_phase):
+                    if phase_delay > 0:
+                        if not output_json:
+                            print(f"[TRANSITION] Phase advanced to {res.current_phase}. Pausing {int(phase_delay)}s stability interval between phases...")
+                        time.sleep(phase_delay)
+                        action_start_time = time.time()
+
+                last_phase = res.current_phase
                 time.sleep(2.0)
         except KeyboardInterrupt:
             print("\nSupervisor interrupted by operator.")

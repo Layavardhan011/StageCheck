@@ -42,7 +42,7 @@
     },
     "freeze_reason": {
       "type": "string",
-      "enum": ["INOTIFY_SILENCE_30S", "HARD_CEILING_300S", "MANUAL"]
+      "enum": ["INOTIFY_SILENCE_30S", "INOTIFY_SILENCE_60S", "HARD_CEILING_300S", "MANUAL"]
     }
   }
 }

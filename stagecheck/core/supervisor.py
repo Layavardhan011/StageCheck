@@ -315,7 +315,7 @@ class PromptDebouncer:
 
     def __init__(
         self,
-        quiet_seconds: float = 30.0,
+        quiet_seconds: float = 60.0,
         max_ceiling_seconds: float = 300.0,
     ):
         self.quiet_seconds = quiet_seconds
@@ -361,16 +361,18 @@ class PromptDebouncer:
             self._last_content_hash = content_hash
             self._last_change_time = current_time
 
-        elapsed_since_first = current_time - self._first_seen_time
-        elapsed_since_change = current_time - (self._last_change_time or current_time)
+        first_seen = self._first_seen_time if self._first_seen_time is not None else current_time
+        last_change = self._last_change_time if self._last_change_time is not None else current_time
+        elapsed_since_first = current_time - first_seen
+        elapsed_since_change = current_time - last_change
 
         # 1. Hard ceiling check: continuous activity >= max_ceiling_seconds (300s)
         if elapsed_since_first >= self.max_ceiling_seconds:
             return True, "HARD_CEILING_300S"
 
-        # 2. Sliding window check: quiet for >= quiet_seconds (30s)
+        # 2. Sliding window check: quiet for >= quiet_seconds
         if elapsed_since_change >= self.quiet_seconds:
-            return True, "INOTIFY_SILENCE_30S"
+            return True, f"INOTIFY_SILENCE_{int(self.quiet_seconds)}S"
 
         return False, None
 
@@ -393,7 +395,7 @@ class SupervisorEngine:
     def __init__(
         self,
         workspace_root: Union[str, Path],
-        quiet_seconds: float = 30.0,
+        quiet_seconds: float = 60.0,
         max_ceiling_seconds: float = 300.0,
         watchdog_timeout_seconds: float = 1800.0,
     ):
@@ -493,21 +495,27 @@ class SupervisorEngine:
 
                         is_stable, freeze_reason = self.debouncer.check_stability(prompt_file, now=now)
                         if not is_stable:
+                            wait_desc = (
+                                f"{int(self.debouncer.quiet_seconds)}s"
+                                if self.debouncer.quiet_seconds != 60.0
+                                else "1 min"
+                            )
                             return SupervisorStepResult(
                                 task_id=task,
                                 attempt=att,
                                 current_phase=phase,
                                 action_taken="DEBOUNCING_PROMPT",
                                 status="WAITING",
-                                message="prompt.md detected. Waiting for 30s stability debounce.",
+                                message=f"prompt.md detected. Waiting for {wait_desc} stability debounce.",
                             )
 
                         # Prompt is stable: freeze and verify atomically with Gate 1 advance
+                        default_reason = f"INOTIFY_SILENCE_{int(self.debouncer.quiet_seconds)}S"
                         freeze_prompt_and_scope(
                             workspace_root=self.root,
                             task_id=task,
                             attempt=att,
-                            freeze_reason=freeze_reason or "INOTIFY_SILENCE_30S",
+                            freeze_reason=freeze_reason or default_reason,
                         )
                         _advance_gate_atomic_locked(self.root, GateId.GATE_1, task, att)
                         self.debouncer.reset()

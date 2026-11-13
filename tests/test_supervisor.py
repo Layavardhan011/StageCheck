@@ -494,6 +494,136 @@ class TestSupervisorCLI(unittest.TestCase):
         self.assertNotIn("interrupted_phase", updated["watchdog"])
         self.assertNotEqual(updated["watchdog"]["last_active_timestamp"], "2020-01-01T00:00:00+00:00")
 
+    def test_default_60s_debounce_and_format_duration(self) -> None:
+        """Verify default 60s debounce triggers INOTIFY_SILENCE_60S and format_duration formatting."""
+        from stagecheck.cli.supervisor_cmd import format_duration
+
+        # 1. format_duration verification
+        self.assertEqual(format_duration(45.2), "45 sec")
+        self.assertEqual(format_duration(60.0), "1 min (60 sec)")
+        self.assertEqual(format_duration(100.0), "1 min 40 sec (100 sec)")
+        self.assertEqual(format_duration(195.0), "3 min 15 sec (195 sec)")
+
+        # 2. Debouncer default quiet_seconds is 60.0s
+        debouncer = PromptDebouncer()
+        self.assertEqual(debouncer.quiet_seconds, 60.0)
+
+        # File created at t=0
+        test_file = self.ws / "test_prompt.md"
+        test_file.write_text("# Blueprint\n", encoding="utf-8")
+        stable, reason = debouncer.check_stability(test_file, now=0.0)
+        self.assertFalse(stable)
+
+        # Untouched at 59s -> not stable
+        stable, reason = debouncer.check_stability(test_file, now=59.0)
+        self.assertFalse(stable)
+
+        # Untouched at 60s -> stable via INOTIFY_SILENCE_60S
+        stable, reason = debouncer.check_stability(test_file, now=60.0)
+        self.assertTrue(stable)
+        self.assertEqual(reason, "INOTIFY_SILENCE_60S")
+
+    def test_supervisor_step_debouncing_message_shows_1_min(self) -> None:
+        """Verify SupervisorEngine step debouncing message announces 1 min debounce."""
+        from stagecheck.core.permissions import controlled_write_transaction
+
+        engine = SupervisorEngine(workspace_root=self.ws)
+        self.assertEqual(engine.debouncer.quiet_seconds, 60.0)
+
+        task_id = load_active_state(self.ws)["task_id"]
+        with controlled_write_transaction(self.ws / "controls"):
+            st = load_active_state(self.ws)
+            st["phase"] = "PHASE_1_PLANNING"
+            save_active_state(self.ws, st)
+
+        # Draft prompt and scope
+        p1_dir = self.ws / "evidence" / "tasks" / task_id / "attempt_1" / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").write_text("# Draft Prompt\n", encoding="utf-8")
+        (p1_dir / "declared_scope.json").write_text('{"schema_version": "2.0", "task_id": "test", "allowed_paths": []}\n', encoding="utf-8")
+
+        res = engine.step(task_id=task_id, attempt=1, now=10.0)
+        self.assertEqual(res.status, "WAITING")
+        self.assertEqual(res.action_taken, "DEBOUNCING_PROMPT")
+        self.assertIn("1 min stability debounce", res.message)
+
+    def test_supervisor_watch_deduplication_and_attempt_highlight(self) -> None:
+        """Verify supervisor --watch deduplicates repeated waiting lines, displays elapsed time, and highlights attempt changes."""
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+        from stagecheck.cli.supervisor_cmd import run_supervisor_cmd
+        from stagecheck.core.supervisor import SupervisorStepResult
+
+        step_results = [
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=1,
+                current_phase="PHASE_1_PLANNING",
+                action_taken="DEBOUNCING_PROMPT",
+                status="WAITING",
+                message="prompt.md detected. Waiting for 1 min stability debounce.",
+            ),
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=1,
+                current_phase="PHASE_1_PLANNING",
+                action_taken="DEBOUNCING_PROMPT",
+                status="WAITING",
+                message="prompt.md detected. Waiting for 1 min stability debounce.",
+            ),
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=1,
+                current_phase="PHASE_2A_CODING",
+                action_taken="PROMPT_VERIFIED_AND_GATE1_ADVANCED",
+                status="ADVANCED",
+                message="Prompt verified. Advanced to PHASE_2A_CODING.",
+            ),
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=2,
+                current_phase="PHASE_1_PLANNING",
+                action_taken="WAITING_FOR_BLUEPRINT",
+                status="WAITING",
+                message="Waiting for Agent 1 to write prompt.",
+            ),
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=2,
+                current_phase="COMPLETED",
+                action_taken="GATE4_SEALED",
+                status="COMPLETED",
+                message="Task completed and sealed.",
+            ),
+        ]
+
+        buf = io.StringIO()
+        with patch("stagecheck.cli.supervisor_cmd.SupervisorEngine.step", side_effect=step_results):
+            with patch("time.sleep", return_value=None):
+                with redirect_stdout(buf):
+                    rc = run_supervisor_cmd(
+                        workspace=str(self.ws),
+                        watch=True,
+                        phase_delay=0.01,
+                    )
+
+        output = buf.getvalue()
+        self.assertEqual(rc, 0)
+
+        # 1. Repeated DEBOUNCING_PROMPT must appear only once as [WAITING]
+        self.assertEqual(output.count("[WAITING] Phase: PHASE_1_PLANNING | Action: DEBOUNCING_PROMPT"), 1)
+
+        # 2. When DEBOUNCING_PROMPT finished, completion duration displayed
+        self.assertIn("Completed in", output)
+
+        # 3. Next attempt banner displayed prominently
+        self.assertIn(">>> ADVANCING TO ATTEMPT 2 (Task: task-01) <<<", output)
+        self.assertIn("=" * 80, output)
+
+        # 4. Phase transition notice displayed
+        self.assertIn("[TRANSITION] Phase advanced to PHASE_2A_CODING.", output)
+
 
 if __name__ == "__main__":
     unittest.main()
