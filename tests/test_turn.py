@@ -159,6 +159,23 @@ class TestTurnProtocol(unittest.TestCase):
         t3 = compute_turn_status(self.workspace)
         self.assertEqual(t3.active_turn, "AGENT_2")
 
+        # 3b. Agent 2 resubmits with incremented cycle 2: loops back to AGENT_1 turn
+        (p2a_dir / "pre_commit_status.json").write_text(
+            json.dumps({
+                "schema_version": "1.0.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "cycle": 2,
+                "status": "AWAITING_REVIEW",
+                "touched_repositories": ["service"],
+                "base_commits": {"service": "abc"},
+            }),
+            encoding="utf-8",
+        )
+        t3b = compute_turn_status(self.workspace)
+        self.assertEqual(t3b.active_turn, "AGENT_1")
+        self.assertEqual(t3b.waiting_for, "Phase-2A/pre_commit_review.json")
+
         # 4. If review is approved: STAGECHECK turn (commit & advance)
         (p2a_dir / "pre_commit_review.json").write_text(
             json.dumps({

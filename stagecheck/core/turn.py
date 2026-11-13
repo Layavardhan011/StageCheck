@@ -197,15 +197,22 @@ def compute_turn_status(
                 try:
                     rev_data = load_json_file(review_file)
                     rev_val = rev_data.get("status", "UNKNOWN")
+                    rev_cycle = int(rev_data.get("cycle", 0))
                     if preceding_status:
                         preceding_status["review_status"] = rev_val
                 except Exception:
                     rev_val = "UNKNOWN"
+                    rev_cycle = 0
 
                 if rev_val == "REVISION_REQUIRED":
-                    active_turn = "AGENT_2"
-                    waiting_for = "Phase-2A/pre_commit_status.json"
-                    instructions = "Review status is REVISION_REQUIRED. Agent 2 must read Phase-2A/response.json, address defects, increment cycle, and resubmit pre_commit_status.json."
+                    if cycle > rev_cycle:
+                        active_turn = "AGENT_1"
+                        waiting_for = "Phase-2A/pre_commit_review.json"
+                        instructions = "Agent 1 must review uncommitted diff against rubric/taxonomies and write Phase-2A/pre_commit_review.json."
+                    else:
+                        active_turn = "AGENT_2"
+                        waiting_for = "Phase-2A/pre_commit_status.json"
+                        instructions = "Review status is REVISION_REQUIRED. Agent 2 must read Phase-2A/response.json, address defects, increment cycle, and resubmit pre_commit_status.json."
                 elif rev_val == "APPROVED":
                     active_turn = "STAGECHECK"
                     waiting_for = "Gate-2A / Gate-2B commit and advance"
