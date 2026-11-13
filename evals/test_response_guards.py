@@ -4,9 +4,19 @@ from pathlib import Path
 from unittest.mock import patch,MagicMock
 from test_response import Hook,HEADS,rh,ToolError,encode,digest,load
 
+Hook.__test__ = False
+
 class Refusals(Hook):
     # Only this class's own tests run; inherited decision tests are exercised
     # by test_response.py, independently of these focused refusal probes.
+    pass
+
+for _attr in dir(Hook):
+    if _attr.startswith("test_") and _attr not in ("test_refusals", "test_verdict_refusals", "test_hook_refusals"):
+        setattr(Refusals, _attr, None)
+
+class Refusals(Refusals):
+    __test__ = True
     def test_refusals(self):
         def refused(message,call):
             with self.subTest(refusal=message),self.assertRaisesRegex(ToolError,message):call()

@@ -346,8 +346,7 @@ class Fixture(unittest.TestCase):
         self.configure_blocking();self.launch('bootstrap')  # Install final fixture paths/config before labels.
         p=q.load(self.root/'evidence/stagecheck/bootstrap/1/verdict.json')
         q.append_record(self.ctx,self.request('coverage',{'verdicts':[q.digest((self.root/'evidence/stagecheck/bootstrap/1/verdict.json').read_bytes())]},'covered'))
-        for i in range(93):
-            path,_=self.verdict(task='count-'+str(i),defect_id='D-'+str(i));q.append_record(self.ctx,self.label(path))
+        self.populate_precision(93)
         r,path,v=self.launch('earned');self.assertEqual((r.returncode,v['result']),(1,'BLOCKED'))
         self.assertEqual(v['quality']['checks']['citations']['source'],'measurement')
         self.assertEqual(v['quality']['checks']['citations']['earlier_pending_count'],0)
