@@ -384,6 +384,9 @@ def append_to_cumulative_issue_history(
     with history_file.open("a", encoding="utf-8") as f:
         f.writelines(lines)
 
+    from stagecheck.core.evidence import update_evidence_manifest
+    update_evidence_manifest(workspace_root, [history_file])
+
 
 def record_pre_commit_review(
     workspace_root: Union[str, Path],

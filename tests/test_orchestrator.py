@@ -639,6 +639,42 @@ class TestNineStageVerification(unittest.TestCase):
         res2_pass = run_stage9_carry_forward(ctx_att2)
         self.assertTrue(res2_pass.is_clear)
 
+    def test_stage9_carry_forward_unsealed_retry_attempt(self):
+        """Test Stage 9 unsealed retry attempt clears when prior attempt failed and ledger is present."""
+        import json
+        from stagecheck.core.evidence import append_issue_history
+        from stagecheck.checks.stage9_carry_forward import run_stage9_carry_forward
+
+        task_id = "task-unsealed-retry"
+        p1_dir = self.workspace_root / "evidence" / "tasks" / task_id / "attempt_1"
+        p1_p3 = p1_dir / "Phase-3"
+        p1_p3.mkdir(parents=True, exist_ok=True)
+
+        # Attempt 1 failed audit, no seal.json generated (Gate 4 never executed)
+        (p1_p3 / "verdict.json").write_text(
+            json.dumps({"task_id": task_id, "attempt": 1, "result": "BLOCKED", "status": "FAILED", "defects": [{"blocking": True}]}),
+            encoding="utf-8",
+        )
+        # Issue history records attempt 1 defects
+        append_issue_history(
+            self.workspace_root,
+            task_id,
+            attempt=1,
+            outcome="FAILED",
+            defects=[{"defect_id": "test.prior_defect", "check_id": "scope", "severity": "HIGH", "mode": "blocking"}],
+        )
+
+        ctx_att2 = AuditContext(
+            workspace_root=self.workspace_root,
+            task_id=task_id,
+            attempt=2,
+            touched_repos=["app"],
+            all_registered_repos=["app"],
+        )
+        res = run_stage9_carry_forward(ctx_att2)
+        self.assertTrue(res.is_clear)
+        self.assertTrue(any(d.defect_id == "carry_forward.unsealed_prior_retry" and not d.blocking for d in res.defects))
+
     def test_multi_repo_zero_partial_pass_aggregate(self):
         """Test multi-repository zero partial pass: failure in one repo blocks aggregate."""
         # Set up a second repository: repos/service-b

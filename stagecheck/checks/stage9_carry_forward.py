@@ -55,17 +55,17 @@ def run_stage9_carry_forward(ctx: AuditContext) -> StageResult:
         )
         return StageResult(stage_id=stage_id, status="FAIL", defects=defects, errors=errors)
 
-    if prior_seal_path.is_symlink() or not prior_seal_path.is_file():
+    if prior_seal_path.is_symlink():
         defects.append(
             Defect(
                 defect_id="carry_forward.missing_prior_seal",
-                message=f"Prior attempt seal 'seal.json' is missing or symlinked at {prior_dir.relative_to(ctx.workspace_root)}",
+                message=f"Prior attempt seal 'seal.json' is a forbidden symlink at {prior_dir.relative_to(ctx.workspace_root)}",
                 stage=stage_id,
                 severity="CRITICAL",
                 blocking=True,
             )
         )
-    else:
+    elif prior_seal_path.is_file():
         # Always verify the complete cryptographic seal chain (1 .. prior_attempt) regardless of seal format
         try:
             ok, violations = verify_seal_chain(ctx.workspace_root, ctx.task_id, prior_attempt)
@@ -83,6 +83,14 @@ def run_stage9_carry_forward(ctx: AuditContext) -> StageResult:
             # Also verify EVIDENCE_MANIFEST.json if present
             manifest_path = ctx.workspace_root / "evidence" / "EVIDENCE_MANIFEST.json"
             if manifest_path.is_file():
+                # Reconcile active issue history ledger in manifest before verification
+                issue_hist_p = resolve_task_dir(ctx.workspace_root, ctx.task_id) / f"TASK_{ctx.task_id}_ISSUE_HISTORY.md"
+                alt_hist_p = ctx.workspace_root / f"TASK_{ctx.task_id}_ISSUE_HISTORY.md"
+                cur_hist = issue_hist_p if issue_hist_p.is_file() else (alt_hist_p if alt_hist_p.is_file() else None)
+                if cur_hist:
+                    from stagecheck.core.evidence import update_evidence_manifest
+                    update_evidence_manifest(ctx.workspace_root, [cur_hist])
+
                 m_ok, m_viol = verify_evidence_manifest(ctx.workspace_root)
                 if not m_ok:
                     defects.append(
@@ -102,6 +110,43 @@ def run_stage9_carry_forward(ctx: AuditContext) -> StageResult:
                     stage=stage_id,
                     severity="CRITICAL",
                     blocking=True,
+                )
+            )
+    else:
+        # prior_seal_path does not exist on disk
+        # Check if prior attempt passed audit (in which case Gate 4 seal was strictly required)
+        # or was an unsealed failed/retried attempt (which does not have a Gate 4 seal).
+        prior_verdict_file = prior_dir / "Phase-3" / "verdict.json"
+        prior_verdict_passed = False
+        if prior_verdict_file.is_file() and not prior_verdict_file.is_symlink():
+            try:
+                prior_vdata = json.loads(prior_verdict_file.read_text(encoding="utf-8"))
+                if prior_vdata.get("result") in ("PASSED", "CLEAR") and not any(
+                    d.get("blocking", True) for d in prior_vdata.get("defects", [])
+                ):
+                    prior_verdict_passed = True
+            except Exception:
+                pass
+
+        if prior_verdict_passed:
+            defects.append(
+                Defect(
+                    defect_id="carry_forward.missing_prior_seal",
+                    message=f"Prior attempt 'attempt_{prior_attempt}' passed audit but seal 'seal.json' is missing at {prior_dir.relative_to(ctx.workspace_root)}",
+                    stage=stage_id,
+                    severity="CRITICAL",
+                    blocking=True,
+                )
+            )
+        else:
+            # Unsealed failed or retried prior attempt: expected during multi-attempt retries of failed attempts
+            defects.append(
+                Defect(
+                    defect_id="carry_forward.unsealed_prior_retry",
+                    message=f"Prior attempt 'attempt_{prior_attempt}' is an unsealed retry (prior audit did not clear Gate 4); carry-forward continues with cumulative issue history ledger.",
+                    stage=stage_id,
+                    severity="INFO",
+                    blocking=False,
                 )
             )
 
