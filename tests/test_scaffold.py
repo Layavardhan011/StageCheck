@@ -87,6 +87,9 @@ class TestAtomicScaffolding(unittest.TestCase):
                 data = load_json_file(file_path)
                 validate_control_descriptor(name, data)
 
+        # 3. Assert qualification directory (evals) is scaffolded
+        self.assertTrue((self.workspace / "evals").is_dir())
+
     def test_scaffold_rollback_on_injected_fault(self) -> None:
         """Verify transactional rollback when a failure occurs during generation."""
         def inject_fault(filename: str) -> None:

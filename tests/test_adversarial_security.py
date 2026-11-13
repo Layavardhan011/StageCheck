@@ -592,11 +592,12 @@ class TestAdversarialSecurity(unittest.TestCase):
         res4 = run_stage4_report_lint(ctx)
         self.assertFalse(res4.is_clear)
 
-        qual_dir = task_dir / "qual"
+        qual_dir = self.ws / "evals"
         qual_dir.mkdir(parents=True, exist_ok=True)
         (qual_dir / "test_fake.py").symlink_to(target_secret)
         res7 = run_stage7_qual_naming(ctx)
         self.assertFalse(res7.is_clear)
+        self.assertTrue(any("unauthorized_symlink" in d.defect_id for d in res7.defects))
 
     def test_adversarial_batch4_prompt_gate_and_evidence_symlink_guards(self) -> None:
         """Prompt gate rejects symlinked prompt.md and mismatched task_id scope; manifest rejects missing seal."""

@@ -514,6 +514,9 @@ def reconcile_controls(
                 validate_control_descriptor(filename, data)
         reconciled_paths[filename] = file_path
 
+    # Ensure qualification directory (evals) is scaffolded
+    (root / "evals").mkdir(parents=True, exist_ok=True)
+
     return reconciled_paths
 
 
@@ -589,6 +592,9 @@ def scaffold_controls_atomic(
             # Atomic file replace
             os.replace(str(staged_file), str(dest_file))
             final_paths[filename] = dest_file
+
+        # Ensure qualification directory (evals) is scaffolded
+        (root / "evals").mkdir(parents=True, exist_ok=True)
 
         return final_paths
 

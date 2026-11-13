@@ -294,6 +294,18 @@ def run_init(
                 (evidence_dir / "sentinel.log").touch(mode=0o644, exist_ok=True)
                 (evidence_dir / "sentinel_daemon.log").touch(mode=0o644, exist_ok=True)
 
+            # Step 6b: Pre-scaffold qualification directory (evals)
+            qual_file = controls_dir / "QUALIFICATION_ROOT.json"
+            qual_root_name = "evals"
+            if qual_file.is_file():
+                try:
+                    q_data = json.loads(qual_file.read_text(encoding="utf-8"))
+                    qual_root_name = q_data.get("qualification_root", "evals")
+                except Exception:
+                    pass
+            qual_dir = workspace_root / qual_root_name
+            qual_dir.mkdir(parents=True, exist_ok=True)
+
             # Step 7: Create runtime lock file at workspace root (SR-06 / SEC-05) and controls/
             (workspace_root / ".stagecheck.lock").touch(mode=0o600, exist_ok=True)
             (controls_dir / ".stagecheck.lock").touch(mode=0o600, exist_ok=True)

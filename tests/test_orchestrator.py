@@ -528,6 +528,24 @@ class TestNineStageVerification(unittest.TestCase):
         res_valid_name = run_stage7_qual_naming(ctx_req)
         self.assertTrue(res_valid_name.is_clear)
 
+        # 5. Missing qualification directory when tests are NOT required -> CLEAR (non-blocking INFO)
+        valid_test.unlink()
+        (self.workspace_root / "evals").rmdir()
+        self.assertFalse((self.workspace_root / "evals").exists())
+
+        res_missing_not_required = run_stage7_qual_naming(ctx)
+        self.assertTrue(res_missing_not_required.is_clear)
+        self.assertTrue(any("directory_not_present" in d.defect_id for d in res_missing_not_required.defects))
+        self.assertFalse(any(d.blocking for d in res_missing_not_required.defects))
+
+        # 6. Missing qualification directory when tests ARE required -> FAIL (blocking defect)
+        res_missing_required = run_stage7_qual_naming(ctx_req)
+        self.assertFalse(res_missing_required.is_clear)
+        self.assertTrue(any("directory_missing" in d.defect_id for d in res_missing_required.defects))
+
+        # Restore evals directory for subsequent tests in fixture
+        (self.workspace_root / "evals").mkdir(parents=True, exist_ok=True)
+
     def test_stage8_rerun_clean_and_failure(self):
         """Test Stage 8 command execution and working-tree mutation detection."""
         # Clean execution

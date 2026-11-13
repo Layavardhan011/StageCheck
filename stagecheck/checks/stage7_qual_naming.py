@@ -120,17 +120,44 @@ def run_stage7_qual_naming(ctx: AuditContext) -> StageResult:
         )
         return StageResult(stage_id=stage_id, status="FAIL", defects=defects, errors=errors)
 
-    if qual_dir.is_symlink() or not qual_dir.exists() or not qual_dir.is_dir():
+    if qual_dir.is_symlink():
         defects.append(
             Defect(
-                defect_id="qual_naming.directory_missing",
-                message=f"Qualification directory does not exist or is not a directory: '{qual_root_rel}'",
+                defect_id="qual_naming.unauthorized_symlink",
+                message=f"Qualification directory cannot be a symbolic link: '{qual_root_rel}'",
                 stage=stage_id,
                 severity="CRITICAL",
                 blocking=True,
             )
         )
         return StageResult(stage_id=stage_id, status="FAIL", defects=defects, errors=errors)
+
+    if not qual_dir.exists() or not qual_dir.is_dir():
+        if requires_qualification_tests:
+            defects.append(
+                Defect(
+                    defect_id="qual_naming.directory_missing",
+                    message=f"Qualification directory does not exist or is not a directory: '{qual_root_rel}'",
+                    stage=stage_id,
+                    severity="CRITICAL",
+                    blocking=True,
+                )
+            )
+            return StageResult(stage_id=stage_id, status="FAIL", defects=defects, errors=errors)
+        else:
+            defects.append(
+                Defect(
+                    defect_id="qual_naming.directory_not_present",
+                    message=(
+                        f"Qualification directory '{qual_root_rel}' does not exist "
+                        "(active task does not require qualification tests)"
+                    ),
+                    stage=stage_id,
+                    severity="INFO",
+                    blocking=False,
+                )
+            )
+            return StageResult(stage_id=stage_id, status="CLEAR", defects=defects, errors=errors)
 
     # 2. Enumerate qualification test files (reject symlinks, cap depth and entry count)
     qual_test_files: List[Path] = []
