@@ -85,7 +85,8 @@ Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define d
 - During `PHASE_2A_CODING`, StageCheck does not interfere while Agent 1 and Agent 2 iterate via Phase-2A JSON status files. Agent 1 MUST wait for Agent 2 to implement changes and submit `Phase-2A/pre_commit_status.json`. Agent 1 MUST NEVER bypass Agent 2 or usurp Agent 2's implementation role.
 - Poll until `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` has `"status": "AWAITING_REVIEW"` (or `active_turn == "AGENT_1"`).
 - Review the uncommitted diff (`git status`, `git diff`), tests, and scope compliance, then record `Phase-2A/agent_reviews.json` and run `stagecheck review-precommit --task <task_id> --attempt <N>`:
-  - If defects remain, write `"status": "REVISION_REQUIRED"` in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json` so `active_turn` returns to `AGENT_2`, and continue polling until Agent 2 resubmits.
+  - **Phase-2A Review Boundaries (Strict Phase Separation):** Review ONLY uncommitted diffs, scope compliance, tests, and secrets in `repos/*`. DO NOT demand, require, or flag missing Phase-2B deliverables (`Phase-2B/report.md`, `Phase-2B/claims.json`, or any Phase-2B files) during Phase 2A review. Phase-2B deliverables CANNOT exist during Phase 2A because Phase 2B is only unlocked AFTER Gate 2A is approved. Demanding Phase-2B deliverables in Phase 2A creates an impossible deadlock.
+  - If defects remain in the code/tests/scope, write `"status": "REVISION_REQUIRED"` in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json` so `active_turn` returns to `AGENT_2`, and continue polling until Agent 2 resubmits with an incremented cycle.
   - Once all defects are resolved, approve via `stagecheck approve-review` (`"status": "APPROVED"`) so StageCheck can commit and advance Gate-2A / Gate-2B.
 
 ## Attempt & Overall Task Monitoring
@@ -97,6 +98,7 @@ Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define d
 - MUST NOT execute mutating Git commands (`git commit`, `git push`, `git merge`, `git rebase`).
 - MUST NOT write product code in `repos/*`.
 - MUST NOT author Agent 2 deliverables: `pre_commit_status.json`, `Phase-2B/report.md`, or `Phase-2B/claims.json`. These deliverables are strictly the sole responsibility of Agent 2. Usurping Agent 2's role destroys dual-agent governance separation.
+- MUST NOT demand, require, or flag missing Phase-2B deliverables (`Phase-2B/report.md`, `Phase-2B/claims.json`, or any `Phase-2B/*` files) during Phase-2A pre-commit review. Phase-2B deliverables belong strictly to Phase 2B.
 - MUST NOT include `controls/` or any file within `controls/` in `Phase-1/declared_scope.json` (neither under `read_write_paths` nor under `read_only_paths`). `controls/` is strictly governed by the human owner and StageCheck runtime; declaring it in scope triggers a blocking ScopeValidationError.
 - MUST NOT alter control descriptors in `controls/*` or edit `.stagecheck.lock`.
 - Permitted Git commands are strictly read-only: `git status`, `git log`, `git diff`, `git show`, `git blame`, `git branch`.
@@ -109,6 +111,16 @@ Role: `code_implementation`.
 ## Purpose
 Implement source code, unit tests, and regression coverage for approved tasks on permitted sprint branches, and author Phase-2 deliverables (`pre_commit_status.json`, `report.md`, `claims.json`).
 
+## Workspace Authority & Scope Boundaries
+- **Product Repositories (`repos/*`):** `repos/<repo_name>/` is YOUR PRIMARY WORKSPACE and is **NOT** prohibited. You are the Code Implementer; your primary duty is to implement and fix source code and tests in `repos/*` strictly within `Phase-1/declared_scope.json`.
+- **Evidence Tree (`evidence/tasks/<task_id>/attempt_<N>/`):** The evidence directory is **NOT** an unrestricted workspace. You are ONLY authorized to author and modify your designated deliverables:
+  - `Phase-2A/pre_commit_status.json`
+  - `Phase-2B/report.md`
+  - `Phase-2B/claims.json`
+  - `Phase-2B/witnesses/*`
+  You MUST NOT edit, create, or alter ANY other evidence files (e.g., `Phase-1/*`, `Phase-2A/pre_commit_review.json`, `Phase-2A/agent_reviews.json`, `Phase-2A/rubric_evaluation.json`, `Phase-2B/gate2b_receipt.json`, or any `Phase-3/*` files).
+- **Prohibited Trees:** `controls/*` and `specs/*` are strictly prohibited from being modified.
+
 ## Inputs
 - `evidence/tasks/<task_id>/attempt_<N>/Phase-1/prompt.md`
 - `evidence/tasks/<task_id>/attempt_<N>/Phase-1/declared_scope.json`
@@ -119,13 +131,37 @@ Implement source code, unit tests, and regression coverage for approved tasks on
 - Ensure all unit tests pass locally before submitting for Phase 2A review.
 - Run local Gitleaks secret check (`gitleaks protect --staged`) prior to commit.
 
+## Phase-2A Pre-Commit Status Schema (`pre_commit_status.json`)
+- Author `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` strictly conforming to `pre_commit_status.schema.json`:
+  ```json
+  {
+    "schema_version": "2.0.0",
+    "task_id": "<task_id>",
+    "attempt": <N>,
+    "cycle": 1,
+    "status": "AWAITING_REVIEW",
+    "touched_repositories": ["<repo_name>"],
+    "base_commits": {
+      "<repo_name>": "<base_commit_hash>"
+    },
+    "summary": "Implementation summary and changes"
+  }
+  ```
+  Note:
+  - `schema_version` must be string `"2.0.0"`. `status` must be `"AWAITING_REVIEW"` (or `"IN_REVISION"`).
+  - **Repository Identifier Formatting:** `touched_repositories` and `base_commits` keys MUST be bare repository names matching `controls/PRODUCT_REPOSITORIES.json` (e.g. `"mx-chain-core-go"`). DO NOT prefix them with `"repos/"` (e.g., do NOT write `"repos/mx-chain-core-go"`).
+
 ## Phase-2 Implementation & Cooperative Repair Loop (JSON Status)
 - **Do not stop** until the local commit, `Phase-2B/report.md`, and `Phase-2B/claims.json` are complete.
 - Continuously poll `stagecheck turn --task <task_id> --json` (e.g., `sleep 5`, max 3 calls per 5s window) and `controls/ACTIVE_STATE.json` until `phase == "PHASE_2A_CODING"` and `active_turn == "AGENT_2"`.
 - Implement changes strictly within `Phase-1/declared_scope.json`, run local tests and `gitleaks protect --staged`, and write `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` with `"status": "AWAITING_REVIEW"`, `cycle`, `touched_repositories`, and `base_commits`.
 - Continuously poll `Phase-2A/pre_commit_review.json` (and `stagecheck turn --task <task_id> --json`, max 3 calls per 5s window):
-  - If `"status": "REVISION_REQUIRED"`, inspect the defects in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json`, fix the code/tests, increment `cycle`, and resubmit `Phase-2A/pre_commit_status.json`.
+  - If `"status": "REVISION_REQUIRED"`, inspect the defects in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json`.
+  - **CRITICAL REVISION INVARIANT:** You MUST modify and fix the underlying source code and test files in `repos/*` to resolve the review defects. Merely editing, updating schema fields, or re-saving `pre_commit_status.json` DOES NOT resolve review defects and will cause review rejection.
+  - **MANDATORY CYCLE INCREMENT (Turn Engine Invariant):** You MUST increment `cycle` so that it is strictly greater than the review cycle (`cycle = rev_cycle + 1`, e.g. if review `cycle` is 2, set `"cycle": 3`). If `cycle` is not strictly greater than `rev_cycle`, the turn engine will consider the revision incomplete and keep the turn on Agent 2 (`waiting_for: Phase-2A/pre_commit_status.json`), preventing Agent 1 from ever reviewing!
+  - After fixing the code/tests in `repos/*`, verifying tests pass locally, and incrementing `cycle` in `Phase-2A/pre_commit_status.json`, set `"status": "AWAITING_REVIEW"` and resubmit.
   - Repeat until `Phase-2A/pre_commit_review.json` reports `"status": "APPROVED"`.
+- **Strict Phase 2A Completion Requirement:** DO NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first. Phase 2A is completed ONLY when `Phase-2A/pre_commit_review.json` reports `"status": "APPROVED"` and StageCheck advances the active phase to `PHASE_2B_COMMITTING`. Generating Phase-2B deliverables before Phase 2A approval is strictly prohibited and violates governance lifecycle ordering.
 - Once `phase == "PHASE_2B_COMMITTING"`, commit locally on the task branch and deliver BOTH `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/report.md` AND `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/claims.json` so StageCheck can advance Gate-2B to Phase 3.
 
 ## Phase-2B Deliverable Contracts & Citation Standards
@@ -165,6 +201,12 @@ Implement source code, unit tests, and regression coverage for approved tasks on
 - All command outputs, stdout/stderr logs, and test witness records MUST be grouped inside a dedicated subfolder: `Phase-2B/witnesses/` or `Phase-2B/rerun_outputs/` (e.g., `Phase-2B/witnesses/test_output.txt`).
 
 ## Must Not
+- MUST NOT assume repository source trees (`repos/*`) are prohibited. `repos/*` is your primary implementation workspace. You are authorized and required to write code and tests in `repos/*` within `Phase-1/declared_scope.json`.
+- MUST NOT modify unauthorized files in the evidence tree (NEVER touch `Phase-1/*`, `Phase-2A/pre_commit_review.json`, `Phase-2A/agent_reviews.json`, `Phase-2A/rubric_evaluation.json`, `Phase-2B/gate2b_receipt.json`, or any `Phase-3/*` files).
+- MUST NOT attempt to resolve `REVISION_REQUIRED` by merely editing, updating, or re-saving `pre_commit_status.json` without fixing the underlying code and tests in `repos/*`.
+- MUST NOT resubmit `pre_commit_status.json` with the same `cycle` number following a `REVISION_REQUIRED` review. You MUST increment `cycle` (`cycle > rev_cycle`).
+- MUST NOT use repository path prefixes (such as `"repos/<repo_name>"`) in `pre_commit_status.json`; use bare repository names matching `controls/PRODUCT_REPOSITORIES.json`.
+- MUST NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first (`Phase-2A/pre_commit_review.json` status must be `"APPROVED"` and active phase advanced to `PHASE_2B_COMMITTING`).
 - MUST NOT execute remote push operations (`git push` is strictly forbidden).
 - MUST NOT commit directly to `main` or `master` branch.
 - MUST NOT modify control descriptors in `controls/*`.
@@ -216,6 +258,7 @@ def scaffold_agent_instructions(
                 f"- In planning/review phases, DO NOT write implementation code in `repos/*`.\n"
                 f"- NEVER execute remote push commands (`git push`).\n"
                 f"- Permitted Git commands during review are read-only: `git status`, `git log`, `git diff`, `git show`, `git blame`, `git branch`.\n"
+                f"- MUST NOT demand or check for Phase-2B deliverables (`report.md`, `claims.json`) during Phase 2A pre-commit review. Phase 2B deliverables belong strictly to Phase 2B.\n"
                 f"- MUST NOT include `controls/` or any file within `controls/` in `Phase-1/declared_scope.json` (neither under `read_write_paths` nor under `read_only_paths`).\n\n"
                 f"### Phase-2 Review & Attempt/Task Monitoring\n"
                 f"- **Do not stop** after authoring `Phase-1/prompt.md` and `declared_scope.json`; continuously poll `stagecheck turn --task <task_id> --json` (e.g., `sleep 5`, max 3 calls per 5s window) until task completion.\n"
@@ -226,6 +269,10 @@ def scaffold_agent_instructions(
                 f"## Part 2: Code Implementation Responsibilities (Phase 2A Implementation & Delivery)\n\n"
                 f"### Purpose\n"
                 f"Implement source code, unit tests, and regression coverage for approved tasks on permitted task branches, and author Phase-2 deliverables (`pre_commit_status.json`, `report.md`, `claims.json`).\n\n"
+                f"### Workspace Authority & Scope Boundaries\n"
+                f"- Product Repositories (`repos/*`): `repos/<repo_name>/` is YOUR PRIMARY WORKSPACE and is NOT prohibited. Modifying and fixing code and tests in `repos/*` within `Phase-1/declared_scope.json` is your primary duty.\n"
+                f"- Evidence Tree (`evidence/tasks/<task_id>/attempt_<N>/`): You are ONLY authorized to author `Phase-2A/pre_commit_status.json`, `Phase-2B/report.md`, `Phase-2B/claims.json`, and `Phase-2B/witnesses/*`. You MUST NOT modify any other evidence files (`Phase-1/*`, `Phase-2A/pre_commit_review.json`, `Phase-2A/agent_reviews.json`, `Phase-2A/rubric_evaluation.json`, `Phase-2B/gate2b_receipt.json`, `Phase-3/*`).\n"
+                f"- Prohibited Trees: `controls/*` and `specs/*` are strictly prohibited from being modified.\n\n"
                 f"### Inputs\n"
                 f"- `evidence/tasks/<task_id>/attempt_<N>/Phase-1/prompt.md`\n"
                 f"- `evidence/tasks/<task_id>/attempt_<N>/Phase-1/declared_scope.json`\n"
@@ -234,13 +281,21 @@ def scaffold_agent_instructions(
                 f"- Ensure code satisfies declared scope without modifying forbidden paths.\n"
                 f"- Ensure all unit tests pass locally before submitting for Phase 2A review.\n"
                 f"- Run local secret check (`gitleaks protect --staged`) prior to local commit.\n"
-                f"- In Phase 2A/2B, submit `Phase-2A/pre_commit_status.json`, resolve any `REVISION_REQUIRED` feedback from `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json`, and write both `Phase-2B/report.md` AND `Phase-2B/claims.json` once committed.\n\n"
+                f"- In Phase 2A, submit `Phase-2A/pre_commit_status.json` adhering to `pre_commit_status.schema.json` (`schema_version`: \"2.0.0\", `status`: \"AWAITING_REVIEW\"). Use bare repository names matching `controls/PRODUCT_REPOSITORIES.json` without `repos/` prefix.\n"
+                f"- When Phase-2A review reports `REVISION_REQUIRED`, you MUST fix the defects in your source code and tests in `repos/*` and increment `cycle` (`cycle = rev_cycle + 1`) before resubmitting. DO NOT resubmit with the same cycle number or merely re-save `pre_commit_status.json`.\n"
+                f"- Strict Phase 2A Completion Requirement: DO NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first (`Phase-2A/pre_commit_review.json` status must be `\"APPROVED\"` and active phase advanced to `PHASE_2B_COMMITTING`).\n\n"
                 f"### Phase-2B Deliverable Contracts & Citation Standards\n"
                 f"- Deliver both `Phase-2B/report.md` and `Phase-2B/claims.json` satisfying `claims.schema.json`.\n"
                 f"- Every citation must have `file`, valid ordered 1-based `line_range: [start_line, end_line]`, and `verbatim_quote` matching disk contents character-for-character.\n"
                 f"- Never use `#L1-L1` or placeholder line numbers.\n"
                 f"- Group all raw test outputs, command records, and git witness logs in `Phase-2B/witnesses/` or `Phase-2B/rerun_outputs/`; do not place loose text files directly in `Phase-2B/` root.\n\n"
                 f"### Security Invariants & Negative Prohibitions\n"
+                f"- MUST NOT assume repository source trees (`repos/*`) are prohibited. `repos/*` is your primary implementation workspace.\n"
+                f"- MUST NOT modify unauthorized files in the evidence tree (`Phase-1/*`, `Phase-2A/pre_commit_review.json`, `Phase-2A/agent_reviews.json`, `Phase-2A/rubric_evaluation.json`, `Phase-2B/gate2b_receipt.json`, `Phase-3/*`).\n"
+                f"- MUST NOT attempt to resolve `REVISION_REQUIRED` by merely editing or re-saving `pre_commit_status.json` without fixing the underlying code and tests in `repos/*`.\n"
+                f"- MUST NOT resubmit `pre_commit_status.json` with the same cycle number following `REVISION_REQUIRED` (`cycle > rev_cycle` is mandatory for turn advancement).\n"
+                f"- MUST NOT use repository path prefixes (such as `repos/<repo_name>`) in `pre_commit_status.json`; use bare repository names matching `controls/PRODUCT_REPOSITORIES.json`.\n"
+                f"- MUST NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first.\n"
                 f"- MUST NOT execute remote push operations (`git push` is strictly forbidden).\n"
                 f"- MUST NOT commit directly to `main` or `master` branch.\n"
                 f"- MUST NOT modify control descriptors in `controls/*` or edit `.stagecheck.lock`.\n"

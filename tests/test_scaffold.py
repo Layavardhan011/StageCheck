@@ -250,6 +250,8 @@ class TestAtomicScaffolding(unittest.TestCase):
         self.assertIn("Phase-2B/claims.json", a1_text)
         self.assertIn("Phase-2B/report.md", a1_text)
         self.assertIn("MUST NOT include `controls/`", a1_text)
+        self.assertIn("MUST NOT demand, require, or flag missing Phase-2B deliverables", a1_text)
+        self.assertIn("Phase-2A Review Boundaries (Strict Phase Separation)", a1_text)
 
         # Agent 2 instruction checks
         self.assertIn("Phase-2B/claims.json", a2_text)
@@ -259,6 +261,34 @@ class TestAtomicScaffolding(unittest.TestCase):
         self.assertIn("NEVER use `#L1-L1`", a2_text)
         self.assertIn("Phase-2B/witnesses/", a2_text)
         self.assertIn("Phase-2B Directory Layout & Witness Storage", a2_text)
+        self.assertIn("Strict Phase 2A Completion Requirement", a2_text)
+        self.assertIn("without completing Phase 2A first", a2_text)
+        self.assertIn("Workspace Authority & Scope Boundaries", a2_text)
+        self.assertIn("YOUR PRIMARY WORKSPACE and is **NOT** prohibited", a2_text)
+        self.assertIn("Phase-2A Pre-Commit Status Schema", a2_text)
+        self.assertIn("MUST modify and fix the underlying source code", a2_text)
+        self.assertIn("MUST NOT assume repository source trees", a2_text)
+        self.assertIn("MUST NOT modify unauthorized files in the evidence tree", a2_text)
+        self.assertIn("MANDATORY CYCLE INCREMENT (Turn Engine Invariant)", a2_text)
+        self.assertIn("Repository Identifier Formatting", a2_text)
+        self.assertIn("MUST NOT resubmit `pre_commit_status.json` with the same `cycle` number", a2_text)
+        self.assertIn("MUST NOT use repository path prefixes", a2_text)
+
+        # Single-agent instruction checks
+        single_paths = scaffold_agent_instructions(
+            workspace_root=self.workspace,
+            agent1_name="solo",
+            agent2_name="solo",
+            refresh=True,
+        )
+        single_text = single_paths["solo_dual_role.md"].read_text(encoding="utf-8")
+        self.assertIn("Strict Phase 2A Completion Requirement", single_text)
+        self.assertIn("without completing Phase 2A first", single_text)
+        self.assertIn("YOUR PRIMARY WORKSPACE and is NOT prohibited", single_text)
+        self.assertIn("MUST NOT assume repository source trees", single_text)
+        self.assertIn("MUST NOT demand or check for Phase-2B deliverables", single_text)
+        self.assertIn("MUST NOT resubmit `pre_commit_status.json` with the same cycle number", single_text)
+        self.assertIn("MUST NOT use repository path prefixes", single_text)
 
 
 if __name__ == "__main__":

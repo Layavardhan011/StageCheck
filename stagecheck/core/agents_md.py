@@ -73,13 +73,13 @@ Their initial cryptographic digests are recorded below:
 ### Agent 2: Code Implementer (`code_implementation`)
 * **Responsibilities:**
   1. Checks out designated task branches (`fincore/<task_id>`).
-  2. Implements code changes strictly within `approved_scope` across target repositories.
-  3. Emits `pre_commit_status.json` and participates in Phase 2A review cycles.
-  4. Commits changes **locally only** and generates delivery `claims.json` and `report.md`.
+  2. Implements code changes strictly within `approved_scope` across target repositories (`repos/*`). Product repositories are Agent 2's primary implementation workspace.
+  3. Emits `pre_commit_status.json` conforming to `pre_commit_status.schema.json` and participates in Phase 2A review cycles (resolving review defects by modifying source code and tests in `repos/*`, not merely re-saving status files).
+  4. Commits changes **locally only** and generates delivery `claims.json` and `report.md` only after Phase 2A approval.
 * **Prohibitions:**
   * **Zero Remote Pushes:** Executing `git push` or remote transport commands is strictly forbidden (Exit 126).
   * Direct commits to `main` or `master` branches are strictly prohibited (Exit 126).
-  * Must never attempt to modify `controls/` or directly alter `verdict.json` or `seal.json`.
+  * Must never attempt to modify `controls/`, `specs/`, or unauthorized evidence files (`Phase-1/*`, `Phase-2A/pre_commit_review.json`, `Phase-2A/agent_reviews.json`, `Phase-2A/rubric_evaluation.json`, `Phase-2B/gate2b_receipt.json`, or any `Phase-3/*` files).
 
 ---
 
