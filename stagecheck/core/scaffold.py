@@ -78,11 +78,11 @@ Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define d
 ## Checks
 - Verify task decomposition against architectural contracts.
 - Review uncommitted diffs for scope compliance and secret exposure.
-- Record defect history in `TASK_<ID>_ISSUE_HISTORY.md`.
+- Track defect history and failure diagnostics. Note: StageCheck automatically appends defect findings to `TASK_<ID>_ISSUE_HISTORY.md` and indexes them in `EVIDENCE_MANIFEST.json`; do not manually edit the history file.
 
 ## Phase-2 Cooperative Review Protocol (JSON Status Loop)
 - **Do not stop** after authoring `Phase-1/prompt.md` and `Phase-1/declared_scope.json` — continuously poll `stagecheck turn --task <task_id> --json` (e.g., `sleep 5`, respecting max 3 calls per 5s window) until `Phase-2A` / `Phase-3` / task completion.
-- During `PHASE_2A_CODING`, StageCheck does not interfere while Agent 1 and Agent 2 iterate via Phase-2A JSON status files.
+- During `PHASE_2A_CODING`, StageCheck does not interfere while Agent 1 and Agent 2 iterate via Phase-2A JSON status files. Agent 1 MUST wait for Agent 2 to implement changes and submit `Phase-2A/pre_commit_status.json`. Agent 1 MUST NEVER bypass Agent 2 or usurp Agent 2's implementation role.
 - Poll until `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` has `"status": "AWAITING_REVIEW"` (or `active_turn == "AGENT_1"`).
 - Review the uncommitted diff (`git status`, `git diff`), tests, and scope compliance, then record `Phase-2A/agent_reviews.json` and run `stagecheck review-precommit --task <task_id> --attempt <N>`:
   - If defects remain, write `"status": "REVISION_REQUIRED"` in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json` so `active_turn` returns to `AGENT_2`, and continue polling until Agent 2 resubmits.
@@ -96,6 +96,8 @@ Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define d
 ## Must Not
 - MUST NOT execute mutating Git commands (`git commit`, `git push`, `git merge`, `git rebase`).
 - MUST NOT write product code in `repos/*`.
+- MUST NOT author Agent 2 deliverables: `pre_commit_status.json`, `Phase-2B/report.md`, or `Phase-2B/claims.json`. These deliverables are strictly the sole responsibility of Agent 2. Usurping Agent 2's role destroys dual-agent governance separation.
+- MUST NOT include `controls/` or any file within `controls/` in `Phase-1/declared_scope.json` (neither under `read_write_paths` nor under `read_only_paths`). `controls/` is strictly governed by the human owner and StageCheck runtime; declaring it in scope triggers a blocking ScopeValidationError.
 - MUST NOT alter control descriptors in `controls/*` or edit `.stagecheck.lock`.
 - Permitted Git commands are strictly read-only: `git status`, `git log`, `git diff`, `git show`, `git blame`, `git branch`.
 """
@@ -105,7 +107,7 @@ DEFAULT_AGENT2_INSTRUCTIONS_MD = """# Agent 2 Instructions: Code Implementation 
 Role: `code_implementation`.
 
 ## Purpose
-Implement source code, unit tests, and regression coverage for approved tasks on permitted sprint branches.
+Implement source code, unit tests, and regression coverage for approved tasks on permitted sprint branches, and author Phase-2 deliverables (`pre_commit_status.json`, `report.md`, `claims.json`).
 
 ## Inputs
 - `evidence/tasks/<task_id>/attempt_<N>/Phase-1/prompt.md`
@@ -118,13 +120,44 @@ Implement source code, unit tests, and regression coverage for approved tasks on
 - Run local Gitleaks secret check (`gitleaks protect --staged`) prior to commit.
 
 ## Phase-2 Implementation & Cooperative Repair Loop (JSON Status)
-- **Do not stop** until the local commit and `Phase-2B/report.md` are complete.
+- **Do not stop** until the local commit, `Phase-2B/report.md`, and `Phase-2B/claims.json` are complete.
 - Continuously poll `stagecheck turn --task <task_id> --json` (e.g., `sleep 5`, max 3 calls per 5s window) and `controls/ACTIVE_STATE.json` until `phase == "PHASE_2A_CODING"` and `active_turn == "AGENT_2"`.
 - Implement changes strictly within `Phase-1/declared_scope.json`, run local tests and `gitleaks protect --staged`, and write `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` with `"status": "AWAITING_REVIEW"`, `cycle`, `touched_repositories`, and `base_commits`.
 - Continuously poll `Phase-2A/pre_commit_review.json` (and `stagecheck turn --task <task_id> --json`, max 3 calls per 5s window):
   - If `"status": "REVISION_REQUIRED"`, inspect the defects in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json`, fix the code/tests, increment `cycle`, and resubmit `Phase-2A/pre_commit_status.json`.
   - Repeat until `Phase-2A/pre_commit_review.json` reports `"status": "APPROVED"`.
-- Once `phase == "PHASE_2B_COMMITTING"`, commit locally on the task branch and write `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/report.md` so StageCheck can advance Gate-2B to Phase 3.
+- Once `phase == "PHASE_2B_COMMITTING"`, commit locally on the task branch and deliver BOTH `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/report.md` AND `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/claims.json` so StageCheck can advance Gate-2B to Phase 3.
+
+## Phase-2B Deliverable Contracts & Citation Standards
+- **`Phase-2B/report.md`:** Must document the implementation summary, blast radius analysis, tests executed, and commit hashes.
+- **`Phase-2B/claims.json`:** Must document every material claim and citation satisfying `claims.schema.json`:
+  ```json
+  {
+    "schema_version": 1,
+    "task_id": "<task_id>",
+    "attempt": <N>,
+    "claims": [
+      {
+        "claim_id": "CLAIM-001",
+        "statement": "Verifiable factual claim",
+        "evidence_type": "CODE_CITATION",
+        "citations": [
+          {
+            "repository": "<repo_name>",
+            "file": "<relative/path/to/file>",
+            "line_range": [<start_line>, <end_line>],
+            "verbatim_quote": "<exact quoted text from disk>"
+          }
+        ]
+      }
+    ]
+  }
+  ```
+- **Strict Citation Verification Rules:**
+  - `file` must exist on disk and resolve inside the permitted repository.
+  - `line_range: [start_line, end_line]` must accurately bracket the cited code (1-based line numbers).
+  - `verbatim_quote` MUST match the disk contents within `line_range` character-for-character (including whitespace and symbols).
+  - NEVER use `#L1-L1` or dummy line numbers as placeholders. Citation hallucination triggers critical blocking defects in Stage 3 audit.
 
 ## Must Not
 - MUST NOT execute remote push operations (`git push` is strictly forbidden).
@@ -177,7 +210,8 @@ def scaffold_agent_instructions(
                 f"### Phase Restrictions\n"
                 f"- In planning/review phases, DO NOT write implementation code in `repos/*`.\n"
                 f"- NEVER execute remote push commands (`git push`).\n"
-                f"- Permitted Git commands during review are read-only: `git status`, `git log`, `git diff`, `git show`, `git blame`, `git branch`.\n\n"
+                f"- Permitted Git commands during review are read-only: `git status`, `git log`, `git diff`, `git show`, `git blame`, `git branch`.\n"
+                f"- MUST NOT include `controls/` or any file within `controls/` in `Phase-1/declared_scope.json` (neither under `read_write_paths` nor under `read_only_paths`).\n\n"
                 f"### Phase-2 Review & Attempt/Task Monitoring\n"
                 f"- **Do not stop** after authoring `Phase-1/prompt.md` and `declared_scope.json`; continuously poll `stagecheck turn --task <task_id> --json` (e.g., `sleep 5`, max 3 calls per 5s window) until task completion.\n"
                 f"- During `PHASE_2A_CODING`, coordinate via Phase-2A JSON status files without StageCheck interference.\n"
@@ -186,7 +220,7 @@ def scaffold_agent_instructions(
                 f"---\n\n"
                 f"## Part 2: Code Implementation Responsibilities (Phase 2A Implementation & Delivery)\n\n"
                 f"### Purpose\n"
-                f"Implement source code, unit tests, and regression coverage for approved tasks on permitted task branches.\n\n"
+                f"Implement source code, unit tests, and regression coverage for approved tasks on permitted task branches, and author Phase-2 deliverables (`pre_commit_status.json`, `report.md`, `claims.json`).\n\n"
                 f"### Inputs\n"
                 f"- `evidence/tasks/<task_id>/attempt_<N>/Phase-1/prompt.md`\n"
                 f"- `evidence/tasks/<task_id>/attempt_<N>/Phase-1/declared_scope.json`\n"
@@ -195,7 +229,11 @@ def scaffold_agent_instructions(
                 f"- Ensure code satisfies declared scope without modifying forbidden paths.\n"
                 f"- Ensure all unit tests pass locally before submitting for Phase 2A review.\n"
                 f"- Run local secret check (`gitleaks protect --staged`) prior to local commit.\n"
-                f"- In Phase 2A/2B, submit `Phase-2A/pre_commit_status.json`, resolve any `REVISION_REQUIRED` feedback from `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json`, and write `Phase-2B/report.md` once committed.\n\n"
+                f"- In Phase 2A/2B, submit `Phase-2A/pre_commit_status.json`, resolve any `REVISION_REQUIRED` feedback from `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json`, and write both `Phase-2B/report.md` AND `Phase-2B/claims.json` once committed.\n\n"
+                f"### Phase-2B Deliverable Contracts & Citation Standards\n"
+                f"- Deliver both `Phase-2B/report.md` and `Phase-2B/claims.json` satisfying `claims.schema.json`.\n"
+                f"- Every citation must have `file`, valid ordered 1-based `line_range: [start_line, end_line]`, and `verbatim_quote` matching disk contents character-for-character.\n"
+                f"- Never use `#L1-L1` or placeholder line numbers.\n\n"
                 f"### Security Invariants & Negative Prohibitions\n"
                 f"- MUST NOT execute remote push operations (`git push` is strictly forbidden).\n"
                 f"- MUST NOT commit directly to `main` or `master` branch.\n"

@@ -227,6 +227,34 @@ class TestAtomicScaffolding(unittest.TestCase):
         self.assertEqual(rc_rec, 0)
         self.assertEqual(get_approved_remote_urls(ws), {url1, url2})
 
+    def test_scaffold_instructions_contain_role_exclusions_and_citation_standards(self) -> None:
+        """Verify generated agent instructions enforce role exclusions, controls warning, and citation standards."""
+        from stagecheck.core.scaffold import scaffold_agent_instructions
+
+        inst_paths = scaffold_agent_instructions(
+            workspace_root=self.workspace,
+            agent1_name="opencode",
+            agent2_name="antigravity",
+            refresh=True,
+        )
+
+        a1_text = inst_paths["opencode_prompt_and_audit.md"].read_text(encoding="utf-8")
+        a2_text = inst_paths["antigravity_code_implementation.md"].read_text(encoding="utf-8")
+
+        # Agent 1 instruction checks
+        self.assertIn("MUST NOT author Agent 2 deliverables", a1_text)
+        self.assertIn("pre_commit_status.json", a1_text)
+        self.assertIn("Phase-2B/claims.json", a1_text)
+        self.assertIn("Phase-2B/report.md", a1_text)
+        self.assertIn("MUST NOT include `controls/`", a1_text)
+
+        # Agent 2 instruction checks
+        self.assertIn("Phase-2B/claims.json", a2_text)
+        self.assertIn("Phase-2B Deliverable Contracts & Citation Standards", a2_text)
+        self.assertIn("verbatim_quote", a2_text)
+        self.assertIn("line_range", a2_text)
+        self.assertIn("NEVER use `#L1-L1`", a2_text)
+
 
 if __name__ == "__main__":
     unittest.main()
