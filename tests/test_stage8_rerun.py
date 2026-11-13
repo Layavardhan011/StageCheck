@@ -212,6 +212,20 @@ class TestTopologyPreservingWorktrees(unittest.TestCase):
             )
             self.assertEqual(res.returncode, 0, f"Worktree sibling resolution failed: {res.stderr}")
 
+    def test_stage8_test_at_base_commit_executes_without_name_error(self) -> None:
+        """Verify _test_at_base_commit executes commands at base_commit without raising NameError."""
+        from stagecheck.checks.stage8_rerun import _test_at_base_commit
+
+        exit_code = _test_at_base_commit(
+            workspace_root=self.ws,
+            repo_path=self.backend_dir,
+            base_commit=self.backend_commit,
+            argv=["python3", "-m", "unittest", "--help"],
+            task_id="TASK-101",
+            attempt=1,
+        )
+        self.assertEqual(exit_code, 0)
+
     def test_prune_abandoned_worktrees(self) -> None:
         """Verify crash recovery helper cleans abandoned worktrees."""
         # Manually create a dangling worktree directly with git

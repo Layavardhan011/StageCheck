@@ -254,6 +254,8 @@ class TestAtomicScaffolding(unittest.TestCase):
         self.assertIn("verbatim_quote", a2_text)
         self.assertIn("line_range", a2_text)
         self.assertIn("NEVER use `#L1-L1`", a2_text)
+        self.assertIn("Phase-2B/witnesses/", a2_text)
+        self.assertIn("Phase-2B Directory Layout & Witness Storage", a2_text)
 
 
 if __name__ == "__main__":

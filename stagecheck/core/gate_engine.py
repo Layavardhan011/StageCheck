@@ -626,6 +626,37 @@ def evaluate_gate_2b_criteria(
                 "status": "VALID",
             })
 
+    # 3b. Phase-2B Layout Cleanliness & Witness Directory Grouping (Spec 01 / Spec 06)
+    # Primary deliverables in Phase-2B root: report.md, claims.json, gate2b_receipt.json,
+    # task_state.json, authorized_commands.json, git_commit_log.json.
+    # Group any raw command outputs or git witness logs into Phase-2B/witnesses/.
+    primary_phase2b_files = {
+        "report.md",
+        "claims.json",
+        "gate2b_receipt.json",
+        "task_state.json",
+        "authorized_commands.json",
+        "git_commit_log.json",
+    }
+    if p2b_dir.is_dir() and not p2b_dir.is_symlink():
+        witnesses_dir = p2b_dir / "witnesses"
+        rerun_dir = p2b_dir / "rerun_outputs"
+        try:
+            witnesses_dir.mkdir(parents=True, exist_ok=True)
+            rerun_dir.mkdir(parents=True, exist_ok=True)
+            for item in list(p2b_dir.iterdir()):
+                if item.is_file() and not item.is_symlink() and item.name not in primary_phase2b_files:
+                    if (
+                        item.name.endswith((".txt", ".log", "_output", "_stderr", "_stdout"))
+                        or item.name.startswith("git_")
+                        or item.name.startswith("test_")
+                    ):
+                        dest = witnesses_dir / item.name
+                        if not dest.exists():
+                            item.rename(dest)
+        except OSError:
+            pass
+
     # 4. Discover repositories to evaluate
     from stagecheck.core.cooperative_review import resolve_governed_repo_path
 

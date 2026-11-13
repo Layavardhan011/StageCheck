@@ -61,6 +61,16 @@ def run_stage3_citations(ctx: AuditContext) -> StageResult:
                     continue
 
                 if not target_file.is_file():
+                    # Dual-mode resolution for relocated Phase-2B witness files (Spec 01 / Spec 06)
+                    norm_rel = file_rel.replace("\\", "/")
+                    if "Phase-2B/" in norm_rel:
+                        for sub in ("witnesses", "rerun_outputs"):
+                            cand = target_file.parent / sub / target_file.name
+                            if cand.is_file() and not cand.is_symlink():
+                                target_file = cand
+                                break
+
+                if not target_file.is_file():
                     defects.append(
                         Defect(
                             defect_id="citations.missing_file",

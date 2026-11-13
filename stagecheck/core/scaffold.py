@@ -159,6 +159,11 @@ Implement source code, unit tests, and regression coverage for approved tasks on
   - `verbatim_quote` MUST match the disk contents within `line_range` character-for-character (including whitespace and symbols).
   - NEVER use `#L1-L1` or dummy line numbers as placeholders. Citation hallucination triggers critical blocking defects in Stage 3 audit.
 
+## Phase-2B Directory Layout & Witness Storage (Spec 01 / Spec 06)
+- The root of `Phase-2B/` is strictly reserved for primary governance deliverables: `report.md`, `claims.json`, and StageCheck-generated `gate2b_receipt.json`.
+- **DO NOT** place loose execution logs, terminal outputs, or git witness text files (e.g., `git_branch.txt`, `git_head.txt`, `git_status.txt`, `test_output.txt`, `test_stderr.txt`) directly in the root of `Phase-2B/`.
+- All command outputs, stdout/stderr logs, and test witness records MUST be grouped inside a dedicated subfolder: `Phase-2B/witnesses/` or `Phase-2B/rerun_outputs/` (e.g., `Phase-2B/witnesses/test_output.txt`).
+
 ## Must Not
 - MUST NOT execute remote push operations (`git push` is strictly forbidden).
 - MUST NOT commit directly to `main` or `master` branch.
@@ -233,7 +238,8 @@ def scaffold_agent_instructions(
                 f"### Phase-2B Deliverable Contracts & Citation Standards\n"
                 f"- Deliver both `Phase-2B/report.md` and `Phase-2B/claims.json` satisfying `claims.schema.json`.\n"
                 f"- Every citation must have `file`, valid ordered 1-based `line_range: [start_line, end_line]`, and `verbatim_quote` matching disk contents character-for-character.\n"
-                f"- Never use `#L1-L1` or placeholder line numbers.\n\n"
+                f"- Never use `#L1-L1` or placeholder line numbers.\n"
+                f"- Group all raw test outputs, command records, and git witness logs in `Phase-2B/witnesses/` or `Phase-2B/rerun_outputs/`; do not place loose text files directly in `Phase-2B/` root.\n\n"
                 f"### Security Invariants & Negative Prohibitions\n"
                 f"- MUST NOT execute remote push operations (`git push` is strictly forbidden).\n"
                 f"- MUST NOT commit directly to `main` or `master` branch.\n"

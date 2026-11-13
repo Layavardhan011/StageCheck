@@ -450,6 +450,7 @@ class TestGate2BAuthorization(unittest.TestCase):
         criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
         crit_map = {c.criterion_id: c.status for c in criteria}
         self.assertEqual(crit_map.get("gate2b.prior_review_approved"), "FAILED")
+
         self.assertEqual(crit_map.get("gate2b.delivery_report_exists"), "FAILED")
 
         # 2. Add unapproved review (REVISION_REQUIRED)
@@ -465,6 +466,58 @@ class TestGate2BAuthorization(unittest.TestCase):
         criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
         crit_map = {c.criterion_id: c.status for c in criteria}
         self.assertEqual(crit_map.get("gate2b.prior_review_approved"), "FAILED")
+
+    def test_phase2b_loose_witness_files_relocated_to_witnesses_directory(self) -> None:
+        """Verify loose witness and execution log files in Phase-2B root are relocated to Phase-2B/witnesses/."""
+        # Setup loose witness files directly in Phase-2B root
+        witness_names = ["git_branch.txt", "git_head.txt", "git_status.txt", "test_output.txt", "test_stderr.txt"]
+        for name in witness_names:
+            (self.p2b_dir / name).write_text(f"witness content for {name}\n", encoding="utf-8")
+
+        for name in witness_names:
+            self.assertTrue((self.p2b_dir / name).is_file())
+
+        criteria, deliverables = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+
+        # Loose files must be moved into witnesses/
+        witnesses_dir = self.p2b_dir / "witnesses"
+        self.assertTrue(witnesses_dir.is_dir())
+        for name in witness_names:
+            self.assertFalse((self.p2b_dir / name).exists(), f"{name} should have been relocated out of Phase-2B root")
+            self.assertTrue((witnesses_dir / name).is_file(), f"{name} should exist under Phase-2B/witnesses/")
+
+        # Verify Stage 3 citation resolution resolves relocated file cleanly
+        from stagecheck.checks.base import AuditContext
+        from stagecheck.checks.stage3_citations import run_stage3_citations
+        claims = {
+            "claims": [
+                {
+                    "id": "c_witness",
+                    "kind": "observation",
+                    "text": "Output captured",
+                    "scope": "app",
+                    "label": "TEST_PROVEN",
+                    "citations": [
+                        {
+                            "type": "file",
+                            "path": f"evidence/tasks/{self.task_id}/attempt_{self.attempt}/Phase-2B/test_output.txt",
+                            "lines": [1, 1],
+                            "quote": "witness content for test_output.txt",
+                        }
+                    ],
+                }
+            ]
+        }
+        ctx = AuditContext(
+            workspace_root=self.ws,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            touched_repos=["payment-service"],
+            all_registered_repos=["payment-service"],
+            claims=claims,
+        )
+        res = run_stage3_citations(ctx)
+        self.assertTrue(res.is_clear, f"Stage 3 citations failed to resolve relocated witness: {res.defects}")
 
 
 if __name__ == "__main__":

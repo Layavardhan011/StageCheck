@@ -62,7 +62,7 @@ def _test_at_base_commit(
                 working_directory=wt.worktree_path,
                 timeout_seconds=120,
                 check_tree_integrity=False,
-                workspace_root=ctx.workspace_root,
+                workspace_root=workspace_root,
             )
             return rec.exit_code
     except Exception:
