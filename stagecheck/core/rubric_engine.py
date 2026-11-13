@@ -2244,7 +2244,7 @@ def _collect_rubric_context(
 
         repo_ast = _analyze_python_repo_files(
             r_dir,
-            changed_files=(changed_rel_files if changed_rel_files else None),
+            changed_files=changed_rel_files,
         )
         for k in (
             "syntax_errors", "resource_leak_files", "swallowed_exceptions", "unsafe_patterns",
