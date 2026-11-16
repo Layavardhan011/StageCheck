@@ -166,54 +166,78 @@ Implement source code, unit tests, and regression coverage for approved tasks on
 
 ## Phase-2B Deliverable Contracts & Citation Standards
 - **`Phase-2B/report.md`:** Must document the implementation summary, blast radius analysis, tests executed, and commit hashes.
-- **`Phase-2B/claims.json`:** Must document every material claim and citation satisfying `claims.schema.json`:
-  1. **Code & File Citations (`type: "file"`):**
-     ```json
-     {
-       "claim_id": "CLAIM-001",
-       "statement": "Verifiable factual claim about source code or witness file",
-       "evidence_type": "CODE_CITATION",
-       "citations": [
-         {
-           "repository": "<repo_name>",
-           "file": "<relative/path/to/file>",
-           "line_range": [1, 10],
-           "verbatim_quote": "<exact quoted text from disk>"
-         }
-       ]
-     }
-     ```
-  2. **Test Runner Command Citations (`type: "command"`):**
-     - Strictly reserved for approved test runners (e.g. `go test`, `pytest`, `npm test`).
-     - MANDATES all required schema fields including `stdout_sha256` and `stderr_sha256`:
-     ```json
-     {
-       "claim_id": "CLAIM-002",
-       "statement": "Unit test suite passes cleanly",
-       "evidence_type": "TEST_EXECUTION",
-       "citations": [
-         {
-           "type": "command",
-           "record": "Phase-2B/witnesses/test_output.txt",
-           "record_sha256": "<sha256_of_record_file>",
-           "argv": ["go", "test", "./..."],
-           "cwd": "repos/<repo_name>",
-           "exit_status": 0,
-           "stdout_sha256": "<sha256_of_stdout_output>",
-           "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-         }
-       ]
-     }
-     ```
-     *(Note: If stderr is empty, sha256 is `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`).*
-  3. **Repository Metadata Witness Citations:**
-     - Git branch, commit HEAD, and status witness records (e.g. `git_head.txt`, `git_status.txt`) must be cited as **`type: "file"`** pointing to the witness file in `Phase-2B/witnesses/`.
-     - DO NOT cite git metadata commands as executable `type: "command"` citations.
-- **Strict Citation Verification Rules:**
-  - `file` must exist on disk and resolve inside the permitted repository.
-  - `line_range: [start_line, end_line]` must accurately bracket the cited code (1-based line numbers).
-  - `verbatim_quote` MUST match the disk contents within `line_range` character-for-character (including whitespace and symbols).
-  - NEVER use `#L1-L1` or dummy line numbers as placeholders. Citation hallucination triggers critical blocking defects in Stage 3 audit.
+- **`Phase-2B/claims.json`:** Must strictly conform to `claims.schema.json` with exact property names:
+  ```json
+  {
+    "task_id": "<task_id>",
+    "iteration": 1,
+    "contract_sha256": "<64_hex_sha256_of_AGENTS.md>",
+    "record": "Phase-2B/report.md",
+    "record_sha256": "<64_hex_sha256_of_report.md>",
+    "claims": [
+      {
+        "id": "CLAIM-001",
+        "kind": "observation",
+        "text": "Repository mx-chain-core-go checked out cleanly on task branch.",
+        "scope": "repos/mx-chain-core-go",
+        "label": "SOURCE_PROVEN",
+        "citations": [
+          {
+            "type": "file",
+            "path": "evidence/tasks/<task_id>/attempt_1/Phase-2B/witnesses/git_branch.txt",
+            "sha256": "<64_hex_sha256_of_file>",
+            "lines": [1, 1],
+            "quote": "fincore/task-01"
+          }
+        ],
+        "blast_radius": [
+          {
+            "group": 1,
+            "label": "not_applicable",
+            "reason": "Baseline check",
+            "items": []
+          }
+        ]
+      },
+      {
+        "id": "CLAIM-002",
+        "kind": "completion",
+        "text": "Unit tests pass cleanly",
+        "scope": "repos/mx-chain-core-go",
+        "label": "TEST_PROVEN",
+        "citations": [
+          {
+            "type": "command",
+            "record": "Phase-2B/witnesses/test_output.txt",
+            "record_sha256": "<64_hex_sha256_of_record_file>",
+            "argv": ["go", "test", "./..."],
+            "cwd": "repos/mx-chain-core-go",
+            "exit_status": 0,
+            "stdout_sha256": "<64_hex_sha256_of_stdout>",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        ],
+        "blast_radius": [
+          {
+            "group": 1,
+            "label": "checked",
+            "reason": "Core package test execution",
+            "items": ["core"]
+          }
+        ]
+      }
+    ]
+  }
+  ```
+- **Strict Schema & Citation Verification Rules:**
+  - Root fields `task_id`, `iteration` (integer attempt), `contract_sha256`, `record`, `record_sha256`, and `claims` are mandatory.
+  - In each claim, `id` (e.g. `"CLAIM-001"`), `kind` (`"observation"`, `"completion"`, `"decision"`, `"requirement"`, `"test_expectation"`), `text`, `scope` (`"repos/<repo_name>"`), `label` (`"SOURCE_PROVEN"`, `"TEST_PROVEN"`, etc.), `citations`, and `blast_radius` are mandatory.
+  - File citations (`type: "file"`) require `path`, `sha256` of file, line_range bracket `lines: [start_line, end_line]`, and verbatim_quote in `quote`.
+  - `path` must exist on disk and resolve inside the permitted repository.
+  - `lines: [start_line, end_line]` must accurately bracket the cited code line_range (1-based line numbers).
+  - `quote` MUST match the verbatim_quote from disk contents within `lines` character-for-character. NEVER use `#L1-L1` or dummy line numbers.
+  - Command citations (`type: "command"`) are strictly reserved for test runners (e.g. `go test`, `pytest`) and MUST include `stdout_sha256` and `stderr_sha256` (use `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` if empty).
+  - Git branch, commit HEAD, and status witness records must be cited as **`type: "file"`** pointing to `Phase-2B/witnesses/git_*.txt`. DO NOT cite git metadata commands as executable `type: "command"` citations.
 
 ## Phase-2B Directory Layout & Witness Storage (Spec 01 / Spec 06)
 - The root of `Phase-2B/` is strictly reserved for primary governance deliverables: `report.md`, `claims.json`, and StageCheck-generated `gate2b_receipt.json`.
@@ -307,9 +331,11 @@ def scaffold_agent_instructions(
                 f"- When Phase-2A review reports `REVISION_REQUIRED`, you MUST fix the defects in your source code and tests in `repos/*` and increment `cycle` (`cycle = rev_cycle + 1`) before resubmitting. DO NOT resubmit with the same cycle number or merely re-save `pre_commit_status.json`.\n"
                 f"- Strict Phase 2A Completion Requirement: DO NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first (`Phase-2A/pre_commit_review.json` status must be `\"APPROVED\"` and active phase advanced to `PHASE_2B_COMMITTING`).\n\n"
                 f"### Phase-2B Deliverable Contracts & Citation Standards\n"
-                f"- Deliver both `Phase-2B/report.md` and `Phase-2B/claims.json` satisfying `claims.schema.json`.\n"
-                f"- Every file citation must have `file`, valid ordered 1-based `line_range: [start_line, end_line]`, and `verbatim_quote` matching disk contents character-for-character.\n"
-                f"- Test command citations (`type: \"command\"`) are strictly for approved test runners and MUST include `stdout_sha256` and `stderr_sha256` (use `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` if empty).\n"
+                f"- Deliver both `Phase-2B/report.md` and `Phase-2B/claims.json` strictly conforming to `claims.schema.json`.\n"
+                f"- Root fields `task_id`, `iteration`, `contract_sha256`, `record`, `record_sha256`, and `claims` are mandatory.\n"
+                f"- In each claim, `id`, `kind`, `text`, `scope`, `label`, `citations`, and `blast_radius` are mandatory.\n"
+                f"- File citations (`type: \"file\"`) require `path`, `sha256`, line_range brackets in `lines: [start_line, end_line]`, and verbatim_quote in `quote`.\n"
+                f"- Command citations (`type: \"command\"`) are strictly for approved test runners and MUST include `stdout_sha256` and `stderr_sha256` (use `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` if empty).\n"
                 f"- Never use `#L1-L1` or placeholder line numbers.\n"
                 f"- Group all raw test outputs, command records, and git witness logs in `Phase-2B/witnesses/` or `Phase-2B/rerun_outputs/`; do not place loose text files directly in `Phase-2B/` root.\n\n"
                 f"### Security Invariants & Negative Prohibitions\n"

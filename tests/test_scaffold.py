@@ -256,6 +256,10 @@ class TestAtomicScaffolding(unittest.TestCase):
         # Agent 2 instruction checks
         self.assertIn("Phase-2B/claims.json", a2_text)
         self.assertIn("Phase-2B Deliverable Contracts & Citation Standards", a2_text)
+        self.assertIn("claims.schema.json", a2_text)
+        self.assertIn("contract_sha256", a2_text)
+        self.assertIn("record_sha256", a2_text)
+        self.assertIn("blast_radius", a2_text)
         self.assertIn("verbatim_quote", a2_text)
         self.assertIn("line_range", a2_text)
         self.assertIn("NEVER use `#L1-L1`", a2_text)
