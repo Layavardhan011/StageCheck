@@ -187,6 +187,15 @@ class TestGate4SealingAndLifecycle(unittest.TestCase):
         is_valid, violations = verify_attempt_merkle_seal(self.attempt_dir, self.workspace_root)
         self.assertTrue(is_valid, f"Seal verification failed: {violations}")
 
+        # 2b. Master seal and Phase-3 seal copy exist
+        master_seal = self.workspace_root / "evidence" / "tasks" / self.task_id / "seal.json"
+        self.assertTrue(master_seal.is_file())
+        self.assertEqual(stat.S_IMODE(master_seal.stat().st_mode), 0o444)
+
+        p3_seal = self.attempt_dir / "Phase-3" / "seal.json"
+        self.assertTrue(p3_seal.is_file())
+        self.assertEqual(stat.S_IMODE(p3_seal.stat().st_mode), 0o444)
+
         # 3. EVIDENCE_MANIFEST.json indexes the seal
         manifest = json.loads((self.workspace_root / "evidence" / "EVIDENCE_MANIFEST.json").read_text(encoding="utf-8"))
         task_manifest = manifest.get("sealed_tasks", {}).get(self.task_id, {})

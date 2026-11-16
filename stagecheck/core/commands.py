@@ -80,6 +80,7 @@ ALLOWLISTED_ENV_VARS = {
     # Safe toolchain and language runtime paths
     "GOROOT",
     "GOPATH",
+    "GOMODCACHE",
     "GOCACHE",
     "CARGO_HOME",
     "RUSTUP_HOME",
@@ -129,14 +130,29 @@ def build_sanitized_environment(
     clean["PYTHONDONTWRITEBYTECODE"] = "1"
     clean["HOME"] = "/tmp"
 
-    # Auto-discover GOROOT if missing from environment and go binary exists
-    if "GOROOT" not in clean and shutil.which("go"):
-        try:
-            res = subprocess.run(["go", "env", "GOROOT"], capture_output=True, text=True, timeout=5)
-            if res.returncode == 0 and res.stdout.strip():
-                clean["GOROOT"] = res.stdout.strip()
-        except Exception:
-            pass
+    # Auto-discover GOROOT, GOPATH, and GOMODCACHE if missing from environment and go binary exists
+    if shutil.which("go"):
+        if "GOROOT" not in clean:
+            try:
+                res = subprocess.run(["go", "env", "GOROOT"], capture_output=True, text=True, timeout=5)
+                if res.returncode == 0 and res.stdout.strip():
+                    clean["GOROOT"] = res.stdout.strip()
+            except Exception:
+                pass
+        if "GOPATH" not in clean:
+            try:
+                res = subprocess.run(["go", "env", "GOPATH"], capture_output=True, text=True, timeout=5)
+                if res.returncode == 0 and res.stdout.strip():
+                    clean["GOPATH"] = res.stdout.strip()
+            except Exception:
+                pass
+        if "GOMODCACHE" not in clean:
+            try:
+                res = subprocess.run(["go", "env", "GOMODCACHE"], capture_output=True, text=True, timeout=5)
+                if res.returncode == 0 and res.stdout.strip():
+                    clean["GOMODCACHE"] = res.stdout.strip()
+            except Exception:
+                pass
 
     # Ensure GOPATH and GOCACHE point to writable sandbox locations if not set
     if "GOCACHE" not in clean:

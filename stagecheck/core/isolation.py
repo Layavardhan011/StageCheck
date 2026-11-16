@@ -240,11 +240,11 @@ def build_bwrap_argv(
                 argv.extend(["--ro-bind", str(tc_cand), str(tc_cand)])
 
         # Re-bind language runtime toolchains and module caches (Go, Cargo, Rustup) located under home_dir
-        for env_key in ("GOROOT", "GOPATH", "CARGO_HOME", "RUSTUP_HOME"):
+        for env_key in ("GOROOT", "GOPATH", "GOMODCACHE", "CARGO_HOME", "RUSTUP_HOME"):
             val = os.environ.get(env_key)
-            if not val and env_key == "GOROOT" and shutil.which("go"):
+            if not val and env_key in ("GOROOT", "GOPATH", "GOMODCACHE") and shutil.which("go"):
                 try:
-                    res = subprocess.run(["go", "env", "GOROOT"], capture_output=True, text=True, timeout=5)
+                    res = subprocess.run(["go", "env", env_key], capture_output=True, text=True, timeout=5)
                     if res.returncode == 0 and res.stdout.strip():
                         val = res.stdout.strip()
                 except Exception:
