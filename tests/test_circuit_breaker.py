@@ -209,8 +209,20 @@ class TestCircuitBreaker(unittest.TestCase):
         self.assertIn("Option A (Manual Code Fix)", content)
         self.assertIn("Option B (Human Disposition)", content)
         self.assertIn("Option C (Attempt Reset)", content)
+        self.assertIn("Attempt budget exhausted (3/3 attempts used)", content)
         self.assertIn("Option D (Permanent Halt)", content)
         self.assertIn("qual_naming.required_suite_empty", content)
+
+        # Also verify attempt 1 informs developer of allocating Attempt 2 of 3
+        report_p1 = write_escalation_report(
+            self.workspace_root,
+            self.task_id,
+            attempt=1,
+            evaluation=evaluation,
+            defects=defects,
+        )
+        content_1 = report_p1.read_text(encoding="utf-8")
+        self.assertIn("allocate Attempt 2 of 3", content_1)
 
     def test_reset_attempts_preconditions_and_monotonic_budget(self):
         """Verify reset-attempts validates task match, trips requirement, and unlatches state."""

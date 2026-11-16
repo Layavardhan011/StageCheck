@@ -266,9 +266,18 @@ def write_escalation_report(
         "\n## Actionable Developer Resolution Paths\n\n",
         "- **Option A (Manual Code Fix):** Fix the defect directly in `repos/`, commit locally, and run `stagecheck audit`.\n",
         "- **Option B (Human Disposition):** Waive defect via `stagecheck disposition add --task <task_id> --defect <id>`.\n",
-        "- **Option C (Attempt Reset):** Unlatch breaker via `stagecheck reset-attempts --task <task_id>` to allocate Attempt 4+.\n",
-        "- **Option D (Permanent Halt):** Discontinue task; all commits and evidence remain permanently preserved.\n",
     ])
+    if attempt < MAX_DEFAULT_ATTEMPTS:
+        lines.append(
+            f"- **Option C (Attempt Reset):** Unlatch breaker via `stagecheck reset-attempts --task <task_id>` to allocate Attempt {attempt + 1} of {MAX_DEFAULT_ATTEMPTS}.\n"
+        )
+    else:
+        lines.append(
+            f"- **Option C (Attempt Reset):** Attempt budget exhausted ({attempt}/{MAX_DEFAULT_ATTEMPTS} attempts used). Retries are strictly prohibited; resolve via Option A, B, or D.\n"
+        )
+    lines.append(
+        "- **Option D (Permanent Halt):** Discontinue task; all commits and evidence remain permanently preserved.\n"
+    )
 
     write_text_nofollow(report_file, "".join(lines), append=False, mode=0o644)
     return report_file
