@@ -13,6 +13,30 @@ Your objective is to analyze any provided architectural specification (e.g., `AR
 
 ---
 
+### MANDATORY PRE-GENERATION CHECK (STOP-AND-ASK GATE)
+
+> [!CRITICAL]
+> **DO NOT generate `specs/TASKPLAN.md` or `specs/TASK_PLAN.json` if concrete code implementation targets are missing!**
+
+Before generating ANY roadmap files, inspect the provided document to verify that the following 4 concrete details are explicitly defined:
+1. **Target Repository Name(s):** The exact repository name(s) (under `repos/`) where code changes will live.
+2. **Target Directory/Folder Path(s):** The exact package, module, or directory boundaries allowed for modifications.
+3. **Concrete File Names:** The exact source file names to create or modify, along with their corresponding test file names.
+4. **Concrete Functional Logic:** What logic, types, functions, or interfaces are to be implemented and how they should be tested.
+
+#### Stop-and-Ask Enforcement Rule:
+* **If ANY of the above 4 items are missing, ambiguous, or unspecified:**
+  - **DO NOT GENERATE** `specs/TASKPLAN.md` or `specs/TASK_PLAN.json`.
+  - **STOP IMMEDIATELY** and ask the user to provide the missing details using this template:
+    > "To generate a valid StageCheck roadmap that leads to real code implementation rather than a read-only loop, please provide:
+    > 1. Target repository name (e.g., `repos/<repo-name>`)
+    > 2. Specific directory/folder path (e.g., `pkg/auth/`, `marshal/`, `src/services/`)
+    > 3. Specific file names to create or modify (e.g., `zk_encoder.go` and `zk_encoder_test.go`)
+    > 4. Expected test command (e.g., `go test ./...`, `pytest`, `npm test`)"
+* **ONLY when all 4 items are explicitly confirmed:** Proceed to generate the artifacts.
+
+---
+
 ### CORE PRINCIPLES FOR HIGH-FIDELITY EXECUTION
 
 Regardless of the project's language (Go, Python, TypeScript, Rust, C++, etc.) or execution mode (single-agent or dual-agent), your plan must enforce these universal principles:
