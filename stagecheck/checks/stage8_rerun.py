@@ -91,6 +91,22 @@ def run_stage8_rerun(ctx: AuditContext) -> StageResult:
         if not argv:
             continue
 
+        if argv[0] == "git":
+            defects.append(
+                Defect(
+                    defect_id="rerun.invalid_command_citation_type",
+                    message=(
+                        f"Git command citation '{' '.join(argv)}' cannot be cited as an executable test runner (type: 'command'). "
+                        "Repository state witness logs must be cited as type: 'file' pointing to Phase-2B/witnesses/."
+                    ),
+                    stage=stage_id,
+                    severity="CRITICAL",
+                    blocking=True,
+                    citation={"argv": argv, "cwd": rel_cwd},
+                )
+            )
+            continue
+
         work_dir = (ctx.workspace_root / rel_cwd).resolve()
         # Security: verify work_dir resides strictly inside a repository under repos/
         repos_root = (ctx.workspace_root / "repos").resolve()

@@ -565,14 +565,20 @@ class SupervisorEngine:
 
                     elif phase in ("PHASE_2B_COMMITTING", "PHASE_2B_DELIVERY"):
                         report_file = attempt_dir / "Phase-2B" / "report.md"
-                        if not report_file.is_file():
+                        claims_file = attempt_dir / "Phase-2B" / "claims.json"
+                        if not report_file.is_file() or not claims_file.is_file():
+                            missing = []
+                            if not report_file.is_file():
+                                missing.append("Phase-2B/report.md")
+                            if not claims_file.is_file():
+                                missing.append("Phase-2B/claims.json")
                             return SupervisorStepResult(
                                 task_id=task,
                                 attempt=att,
                                 current_phase=phase,
                                 action_taken="WAITING_FOR_DELIVERY_REPORT",
                                 status="WAITING",
-                                message="Waiting for Agent 2 to write Phase-2B/report.md.",
+                                message=f"Waiting for Agent 2 to write {' and '.join(missing)}.",
                             )
 
                         pre_report = check_gate_preconditions(self.root, GateId.GATE_2B, task, att)

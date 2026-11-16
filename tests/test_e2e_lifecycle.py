@@ -427,6 +427,7 @@ class TestEndToEndLifecycle(unittest.TestCase):
         phase2b_dir = self.ws / "evidence/tasks/task-303/attempt_1/Phase-2B"
         phase2b_dir.mkdir(parents=True, exist_ok=True)
         (phase2b_dir / "report.md").write_text("# Delivery report\nImplemented changes.\n")
+        (phase2b_dir / "claims.json").write_text(json.dumps({"schema_version": 1, "task_id": "task-303", "attempt": 1, "claims": []}))
 
         # Advance Gate 2B
         rc = run_gate_advance("Gate-2B", task="task-303", attempt=1, workspace=str(self.ws))
@@ -530,6 +531,7 @@ class TestEndToEndLifecycle(unittest.TestCase):
         phase2b_dir = self.ws / "evidence/tasks/task-404/attempt_1/Phase-2B"
         phase2b_dir.mkdir(parents=True, exist_ok=True)
         (phase2b_dir / "report.md").write_text("# Delivery report\nMulti-repo changes.\n")
+        (phase2b_dir / "claims.json").write_text(json.dumps({"schema_version": 1, "task_id": "task-404", "attempt": 1, "claims": []}))
 
         # Advance Gate 2B
         rc = run_gate_advance("Gate-2B", task="task-404", attempt=1, workspace=str(self.ws))

@@ -250,6 +250,42 @@ class TestTopologyPreservingWorktrees(unittest.TestCase):
         )
         self.assertNotIn("ORPHAN-01", res.stdout)
 
+    def test_stage8_rejects_git_command_citations_with_clear_defect(self) -> None:
+        """Verify Stage 8 rerun flags git command citations with rerun.invalid_command_citation_type."""
+        from stagecheck.checks.base import AuditContext
+        from stagecheck.checks.stage8_rerun import run_stage8_rerun
+
+        claims = {
+            "claims": [
+                {
+                    "claim_id": "GIT-001",
+                    "citations": [
+                        {
+                            "type": "command",
+                            "argv": ["git", "rev-parse", "HEAD"],
+                            "cwd": "repos/backend",
+                            "exit_status": 0,
+                            "stdout_sha256": "0" * 64,
+                            "stderr_sha256": "0" * 64,
+                        }
+                    ],
+                }
+            ]
+        }
+        ctx = AuditContext(
+            workspace_root=self.ws,
+            task_id="TASK-101",
+            attempt=1,
+            claims=claims,
+            touched_repos=["backend"],
+            all_registered_repos=["backend", "shared"],
+        )
+        res = run_stage8_rerun(ctx)
+        self.assertEqual(res.status, "FAIL")
+        self.assertTrue(any(d.defect_id == "rerun.invalid_command_citation_type" for d in res.defects))
+        defect = next(d for d in res.defects if d.defect_id == "rerun.invalid_command_citation_type")
+        self.assertIn("cannot be cited as an executable test runner", defect.message)
+
 
 if __name__ == "__main__":
     unittest.main()

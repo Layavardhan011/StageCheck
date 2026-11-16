@@ -167,28 +167,48 @@ Implement source code, unit tests, and regression coverage for approved tasks on
 ## Phase-2B Deliverable Contracts & Citation Standards
 - **`Phase-2B/report.md`:** Must document the implementation summary, blast radius analysis, tests executed, and commit hashes.
 - **`Phase-2B/claims.json`:** Must document every material claim and citation satisfying `claims.schema.json`:
-  ```json
-  {
-    "schema_version": 1,
-    "task_id": "<task_id>",
-    "attempt": <N>,
-    "claims": [
-      {
-        "claim_id": "CLAIM-001",
-        "statement": "Verifiable factual claim",
-        "evidence_type": "CODE_CITATION",
-        "citations": [
-          {
-            "repository": "<repo_name>",
-            "file": "<relative/path/to/file>",
-            "line_range": [<start_line>, <end_line>],
-            "verbatim_quote": "<exact quoted text from disk>"
-          }
-        ]
-      }
-    ]
-  }
-  ```
+  1. **Code & File Citations (`type: "file"`):**
+     ```json
+     {
+       "claim_id": "CLAIM-001",
+       "statement": "Verifiable factual claim about source code or witness file",
+       "evidence_type": "CODE_CITATION",
+       "citations": [
+         {
+           "repository": "<repo_name>",
+           "file": "<relative/path/to/file>",
+           "line_range": [1, 10],
+           "verbatim_quote": "<exact quoted text from disk>"
+         }
+       ]
+     }
+     ```
+  2. **Test Runner Command Citations (`type: "command"`):**
+     - Strictly reserved for approved test runners (e.g. `go test`, `pytest`, `npm test`).
+     - MANDATES all required schema fields including `stdout_sha256` and `stderr_sha256`:
+     ```json
+     {
+       "claim_id": "CLAIM-002",
+       "statement": "Unit test suite passes cleanly",
+       "evidence_type": "TEST_EXECUTION",
+       "citations": [
+         {
+           "type": "command",
+           "record": "Phase-2B/witnesses/test_output.txt",
+           "record_sha256": "<sha256_of_record_file>",
+           "argv": ["go", "test", "./..."],
+           "cwd": "repos/<repo_name>",
+           "exit_status": 0,
+           "stdout_sha256": "<sha256_of_stdout_output>",
+           "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+         }
+       ]
+     }
+     ```
+     *(Note: If stderr is empty, sha256 is `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`).*
+  3. **Repository Metadata Witness Citations:**
+     - Git branch, commit HEAD, and status witness records (e.g. `git_head.txt`, `git_status.txt`) must be cited as **`type: "file"`** pointing to the witness file in `Phase-2B/witnesses/`.
+     - DO NOT cite git metadata commands as executable `type: "command"` citations.
 - **Strict Citation Verification Rules:**
   - `file` must exist on disk and resolve inside the permitted repository.
   - `line_range: [start_line, end_line]` must accurately bracket the cited code (1-based line numbers).
@@ -207,6 +227,8 @@ Implement source code, unit tests, and regression coverage for approved tasks on
 - MUST NOT resubmit `pre_commit_status.json` with the same `cycle` number following a `REVISION_REQUIRED` review. You MUST increment `cycle` (`cycle > rev_cycle`).
 - MUST NOT use repository path prefixes (such as `"repos/<repo_name>"`) in `pre_commit_status.json`; use bare repository names matching `controls/PRODUCT_REPOSITORIES.json`.
 - MUST NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first (`Phase-2A/pre_commit_review.json` status must be `"APPROVED"` and active phase advanced to `PHASE_2B_COMMITTING`).
+- MUST NOT cite non-test commands (such as `git rev-parse`, `git status`, `git branch`) as executable `type: "command"` citations in `Phase-2B/claims.json`. Repository metadata witness records must be cited as `type: "file"`.
+- MUST NOT omit required fields (`stdout_sha256`, `stderr_sha256`, `record_sha256`, `exit_status`, `argv`, `cwd`) in `type: "command"` citations in `Phase-2B/claims.json`.
 - MUST NOT execute remote push operations (`git push` is strictly forbidden).
 - MUST NOT commit directly to `main` or `master` branch.
 - MUST NOT modify control descriptors in `controls/*`.
@@ -286,7 +308,8 @@ def scaffold_agent_instructions(
                 f"- Strict Phase 2A Completion Requirement: DO NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first (`Phase-2A/pre_commit_review.json` status must be `\"APPROVED\"` and active phase advanced to `PHASE_2B_COMMITTING`).\n\n"
                 f"### Phase-2B Deliverable Contracts & Citation Standards\n"
                 f"- Deliver both `Phase-2B/report.md` and `Phase-2B/claims.json` satisfying `claims.schema.json`.\n"
-                f"- Every citation must have `file`, valid ordered 1-based `line_range: [start_line, end_line]`, and `verbatim_quote` matching disk contents character-for-character.\n"
+                f"- Every file citation must have `file`, valid ordered 1-based `line_range: [start_line, end_line]`, and `verbatim_quote` matching disk contents character-for-character.\n"
+                f"- Test command citations (`type: \"command\"`) are strictly for approved test runners and MUST include `stdout_sha256` and `stderr_sha256` (use `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` if empty).\n"
                 f"- Never use `#L1-L1` or placeholder line numbers.\n"
                 f"- Group all raw test outputs, command records, and git witness logs in `Phase-2B/witnesses/` or `Phase-2B/rerun_outputs/`; do not place loose text files directly in `Phase-2B/` root.\n\n"
                 f"### Security Invariants & Negative Prohibitions\n"
@@ -296,6 +319,8 @@ def scaffold_agent_instructions(
                 f"- MUST NOT resubmit `pre_commit_status.json` with the same cycle number following `REVISION_REQUIRED` (`cycle > rev_cycle` is mandatory for turn advancement).\n"
                 f"- MUST NOT use repository path prefixes (such as `repos/<repo_name>`) in `pre_commit_status.json`; use bare repository names matching `controls/PRODUCT_REPOSITORIES.json`.\n"
                 f"- MUST NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first.\n"
+                f"- MUST NOT cite non-test commands (such as `git rev-parse`, `git status`) as executable `type: \"command\"` citations in `Phase-2B/claims.json`. Repository witness records must be cited as `type: \"file\"`.\n"
+                f"- MUST NOT omit required fields (`stdout_sha256`, `stderr_sha256`, `record_sha256`, `exit_status`, `argv`, `cwd`) in `type: \"command\"` citations.\n"
                 f"- MUST NOT execute remote push operations (`git push` is strictly forbidden).\n"
                 f"- MUST NOT commit directly to `main` or `master` branch.\n"
                 f"- MUST NOT modify control descriptors in `controls/*` or edit `.stagecheck.lock`.\n"

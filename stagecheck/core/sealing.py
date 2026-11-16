@@ -170,6 +170,35 @@ def compute_attempt_merkle_seal(
         from stagecheck.core.agents import resolve_task_attempt_dir
         from stagecheck.core.paths import sha256_file_nofollow
 
+        # If previous attempts in the sequence are unsealed (e.g. failed audit retries),
+        # seal them retroactively so the cryptographic Merkle chain remains continuous and unbroken.
+        if write_seal_file:
+            for p_idx in range(1, attempt_index):
+                p_dir = resolve_task_attempt_dir(ws_root, task_id, p_idx)
+                p_seal = p_dir / "seal.json"
+                if p_dir.is_dir() and not p_seal.is_file() and not os.path.islink(p_seal):
+                    p_vfile = p_dir / "Phase-3" / "verdict.json"
+                    if not p_vfile.is_file():
+                        p_vfile = p_dir / "verdict.json"
+                    p_vdata: Dict[str, Any] = {"result": "FAILED", "note": "Unsealed failed prior attempt"}
+                    if p_vfile.is_file() and not os.path.islink(p_vfile):
+                        try:
+                            p_vdata = json.loads(p_vfile.read_text(encoding="utf-8"))
+                        except Exception:
+                            pass
+                    p_seal_rec = compute_attempt_merkle_seal(
+                        attempt_dir=p_dir,
+                        workspace_root=ws_root,
+                        task_id=task_id,
+                        attempt_index=p_idx,
+                        verdict_data=p_vdata,
+                        write_seal_file=True,
+                    )
+                    try:
+                        index_seal_in_manifest(ws_root, task_id, p_idx, p_seal_rec)
+                    except Exception:
+                        pass
+
         prior_dir = resolve_task_attempt_dir(ws_root, task_id, attempt_index - 1)
         prior_seal_file = prior_dir / "seal.json"
         if os.path.islink(prior_seal_file) or not prior_seal_file.is_file():

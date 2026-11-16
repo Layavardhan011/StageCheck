@@ -239,19 +239,55 @@ def build_bwrap_argv(
                 seen_toolchain.add(tc_cand)
                 argv.extend(["--ro-bind", str(tc_cand), str(tc_cand)])
 
+        # Re-bind language runtime toolchains and module caches (Go, Cargo, Rustup) located under home_dir
+        for env_key in ("GOROOT", "GOPATH", "CARGO_HOME", "RUSTUP_HOME"):
+            val = os.environ.get(env_key)
+            if not val and env_key == "GOROOT" and shutil.which("go"):
+                try:
+                    res = subprocess.run(["go", "env", "GOROOT"], capture_output=True, text=True, timeout=5)
+                    if res.returncode == 0 and res.stdout.strip():
+                        val = res.stdout.strip()
+                except Exception:
+                    pass
+            if val:
+                tc_path = Path(val).resolve()
+                if (
+                    tc_path.is_dir()
+                    and tc_path not in seen_toolchain
+                    and _is_relative_to(tc_path, home_dir)
+                    and not _is_relative_to(tc_path, cwd)
+                    and not _is_governance_protected_path(tc_path, ws_root)
+                ):
+                    seen_toolchain.add(tc_path)
+                    argv.extend(["--ro-bind", str(tc_path), str(tc_path)])
+
         raw_exe = Path(exec_argv[0])
-        if raw_exe.is_absolute():
-            resolved_exe = raw_exe.resolve()
-            if (
-                resolved_exe.is_file()
-                and (_is_relative_to(raw_exe, home_dir) or _is_relative_to(resolved_exe, home_dir))
-                and not _is_relative_to(resolved_exe, cwd)
-                and not _is_governance_protected_path(resolved_exe, ws_root)
-            ):
-                target_mount = str(raw_exe) if _is_relative_to(raw_exe, home_dir) else str(resolved_exe)
-                argv.extend(["--ro-bind", str(resolved_exe), target_mount])
-                if target_mount != str(resolved_exe) and _is_relative_to(resolved_exe, home_dir):
-                    argv.extend(["--ro-bind", str(resolved_exe), str(resolved_exe)])
+        resolved_exe = raw_exe.resolve() if raw_exe.is_absolute() else None
+        if resolved_exe is None:
+            w_path = shutil.which(exec_argv[0])
+            if w_path:
+                resolved_exe = Path(w_path).resolve()
+
+        if (
+            resolved_exe is not None
+            and resolved_exe.is_file()
+            and _is_relative_to(resolved_exe, home_dir)
+            and not _is_relative_to(resolved_exe, cwd)
+            and not _is_governance_protected_path(resolved_exe, ws_root)
+        ):
+            argv.extend(["--ro-bind", str(resolved_exe), str(resolved_exe)])
+            # Also re-bind the toolchain parent directory if binary resides in bin/
+            if resolved_exe.parent.name == "bin":
+                tc_root = resolved_exe.parent.parent
+                if (
+                    tc_root.is_dir()
+                    and tc_root not in seen_toolchain
+                    and _is_relative_to(tc_root, home_dir)
+                    and not _is_relative_to(tc_root, cwd)
+                    and not _is_governance_protected_path(tc_root, ws_root)
+                ):
+                    seen_toolchain.add(tc_root)
+                    argv.extend(["--ro-bind", str(tc_root), str(tc_root)])
 
     # Bind the authorized execution directory (either rw within repo or strict ro).
     if cwd.is_dir():

@@ -255,6 +255,52 @@ class TestAcyclicMerkleSealing(unittest.TestCase):
             self.assertFalse(is_valid)
             self.assertTrue(any("attempt_index" in v for v in violations))
 
+    def test_multi_attempt_retroactively_seals_unsealed_prior_retry(self) -> None:
+        """Verify sealing attempt 2 retroactively seals unsealed failed attempt 1 to maintain Merkle chain."""
+        from stagecheck.core.agents import resolve_task_attempt_dir
+        from stagecheck.core.evidence import verify_seal_chain
+
+        # Setup attempt 1 without seal.json (representing a failed attempt)
+        att1_dir = resolve_task_attempt_dir(self.ws, self.task_id, 1, ensure_exists=True)
+        (att1_dir / "Phase-1").mkdir(parents=True, exist_ok=True)
+        (att1_dir / "Phase-1" / "prompt.md").write_text("# Attempt 1 prompt\n", encoding="utf-8")
+        (att1_dir / "Phase-3").mkdir(parents=True, exist_ok=True)
+        (att1_dir / "Phase-3" / "verdict.json").write_text(
+            json.dumps({"result": "BLOCKED", "defects": [{"defect_id": "test_err"}]}),
+            encoding="utf-8",
+        )
+        self.assertFalse((att1_dir / "seal.json").exists())
+
+        # Setup attempt 2
+        att2_dir = resolve_task_attempt_dir(self.ws, self.task_id, 2, ensure_exists=True)
+        (att2_dir / "Phase-1").mkdir(parents=True, exist_ok=True)
+        (att2_dir / "Phase-1" / "prompt.md").write_text("# Attempt 2 prompt\n", encoding="utf-8")
+        (att2_dir / "Phase-3").mkdir(parents=True, exist_ok=True)
+        v2_data = {"result": "CLEAR", "defects": []}
+        (att2_dir / "Phase-3" / "verdict.json").write_text(
+            json.dumps(v2_data),
+            encoding="utf-8",
+        )
+
+        # Seal attempt 2
+        seal2 = compute_attempt_merkle_seal(
+            att2_dir,
+            self.ws,
+            self.task_id,
+            attempt_index=2,
+            verdict_data=v2_data,
+            write_seal_file=True,
+        )
+
+        # Verify attempt 1 was retroactively sealed
+        self.assertTrue((att1_dir / "seal.json").is_file())
+        self.assertTrue((att2_dir / "seal.json").is_file())
+
+        # Verify unbroken cryptographic chain
+        ok_chain, violations = verify_seal_chain(self.ws, self.task_id, max_attempt=2)
+        self.assertTrue(ok_chain, f"Seal chain broken: {violations}")
+        self.assertEqual(violations, [])
+
 
 if __name__ == "__main__":
     unittest.main()

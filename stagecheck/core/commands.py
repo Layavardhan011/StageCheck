@@ -77,6 +77,13 @@ ALLOWLISTED_ENV_VARS = {
     "PYTHONDONTWRITEBYTECODE",
     "HOME",
     "TMPDIR",
+    # Safe toolchain and language runtime paths
+    "GOROOT",
+    "GOPATH",
+    "GOCACHE",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "NODE_PATH",
 }
 
 # Substring patterns identifying sensitive credentials to purge
@@ -121,6 +128,21 @@ def build_sanitized_environment(
     # Enforce bytecode suppression and ephemeral sandbox HOME
     clean["PYTHONDONTWRITEBYTECODE"] = "1"
     clean["HOME"] = "/tmp"
+
+    # Auto-discover GOROOT if missing from environment and go binary exists
+    if "GOROOT" not in clean and shutil.which("go"):
+        try:
+            res = subprocess.run(["go", "env", "GOROOT"], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and res.stdout.strip():
+                clean["GOROOT"] = res.stdout.strip()
+        except Exception:
+            pass
+
+    # Ensure GOPATH and GOCACHE point to writable sandbox locations if not set
+    if "GOCACHE" not in clean:
+        clean["GOCACHE"] = "/tmp/go-cache"
+    if "GOPATH" not in clean:
+        clean["GOPATH"] = "/tmp/go-path"
 
     if extra_env:
         for k, v in extra_env.items():

@@ -607,8 +607,42 @@ def evaluate_gate_2b_criteria(
             message="report.md exists and is readable.",
         ))
 
+    # 2b. Mandatory Phase 2B claims mapping
+    try:
+        claims_path = safe_resolve("Phase-2B/claims.json", attempt_dir, allow_symlinks=False)
+    except StageCheckPathError as err:
+        claims_path = None
+        criteria.append(GateCriterion(
+            criterion_id="gate2b.claims_json_symlink",
+            description="Phase-2B/claims.json must not be a symlink",
+            status="FAILED",
+            message=f"Symlinked deliverable Phase-2B/claims.json: {err}",
+        ))
+
+    if claims_path and claims_path.is_file():
+        cla_hash = sha256_file_nofollow(claims_path)
+        deliverables.append({
+            "path": str(claims_path.relative_to(workspace_root)),
+            "sha256": cla_hash,
+            "status": "VALID",
+        })
+        criteria.append(GateCriterion(
+            criterion_id="gate2b.claims_json_exists",
+            description="Phase 2B claims mapping exists",
+            status="MET",
+            message="claims.json exists and is readable.",
+        ))
+    else:
+        if not any(c.criterion_id == "gate2b.claims_json_symlink" for c in criteria):
+            criteria.append(GateCriterion(
+                criterion_id="gate2b.claims_json_exists",
+                description="Phase 2B claims mapping exists",
+                status="FAILED",
+                message="Phase-2B/claims.json does not exist or is not a readable file.",
+            ))
+
     # 3. Optional Phase 2B deliverables
-    for opt_name in ["claims.json", "git_commit_log.json"]:
+    for opt_name in ["git_commit_log.json"]:
         try:
             opt_path = safe_resolve(f"Phase-2B/{opt_name}", attempt_dir, allow_symlinks=False)
         except StageCheckPathError as err:

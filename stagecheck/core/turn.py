@@ -228,14 +228,20 @@ def compute_turn_status(
 
     elif phase == "PHASE_2B_COMMITTING":
         report_file = p2b_dir / "report.md"
-        if not report_file.is_file():
+        claims_file = p2b_dir / "claims.json"
+        if not report_file.is_file() or not claims_file.is_file():
             active_turn = "AGENT_2"
-            waiting_for = "Phase-2B/report.md"
-            instructions = "Agent 2 must assemble final delivery report in Phase-2B/report.md."
+            missing = []
+            if not report_file.is_file():
+                missing.append("Phase-2B/report.md")
+            if not claims_file.is_file():
+                missing.append("Phase-2B/claims.json")
+            waiting_for = " and ".join(missing)
+            instructions = "Agent 2 must assemble delivery deliverables: Phase-2B/report.md and Phase-2B/claims.json."
         else:
             active_turn = "STAGECHECK"
             waiting_for = "Gate-2B advance"
-            instructions = "Delivery report submitted. StageCheck must advance Gate 2B to enter Phase 3 independent audit."
+            instructions = "Delivery report and claims submitted. StageCheck must advance Gate 2B to enter Phase 3 independent audit."
             preceding_status = {"file": "Phase-2B/report.md", "status": "SUBMITTED"}
 
     elif phase == "PHASE_3_AUDIT":
