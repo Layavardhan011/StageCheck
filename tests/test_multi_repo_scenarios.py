@@ -12,6 +12,7 @@ Verifies:
 9. Interrupted verification (injected stage exception) -> BLOCKED with exception defect.
 """
 
+import json
 import shutil
 import subprocess
 import tempfile
@@ -378,6 +379,36 @@ class TestMultiRepoAggregateScenarios(unittest.TestCase):
             self.assertFalse(passed)
             self.assertEqual(verdict["result"], "BLOCKED")
             self.assertTrue(any(d["defect_id"] == "scope_paths.exception" for d in verdict["defects"]))
+
+    def test_scenario_10_readonly_task_preserves_empty_touched_repos_and_passes_stage5(self):
+        """10. Read-only task with touched_repositories=[] preserves empty touched_repos and passes Stage 5."""
+        self._setup_valid_lifecycle()
+        # Set pre_commit_status and review to declare empty touched_repositories (read-only task)
+        p2a_dir = self.workspace_root / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
+        (p2a_dir / "pre_commit_status.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "cycle": 1,
+                "status": "AWAITING_REVIEW",
+                "touched_repositories": [],
+                "base_commits": {},
+            }),
+            encoding="utf-8",
+        )
+        rev_data = json.loads((p2a_dir / "pre_commit_review.json").read_text(encoding="utf-8"))
+        rev_data["approved_diff_hashes"] = {}
+        (p2a_dir / "pre_commit_review.json").write_text(canonical_json_dumps(rev_data), encoding="utf-8")
+
+        orchestrator = AuditOrchestrator(self.workspace_root)
+        ctx = orchestrator.discover_context(self.task_id, self.attempt)
+        self.assertEqual(ctx.touched_repos, [])
+
+        from stagecheck.checks.stage5_authority import run_stage5_authority
+        stage5_res = run_stage5_authority(ctx)
+        self.assertEqual(stage5_res.status, "CLEAR")
+        self.assertFalse(any(d.defect_id == "authority.unreviewed_commit_divergence" for d in stage5_res.defects))
 
 
 if __name__ == "__main__":

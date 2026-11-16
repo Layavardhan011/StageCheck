@@ -130,8 +130,24 @@ class AuditOrchestrator:
             except Exception:
                 pass
 
+        # 3. Resolve Attempt Directory & Pre-Commit Status
+        attempt_dir = resolve_task_attempt_dir(self.workspace_root, resolved_task_id, resolved_attempt)
+        p2a_status_path = attempt_dir / "Phase-2A" / "pre_commit_status.json"
+        p2a_status = _load_optional_json(p2a_status_path)
+        has_declared_touched = (
+            "touched_repositories" in p2a_status
+            and isinstance(p2a_status["touched_repositories"], list)
+        )
+
         # Detect touched repos
         touched: List[str] = []
+        if has_declared_touched:
+            declared = [
+                r.removeprefix("repos/") if isinstance(r, str) and r.startswith("repos/") else r
+                for r in p2a_status["touched_repositories"]
+            ]
+            touched = [r for r in declared if r in all_registered or r == "root"]
+
         for name in all_registered:
             rel_p = repo_dict.get(name, {}).get("path", f"repos/{name}" if name != "root" else ".")
             repo_path = self.workspace_root / rel_p
@@ -139,30 +155,33 @@ class AuditOrchestrator:
                 continue
             # If target HEAD differs from base commit, repo was touched
             if target_commits.get(name) and base_commits.get(name) and target_commits[name] != base_commits[name]:
-                touched.append(name)
+                if name not in touched:
+                    touched.append(name)
             else:
                 # Also check working tree changes
                 try:
                     diff_res = run_safe_git(repo_path, ["status", "--porcelain=v1"])
-                    if diff_res.stdout.strip():
+                    if diff_res.stdout.strip() and name not in touched:
                         touched.append(name)
                 except Exception:
                     pass
-        if not touched and all_registered:
+
+        # Only fallback to all registered repos if the task did not explicitly declare touched_repositories.
+        # This preserves empty touched_repos for verified read-only / evidence-only tasks.
+        if not touched and all_registered and not has_declared_touched:
             touched = list(all_registered)
 
-        # 3. Claims
-        attempt_dir = resolve_task_attempt_dir(self.workspace_root, resolved_task_id, resolved_attempt)
+        # 4. Claims
         claims_path = attempt_dir / "Phase-2B" / "claims.json"
         if not claims_path.is_file():
             claims_path = self.workspace_root / "claims.json"
         claims = _load_optional_json(claims_path)
 
-        # 4. Dispositions
+        # 5. Dispositions
         disp_doc = _load_optional_json(self.workspace_root / "controls" / "DISPOSITIONS.json")
         dispositions = disp_doc.get("dispositions", [])
 
-        # 5. Declared Scope
+        # 6. Declared Scope
         scope_path = attempt_dir / "Phase-1" / "declared_scope.json"
         if not scope_path.is_file():
             scope_path = self.workspace_root / "controls" / "declared_scope.json"
