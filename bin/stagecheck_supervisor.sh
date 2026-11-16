@@ -96,15 +96,35 @@ echo -e "-----------------------------------------------------------------------
 echo -e "${BLUE}[PREFLIGHT] Verifying Bubblewrap OS namespace isolation...${NC}"
 stagecheck supervisor preflight --workspace "${WORKSPACE_ROOT}"
 
-CMD=(stagecheck supervisor "${WATCH_MODE}" --workspace "${WORKSPACE_ROOT}" --timeout "${TIMEOUT}")
-if [[ -n "${TASK_ID}" ]]; then
-    CMD+=(--task "${TASK_ID}")
-fi
-if [[ -n "${ATTEMPT}" ]]; then
-    CMD+=(--attempt "${ATTEMPT}")
-fi
-if [[ -n "${JSON_FLAG}" ]]; then
-    CMD+=("${JSON_FLAG}")
-fi
+while true; do
+    CMD=(stagecheck supervisor "${WATCH_MODE}" --workspace "${WORKSPACE_ROOT}" --timeout "${TIMEOUT}")
+    if [[ -n "${TASK_ID}" ]]; then
+        CMD+=(--task "${TASK_ID}")
+    fi
+    if [[ -n "${ATTEMPT}" ]]; then
+        CMD+=(--attempt "${ATTEMPT}")
+    fi
+    if [[ -n "${JSON_FLAG}" ]]; then
+        CMD+=("${JSON_FLAG}")
+    fi
 
-exec "${CMD[@]}"
+    EXIT_CODE=0
+    "${CMD[@]}" || EXIT_CODE=$?
+
+    if [[ "${WATCH_MODE}" == "--once" || "${EXIT_CODE}" -ne 0 ]]; then
+        exit "${EXIT_CODE}"
+    fi
+
+    # Check if a next task can be activated from roadmap
+    NEXT_OUTPUT=$(stagecheck plan next --workspace "${WORKSPACE_ROOT}" --activate 2>&1) || true
+    if echo "${NEXT_OUTPUT}" | grep -q "Notice: No pending eligible tasks"; then
+        echo -e "\n${CYAN}${BOLD}================================================================================${NC}"
+        echo -e "${CYAN}${BOLD}     ALL ROADMAP TASKS HAVE COMPLETED AND SEALED SUCCESSFULLY!          ${NC}"
+        echo -e "${CYAN}${BOLD}================================================================================${NC}"
+        exit 0
+    fi
+
+    # Reset explicit task ID so supervisor picks up the newly activated task
+    TASK_ID=""
+    sleep 2
+done

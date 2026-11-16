@@ -121,6 +121,16 @@ def format_attempt_banner(attempt: int, task_id: str, enabled: bool = True) -> s
     return f"\n\033[1;36m{border}\033[0m\n\033[1;93m{text}\033[0m\n\033[1;36m{border}\033[0m\n"
 
 
+def format_task_completed_banner(task_id: str, enabled: bool = True) -> str:
+    """Format task completion banner."""
+    border = "=" * 80
+    task_num = task_id.split("-")[-1] if "-" in task_id else task_id
+    text = f"            >>> TASK COMPLETED ----> Task-{task_num} <<<"
+    if not enabled:
+        return f"\n{border}\n{text}\n{border}\n"
+    return f"\n\033[1;32m{border}\033[0m\n\033[1;92m{text}\033[0m\n\033[1;32m{border}\033[0m\n"
+
+
 def format_transition_line(phase: str, delay_sec: int, enabled: bool = True) -> str:
     """Format phase transition notice."""
     if not enabled:
@@ -307,6 +317,10 @@ def run_supervisor_cmd(
                         elapsed = time.time() - action_start_time
                         if elapsed >= 1.0:
                             print(format_completed_line("Finished", format_duration(elapsed), enabled=use_color))
+                    if res.status == "COMPLETED" and not output_json:
+                        print(format_task_completed_banner(res.task_id, enabled=use_color))
+                        print(f"{color_status('Waiting', enabled=use_color)} for 60 sec...")
+                        time.sleep(60.0)
                     return 0 if res.status == "COMPLETED" else 1
 
                 # Sleep time between phase changes (e.g. 30 sec between each phase)

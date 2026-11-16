@@ -716,6 +716,9 @@ class TestSupervisorCLI(unittest.TestCase):
         self.assertIn("\033[1;33m[WAITING]\033[0m", output)
         self.assertIn("\033[1;36mPHASE_1_PLANNING\033[0m", output)
         self.assertIn("\033[1;92m[COMPLETED]\033[0m", output)
+        self.assertIn(">>> TASK COMPLETED ----> Task-01 <<<", output)
+        self.assertIn("[Waiting]", output)
+        self.assertIn("for 60 sec", output)
 
 
 if __name__ == "__main__":
