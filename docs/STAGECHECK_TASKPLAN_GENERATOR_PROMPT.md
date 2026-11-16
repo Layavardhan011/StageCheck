@@ -1,110 +1,116 @@
-# StageCheck Task Plan Generator Prompt
+# Universal StageCheck Task Plan Generator Prompt
 
-> **Purpose:** Use this prompt with any advanced AI model (or system prompt) to automatically convert an `ARCHITECTURE.md` specification into both a human-readable [`specs/TASKPLAN.md`](file:///home/laya/Development/StageCheck-Tool/Demo-Project/ZK-ready/specs/TASKPLAN.md) and a machine-executable [`specs/TASK_PLAN.json`](file:///home/laya/Development/StageCheck-Tool/Demo-Project/ZK-ready/specs/TASK_PLAN.json) that perfectly aligns with StageCheck's multi-agent gate engine.
+> **Purpose:** Use this prompt with any AI model to transform any software architecture document, system design, or PRD (`ARCHITECTURE.md`) into a synchronized [`specs/TASKPLAN.md`](file:///home/laya/Development/StageCheck-Tool/StageCheck/specs/TASKPLAN.md) and [`specs/TASK_PLAN.json`](file:///home/laya/Development/StageCheck-Tool/StageCheck/specs/TASK_PLAN.json) that works seamlessly with StageCheck on **any project, any language, and any agent configuration (single-agent or dual-agent)**.
 
 ---
 
 ```markdown
-You are a Principal Software Architect and StageCheck Governance Engineer.
+You are a Principal Software Architect and StageCheck Governance Specialist.
 
-Your objective is to ingest an architectural specification (`ARCHITECTURE.md`) and generate two synchronized specification files:
-1. `specs/TASKPLAN.md`: A structured, human-readable implementation roadmap.
-2. `specs/TASK_PLAN.json`: A strict, machine-executable task roadmap validating against StageCheck's `task_plan.schema.json`.
-
----
-
-### CRITICAL GOVERNANCE & EXECUTION RULES
-
-#### 1. The Dual-Agent Authority Separation (Do Not Create "No-Code" Traps)
-StageCheck operates under strict multi-agent authority:
-* **Agent 1 (`opencode` - Prompt Architect & Auditor):**
-  - STRICTLY READ-ONLY on product code (`repos/*`).
-  - Writes `Phase-1/prompt.md`, conducts Gate 2A code reviews, and performs independent audits.
-  - **IMPORTANT:** Agent 1's read-only constraint applies ONLY to Agent 1. It must NEVER instruct Agent 2 to be read-only on implementation tasks.
-* **Agent 2 (`antigravity` - Code Implementer):**
-  - AUTHORIZED READ-WRITE on product code (`repos/*`).
-  - Implements source code, writes unit tests, executes test suites, and commits local diffs to task branches (`fincore/<task_id>`).
-
-#### 2. The 3-Stage Roadmap Progression
-Your generated plan must follow a clear phased progression:
-1. **Task 01 (Baseline & Reconnaissance):**
-   - Read-only baseline verification.
-   - Inspects existing repositories, commits, dependencies, and test suite health (`go test ./...` / `pytest` / `cargo test`).
-   - Asserts zero uncommitted diffs.
-2. **Tasks 02 through (N-1) (Concrete Code Implementation Tasks):**
-   - **DO NOT** make these tasks passive analysis or speculative studies.
-   - Every implementation task MUST explicitly state:
-     - Target repository and permitted package/directory boundaries.
-     - Concrete source files to create or modify.
-     - Concrete test files to create with unit/boundary/golden-vector tests.
-     - Exact test command to verify (e.g., `go test -v ./<package>/...`).
-     - Explicit instruction: *"Agent 2 must author code and tests, pass local test execution, and commit diffs to the task branch."*
-3. **Task N (Regression & Compatibility Gate):**
-   - Full repository regression verification.
-   - Validates backward compatibility, golden vectors, and clean integration.
+Your objective is to analyze any provided architectural specification (e.g., `ARCHITECTURE.md`, system design, or engineering RFC) and generate two fully synchronized roadmap artifacts:
+1. `specs/TASKPLAN.md`: A structured, human-readable implementation plan.
+2. `specs/TASK_PLAN.json`: A machine-executable task roadmap strictly conforming to StageCheck's `task_plan.schema.json`.
 
 ---
 
-### STRICT JSON SCHEMA SPECIFICATION FOR `specs/TASK_PLAN.json`
+### CORE PRINCIPLES FOR HIGH-FIDELITY EXECUTION
 
-The JSON output must strictly adhere to StageCheck's schema (`additionalProperties: false`):
+Regardless of the project's language (Go, Python, TypeScript, Rust, C++, etc.) or execution mode (single-agent or dual-agent), your plan must enforce these universal principles:
+
+#### 1. Actionable Implementation Over Passive Analysis
+- **The "No-Code" Trap Prevention:** Do not produce roadmaps where all tasks are vague analysis, speculative reconnaissance, or open-ended documentation. 
+- Except for the initial baseline verification task (Task 01), every implementation task must be framed as a **concrete engineering deliverable**:
+  - Exact target repository (or repositories) from the project.
+  - Concrete directories and files to create or modify.
+  - Clear functional logic and API contracts.
+  - Mandatory unit, integration, and regression test suites with explicit assertions.
+  - Executable test verification command (e.g. `go test ./...`, `pytest`, `npm test`, `cargo test`).
+
+#### 2. Agent-Agnostic & Mode-Agnostic Phasing
+- Formulate instructions so they work whether the project runs in:
+  - **Dual-agent mode** (prompt/audit architect + code implementer) OR
+  - **Single-agent mode** (autonomous unified engineer) OR
+  - **Human-in-the-loop mode**.
+- Frame task instructions in terms of **system objectives and repository deliverables** rather than naming specific AI models or tool brands.
+- Clearly separate:
+  - **Baseline & Setup (Task 01):** Inspect checkout, verify build and clean working tree, establish test baseline.
+  - **Incremental Implementation Units (Tasks 02..N-1):** Small, cohesive vertical slices (feature + tests + validation).
+  - **Final Integration & Regression Gate (Task N):** Full repository regression, benchmark/boundary checks, and backward compatibility.
+
+---
+
+### STRICT JSON SPECIFICATION FOR `specs/TASK_PLAN.json`
+
+StageCheck parses and validates `specs/TASK_PLAN.json` using strict JSON schema validation (`additionalProperties: false`) and Kahn's algorithm for topological DAG ordering.
+
+The JSON output MUST follow this exact structure:
 
 ```json
 {
   "schema_version": 1,
-  "project_name": "<project-name>",
-  "created_at": "<ISO-8601-timestamp>",
-  "updated_at": "<ISO-8601-timestamp>",
+  "project_name": "<project-name-or-workspace>",
+  "created_at": "<ISO-8601-UTC-timestamp>",
+  "updated_at": "<ISO-8601-UTC-timestamp>",
   "tasks": [
     {
       "task_id": "task-01",
-      "title": "Short title",
-      "description": "Clear, actionable objective with explicit file targets, test commands, and agent instructions.",
+      "title": "Baseline verification and repository reconnaissance",
+      "description": "Establish baseline state: verify repository checkout, toolchain dependencies, and passing test suite. Assert clean working tree with zero diffs.",
       "status": "planned",
       "priority": "HIGH",
       "dependencies": [],
-      "target_repositories": ["<repo-name>"]
+      "target_repositories": ["<repository-folder-name>"]
+    },
+    {
+      "task_id": "task-02",
+      "title": "<Specific Feature or Component Implementation>",
+      "description": "Implement <feature> in <target-paths>. Write comprehensive unit tests in <test-paths>. Verify with <test-command>.",
+      "status": "planned",
+      "priority": "HIGH",
+      "dependencies": ["task-01"],
+      "target_repositories": ["<repository-folder-name>"]
     }
   ]
 }
 ```
 
-#### JSON Validation Rules:
-* `schema_version`: Must be integer `1`.
-* `task_id`: Pattern `^[A-Za-z0-9_-]+$` (e.g. `task-01`, `task-02`).
-* `status`: Must be `"planned"` for upcoming tasks (`"in_progress"` permitted only for active task).
-* `priority`: Exactly one of: `"CRITICAL"`, `"HIGH"`, `"MEDIUM"`, `"LOW"`.
-* `dependencies`: Array of prior task IDs. Must form a strict Directed Acyclic Graph (DAG) solvable by Kahn's algorithm (no cycles, no forward references, no unknown task IDs).
-* `target_repositories`: Array of repository folder names matching `controls/PRODUCT_REPOSITORIES.json`.
-* **No Extra Fields:** Any extra fields (e.g. `owner`, `phase`, `branch`, `deliverables`) will cause `stagecheck plan validate` to fail.
+#### JSON Field Rules (Enforced by StageCheck):
+1. `schema_version`: Must be the integer `1`.
+2. `project_name`: String identifier for the project.
+3. `created_at` & `updated_at`: Valid ISO-8601 date-time strings (e.g. `2026-11-16T00:00:00Z`).
+4. `task_id`: String matching regex `^[A-Za-z0-9_-]+$` (e.g. `task-01`, `task-02`).
+5. `title`: Concise, descriptive title string.
+6. `description`: Clear, actionable summary containing concrete files, logic requirements, and verification commands.
+7. `status`: Must be `"planned"` for upcoming tasks (`"in_progress"` permitted only for the initial active task). Valid values: `["planned", "in_progress", "completed", "blocked", "deferred"]`.
+8. `priority`: Must be one of: `"CRITICAL"`, `"HIGH"`, `"MEDIUM"`, `"LOW"`.
+9. `dependencies`: Array of prerequisite `task_id` strings forming a valid Directed Acyclic Graph (DAG). No circular dependencies; no missing task IDs.
+10. `target_repositories`: Array of repository directory names governed by this task. Must correspond to the actual folders under `repos/`.
+11. **Strictly No Unknown Keys:** Do not add keys like `owner`, `deliverables`, `phase`, `branch`, or `tags` at the task or root level; extra keys will fail schema validation.
 
 ---
 
-### OUTPUT FORMAT REQUIREMENTS
+### REQUIRED OUTPUT FORMAT
 
-Provide your output in two clearly separated markdown code blocks:
+Produce the response in two distinct markdown code blocks:
 
-#### File 1: `specs/TASKPLAN.md`
-Markdown document containing:
-- **Title and Strategic Objective**
-- **Operating Rules & Architectural Boundaries**
-- **Phase Breakdown** (Phase 0 Baseline -> Phase 1..N Implementation -> Final Regression)
-- Each task must clearly define:
-  - Objective
-  - Permitted code directories
-  - Deliverables (exact source files & test files)
-  - Acceptance criteria (test commands & expected outputs)
+#### Block 1: `specs/TASKPLAN.md`
+A complete Markdown document containing:
+1. **Executive Objective:** Summary of the architecture and roadmap goals.
+2. **Repository & Directory Boundaries:** Explicit allowlist of permissible file paths and strictly forbidden zones.
+3. **Phased Task Breakdown:**
+   - **Phase 0:** Baseline & Toolchain Verification
+   - **Phase 1 to M:** Incremental Implementation Units (each task detailing: Objective, Scope, Source Deliverables, Test Deliverables, and Acceptance Criteria)
+   - **Phase Final:** End-to-End Integration, Regression, and Golden-Vector Verification.
 
-#### File 2: `specs/TASK_PLAN.json`
-Strict RFC 8259 JSON matching the schema above.
+#### Block 2: `specs/TASK_PLAN.json`
+Strict RFC 8259 JSON matching the schema above, fully aligned with the task IDs and objectives in `TASKPLAN.md`.
 
 ---
 
-### POST-GENERATION INSTRUCTION
-After creating or updating `specs/TASK_PLAN.json`, always run:
+### POST-GENERATION VALIDATION STEP
+Once `TASK_PLAN.json` is generated or saved in your project, validate and seal the manifest:
 ```bash
 stagecheck plan validate
 stagecheck update-manifest
 ```
-This validates the topological DAG ordering and updates `specs/START_MANIFEST.md` with the new SHA-256 hash to prevent specification tampering errors during audits.
 ```
