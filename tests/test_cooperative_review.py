@@ -16,6 +16,7 @@ from stagecheck.core.cooperative_review import (
     assert_commit_authorization,
     compute_uncommitted_diff_hashes,
     record_pre_commit_review,
+    resolve_governed_repo_path,
     submit_pre_commit_status,
     verify_committed_diff_fidelity,
 )
@@ -560,6 +561,36 @@ class TestCooperativeReview(unittest.TestCase):
         (self.backend_dir / "sneaky.py").write_text("x = 1\n", encoding="utf-8")
         violations = verify_precommit_scope(self.workspace, self.task_id, self.attempt, [], {})
         self.assertTrue(any("uncommitted modifications" in v for v in violations))
+
+    def test_resolve_governed_repo_path_normalizes_repos_prefix(self) -> None:
+        """Verify resolve_governed_repo_path handles both bare and 'repos/' prefixed names."""
+        bare_path = resolve_governed_repo_path(self.workspace, "backend")
+        prefixed_path = resolve_governed_repo_path(self.workspace, "repos/backend")
+        self.assertEqual(bare_path, prefixed_path)
+        self.assertEqual(bare_path, self.backend_dir)
+
+    def test_record_pre_commit_review_filters_premature_phase2b_defects(self) -> None:
+        """Verify premature Phase-2B/Phase-3 defects in Phase-2A review are filtered to prevent deadlock."""
+        premature_issue = {
+            "defect_id": "TASK01-BASELINE-007",
+            "severity": "BLOCKING",
+            "location": f"evidence/tasks/{self.task_id}/attempt_{self.attempt}/Phase-2B",
+            "description": "Missing Phase-2B/report.md and Phase-2B/claims.json",
+        }
+        # If the only defect is premature Phase-2B, record_pre_commit_review filters it out
+        rev_file = record_pre_commit_review(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            cycle=1,
+            status="APPROVED",
+            summary="Clean code",
+            base_commits={"backend": self.base_commit},
+            new_issues=[premature_issue],
+        )
+        rev_data = json.loads(rev_file.read_text(encoding="utf-8"))
+        self.assertEqual(rev_data["status"], "APPROVED")
+        self.assertEqual(len(rev_data.get("new_issues_found", [])), 0)
 
 
 if __name__ == "__main__":

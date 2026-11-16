@@ -205,7 +205,11 @@ def compute_turn_status(
                     rev_cycle = 0
 
                 if rev_val == "REVISION_REQUIRED":
-                    if cycle > rev_cycle:
+                    status_mtime = status_file.stat().st_mtime
+                    review_mtime = review_file.stat().st_mtime
+                    # Agent 1 takes turn if cycle was incremented (cycle > rev_cycle)
+                    # OR if Agent 2 submitted an update (status_mtime > review_mtime with status AWAITING_REVIEW)
+                    if cycle > rev_cycle or (status_mtime > review_mtime and st_val == "AWAITING_REVIEW"):
                         active_turn = "AGENT_1"
                         waiting_for = "Phase-2A/pre_commit_review.json"
                         instructions = "Agent 1 must review uncommitted diff against rubric/taxonomies and write Phase-2A/pre_commit_review.json."

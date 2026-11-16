@@ -41,8 +41,15 @@ def _validate_and_bind_precommit_status(
             f"pre_commit_status.json task/attempt mismatch (expected {task} attempt {attempt})."
         )
 
-    touched_repos = list(data.get("touched_repositories") or [])
-    base_commits = dict(data.get("base_commits") or {})
+    # Normalize repository identifiers (strip leading 'repos/' prefix if supplied)
+    touched_repos = [
+        r.removeprefix("repos/") if isinstance(r, str) and r.startswith("repos/") and not r.startswith("repos/..") else r
+        for r in (data.get("touched_repositories") or [])
+    ]
+    base_commits = {
+        (k.removeprefix("repos/") if isinstance(k, str) and k.startswith("repos/") and not k.startswith("repos/..") else k): v
+        for k, v in (data.get("base_commits") or {}).items()
+    }
     cycle = int(data.get("cycle", 1))
 
     prod_repos_file = workspace_root / "controls" / "PRODUCT_REPOSITORIES.json"

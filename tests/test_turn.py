@@ -176,6 +176,39 @@ class TestTurnProtocol(unittest.TestCase):
         self.assertEqual(t3b.active_turn, "AGENT_1")
         self.assertEqual(t3b.waiting_for, "Phase-2A/pre_commit_review.json")
 
+        # 3c. Even if cycle was not incremented (cycle == rev_cycle), newer mtime with AWAITING_REVIEW breaks cycle lock
+        import time, os
+        (p2a_dir / "pre_commit_review.json").write_text(
+            json.dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "cycle": 2,
+                "status": "REVISION_REQUIRED",
+                "summary": "Fix syntax error again",
+            }),
+            encoding="utf-8",
+        )
+        # Ensure status file has strictly newer mtime
+        time.sleep(0.01)
+        (p2a_dir / "pre_commit_status.json").write_text(
+            json.dumps({
+                "schema_version": "1.0.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "cycle": 2,  # Same cycle 2
+                "status": "AWAITING_REVIEW",
+                "touched_repositories": ["service"],
+                "base_commits": {"service": "abc"},
+            }),
+            encoding="utf-8",
+        )
+        rev_mtime = (p2a_dir / "pre_commit_review.json").stat().st_mtime
+        os.utime(p2a_dir / "pre_commit_status.json", (rev_mtime + 5, rev_mtime + 5))
+        t3c = compute_turn_status(self.workspace)
+        self.assertEqual(t3c.active_turn, "AGENT_1")
+        self.assertEqual(t3c.waiting_for, "Phase-2A/pre_commit_review.json")
+
         # 4. If review is approved: STAGECHECK turn (commit & advance)
         (p2a_dir / "pre_commit_review.json").write_text(
             json.dumps({

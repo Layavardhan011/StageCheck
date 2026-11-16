@@ -37,7 +37,7 @@
       "type": "array",
       "items": {
         "type": "string",
-        "pattern": "^(?!(?:\\.|\\.\\.)$)[a-zA-Z0-9._-]+$"
+        "pattern": "^(?!(?:\\.|\\.\\.)$)(?:repos/)?[a-zA-Z0-9._-]+$"
       }
     },
     "base_commits": {

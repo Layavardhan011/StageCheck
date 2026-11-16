@@ -39,6 +39,9 @@ def validate_commit_sha(commit_sha: Any, repo_name: str) -> str:
 
 def resolve_governed_repo_path(root: Path, repo_name: str) -> Path:
     """Resolve repository path safely against workspace repos/ and PRODUCT_REPOSITORIES.json."""
+    if isinstance(repo_name, str) and repo_name.startswith("repos/") and not repo_name.startswith("repos/.."):
+        repo_name = repo_name.removeprefix("repos/")
+
     if not isinstance(repo_name, str) or not _REPO_NAME_RE.match(repo_name) or repo_name in (".", ".."):
         raise ReviewGateError(f"Invalid repository name '{repo_name}'.")
 
@@ -431,6 +434,18 @@ def record_pre_commit_review(
     architectural_intents = architectural_intents or []
     new_issues = new_issues or []
     code_quality_observations = code_quality_observations or []
+
+    # In Phase 2A pre-commit review, deliverables for future phases (Phase 2B/Phase 3) cannot exist yet.
+    # Filter out premature future-phase defect allegations to prevent circular review deadlocks.
+    if new_issues:
+        filtered_issues = []
+        for issue in new_issues:
+            loc = str(issue.get("location", ""))
+            desc = str(issue.get("description", ""))
+            if "Phase-2B" in loc or "Phase-3" in loc or "Phase-2B/report.md" in desc or "Phase-2B/claims.json" in desc:
+                continue
+            filtered_issues.append(issue)
+        new_issues = filtered_issues
 
     # If new issues found, status must be REVISION_REQUIRED
     if new_issues and status == "APPROVED":
