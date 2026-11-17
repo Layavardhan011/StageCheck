@@ -121,6 +121,16 @@ def format_attempt_banner(attempt: int, task_id: str, enabled: bool = True) -> s
     return f"\n\033[1;36m{border}\033[0m\n\033[1;93m{text}\033[0m\n\033[1;36m{border}\033[0m\n"
 
 
+def format_task_started_banner(task_id: str, enabled: bool = True) -> str:
+    """Format task start banner."""
+    border = "=" * 80
+    task_num = task_id.split("-")[-1] if "-" in task_id else task_id
+    text = f"            >>> TASK STARTED ----> Task-{task_num} <<<"
+    if not enabled:
+        return f"\n{border}\n{text}\n{border}\n"
+    return f"\n\033[1;36m{border}\033[0m\n\033[1;96m{text}\033[0m\n\033[1;36m{border}\033[0m\n"
+
+
 def format_task_completed_banner(task_id: str, enabled: bool = True) -> str:
     """Format task completion banner."""
     border = "=" * 80
@@ -274,12 +284,18 @@ def run_supervisor_cmd(
         action_start_time: float = time.time()
         last_attempt: Optional[int] = None
         last_phase: Optional[str] = None
+        last_task_id: Optional[str] = None
 
         try:
             while True:
                 res = engine.step(task_id=task, attempt=attempt)
                 current_time = time.time()
                 state_key = (res.status, res.current_phase, res.action_taken, res.message)
+
+                # Highlight task started banner when first entering or switching tasks
+                if not output_json and (last_task_id is None or res.task_id != last_task_id):
+                    print(format_task_started_banner(res.task_id, enabled=use_color))
+                last_task_id = res.task_id
 
                 # Highlight moving to next attempt prominently
                 if last_attempt is not None and res.attempt != last_attempt:

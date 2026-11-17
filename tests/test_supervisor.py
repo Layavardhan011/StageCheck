@@ -673,6 +673,12 @@ class TestSupervisorCLI(unittest.TestCase):
         self.assertIn("ADVANCING TO ATTEMPT 2", banner)
         self.assertIn("\033[1;93m", banner)
 
+        # Task started banner contains cyan border and task title
+        from stagecheck.cli.supervisor_cmd import format_task_started_banner
+        start_banner = format_task_started_banner("task-01", enabled=True)
+        self.assertIn(">>> TASK STARTED ----> Task-01 <<<", start_banner)
+        self.assertIn("\033[1;96m", start_banner)
+
     def test_supervisor_watch_with_forced_color(self) -> None:
         """Verify supervisor --watch emits ANSI colors when color is forced."""
         import io
@@ -713,6 +719,7 @@ class TestSupervisorCLI(unittest.TestCase):
 
         output = buf.getvalue()
         self.assertEqual(rc, 0)
+        self.assertIn(">>> TASK STARTED ----> Task-01 <<<", output)
         self.assertIn("\033[1;33m[WAITING]\033[0m", output)
         self.assertIn("\033[1;36mPHASE_1_PLANNING\033[0m", output)
         self.assertIn("\033[1;92m[COMPLETED]\033[0m", output)

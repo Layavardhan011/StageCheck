@@ -88,6 +88,8 @@ def run_start(workspace: Optional[Path] = None, task: Optional[str] = None) -> i
                 task_phase1_dir = task_dir / "attempt_1" / "Phase-1"
                 task_phase1_dir.mkdir(parents=True, exist_ok=True)
 
+        from stagecheck.cli.supervisor_cmd import format_task_started_banner, should_use_color
+        print(format_task_started_banner(task, enabled=should_use_color()))
         print(f"SUCCESS: Task '{task}' started in attempt 1 (PHASE_1_PLANNING).")
         return 0
     except SandboxUnavailableError as err:
