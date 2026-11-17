@@ -720,6 +720,61 @@ class TestSupervisorCLI(unittest.TestCase):
         self.assertIn("[Waiting]", output)
         self.assertIn("for 60 sec", output)
 
+    def test_supervisor_step_triggers_audit_automatically_on_phase_3(self) -> None:
+        """When in PHASE_3_AUDIT and verdict.json is missing, step() triggers run_audit outside lock."""
+        from unittest.mock import patch
+        from stagecheck.cli.start_cmd import run_start
+        from stagecheck.core.agents import resolve_task_attempt_dir
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.supervisor import SupervisorEngine
+
+        self.assertEqual(run_start(workspace=self.ws, task="task-audit-auto"), 0)
+        with controlled_write_transaction(self.ws / "controls"):
+            st = load_active_state(self.ws)
+            st["phase"] = "PHASE_3_AUDIT"
+            st["turn"] = "STAGECHECK_AUDITING"
+            st["cleared_gates"] = {
+                "GATE_1": "1" * 64,
+                "GATE_2A": "2" * 64,
+                "GATE_2B": "3" * 64,
+            }
+            save_active_state(self.ws, st)
+
+        engine = SupervisorEngine(self.ws)
+        attempt_dir = resolve_task_attempt_dir(self.ws, "task-audit-auto", 1)
+        p3_dir = attempt_dir / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Audit raises an exception -> returns HALTED with AUDIT_EXECUTION_ERROR
+        with patch("stagecheck.core.orchestrator.run_audit", side_effect=RuntimeError("container engine offline")):
+            res = engine.step(task_id="task-audit-auto", attempt=1)
+            self.assertEqual(res.status, "HALTED")
+            self.assertEqual(res.action_taken, "AUDIT_EXECUTION_ERROR")
+            self.assertIn("container engine offline", res.message)
+
+        # 2. Audit succeeds and writes verdict.json -> re-step advances to GATE_4_SEALING
+        def fake_run_audit(workspace_root, task_id, attempt):
+            verdict_payload = {
+                "task_id": task_id,
+                "attempt": attempt,
+                "iteration": attempt,
+                "status": "CLEAR",
+                "result": "CLEAR",
+                "counts": {"blocking": 0, "non_blocking": 0},
+                "defects": [],
+            }
+            (p3_dir / "verdict.json").write_text(json.dumps(verdict_payload, indent=2), encoding="utf-8")
+            return True, verdict_payload
+
+        with patch("stagecheck.core.orchestrator.run_audit", side_effect=fake_run_audit) as mock_audit, \
+             patch("stagecheck.core.rubric_engine.verify_complete_rubric_evaluation", return_value=(True, [], [])):
+            res = engine.step(task_id="task-audit-auto", attempt=1)
+            self.assertTrue(mock_audit.called)
+            self.assertEqual(res.status, "ADVANCED")
+            self.assertEqual(res.current_phase, "GATE_4_SEALING")
+            self.assertEqual(res.action_taken, "GATE3_ADVANCED")
+
+
 
 if __name__ == "__main__":
     unittest.main()

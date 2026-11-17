@@ -452,6 +452,9 @@ class SupervisorEngine:
 
         tripped_phase: Optional[str] = None
         tripped_result: Optional[SupervisorStepResult] = None
+        should_run_audit = False
+        audit_task: Optional[str] = None
+        audit_att: Optional[int] = None
 
         try:
             with acquire_runtime_lock(self.root):
@@ -605,34 +608,29 @@ class SupervisorEngine:
                     elif phase in ("PHASE_3_AUDIT", "PHASE_3_AUDITING"):
                         verdict_file = attempt_dir / "Phase-3" / "verdict.json"
                         if not verdict_file.is_file():
+                            should_run_audit = True
+                            audit_task = task
+                            audit_att = att
+                        else:
+                            pre_report = check_gate_preconditions(self.root, GateId.GATE_3, task, att)
+                            if pre_report.passed:
+                                _advance_gate_atomic_locked(self.root, GateId.GATE_3, task, att)
+                                return SupervisorStepResult(
+                                    task_id=task,
+                                    attempt=att,
+                                    current_phase="GATE_4_SEALING",
+                                    action_taken="GATE3_ADVANCED",
+                                    status="ADVANCED",
+                                    message="Gate 3 cleared. Advanced to GATE_4_SEALING.",
+                                )
                             return SupervisorStepResult(
                                 task_id=task,
                                 attempt=att,
                                 current_phase=phase,
-                                action_taken="WAITING_FOR_AUDIT",
-                                status="WAITING",
-                                message="Audit in progress or awaiting 'stagecheck audit' execution.",
+                                action_taken="AUDIT_FAILED",
+                                status="DEFECTS_DETECTED",
+                                message=f"Gate 3 audit check failed: {'; '.join(pre_report.failure_reasons)}",
                             )
-
-                        pre_report = check_gate_preconditions(self.root, GateId.GATE_3, task, att)
-                        if pre_report.passed:
-                            _advance_gate_atomic_locked(self.root, GateId.GATE_3, task, att)
-                            return SupervisorStepResult(
-                                task_id=task,
-                                attempt=att,
-                                current_phase="GATE_4_SEALING",
-                                action_taken="GATE3_ADVANCED",
-                                status="ADVANCED",
-                                message="Gate 3 cleared. Advanced to GATE_4_SEALING.",
-                            )
-                        return SupervisorStepResult(
-                            task_id=task,
-                            attempt=att,
-                            current_phase=phase,
-                            action_taken="AUDIT_FAILED",
-                            status="DEFECTS_DETECTED",
-                            message=f"Gate 3 audit check failed: {'; '.join(pre_report.failure_reasons)}",
-                        )
 
                     elif phase == "GATE_4_SEALING":
                         pre_report = check_gate_preconditions(self.root, GateId.GATE_4, task, att)
@@ -676,14 +674,15 @@ class SupervisorEngine:
                             message=f"Execution halted in phase '{phase}': {halt_detail}",
                         )
 
-                    return SupervisorStepResult(
-                        task_id=task,
-                        attempt=att,
-                        current_phase=phase,
-                        action_taken="IDLE",
-                        status="IDLE",
-                        message=f"Supervisor idle in phase '{phase}'.",
-                    )
+                    if not should_run_audit:
+                        return SupervisorStepResult(
+                            task_id=task,
+                            attempt=att,
+                            current_phase=phase,
+                            action_taken="IDLE",
+                            status="IDLE",
+                            message=f"Supervisor idle in phase '{phase}'.",
+                        )
         except LockCollisionError:
             snapshot = load_active_state(self.root)
             return SupervisorStepResult(
@@ -693,6 +692,47 @@ class SupervisorEngine:
                 action_taken="LOCK_CONTENDED",
                 status="WAITING",
                 message="Supervisor step deferred: runtime lock is held by an active operation.",
+            )
+
+        if should_run_audit and audit_task is not None and audit_att is not None:
+            from stagecheck.core.orchestrator import run_audit
+            try:
+                passed, verdict_data = run_audit(
+                    workspace_root=self.root,
+                    task_id=audit_task,
+                    attempt=audit_att,
+                )
+            except Exception as err:
+                return SupervisorStepResult(
+                    task_id=audit_task,
+                    attempt=audit_att,
+                    current_phase="PHASE_3_AUDIT",
+                    action_taken="AUDIT_EXECUTION_ERROR",
+                    status="HALTED",
+                    message=f"Audit execution failed: {err}",
+                    details={"error": str(err)},
+                )
+
+            # Re-read active state and verify progression or verdict generation before re-stepping
+            post_state = load_active_state(self.root)
+            post_phase = post_state.get("phase", "IDLE")
+            attempt_dir = resolve_task_attempt_dir(self.root, audit_task, audit_att)
+            verdict_file = attempt_dir / "Phase-3" / "verdict.json"
+
+            if post_phase != "PHASE_3_AUDIT" or verdict_file.is_file():
+                return self.step(
+                    task_id=audit_task,
+                    attempt=audit_att,
+                    now=now,
+                )
+
+            return SupervisorStepResult(
+                task_id=audit_task,
+                attempt=audit_att,
+                current_phase="PHASE_3_AUDIT",
+                action_taken="WAITING_FOR_AUDIT",
+                status="WAITING",
+                message="Audit executed but Phase-3/verdict.json was not generated.",
             )
 
         if tripped_result is not None and tripped_phase is not None:
