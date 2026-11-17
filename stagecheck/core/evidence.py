@@ -566,10 +566,21 @@ def update_code_quality_ledger(
     if observations:
         data["Code Quality issue"].extend(observations)
 
-    tmp_file = report_file.with_suffix(".tmp")
-    with open(tmp_file, "w", encoding="utf-8") as f:
-        f.write(pretty_json_dumps(data))
-    os.replace(tmp_file, report_file)
+    is_ro = not os.access(ev_dir, os.W_OK)
+    if is_ro:
+        os.chmod(ev_dir, 0o755)
+
+    try:
+        tmp_file = report_file.with_suffix(".tmp")
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            f.write(pretty_json_dumps(data))
+        if report_file.exists():
+            report_file.chmod(0o644)
+        os.replace(tmp_file, report_file)
+        report_file.chmod(0o444)
+    finally:
+        if is_ro:
+            os.chmod(ev_dir, 0o555)
 
     update_evidence_manifest(workspace_root, [report_file])
     return report_file

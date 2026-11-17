@@ -1626,6 +1626,22 @@ def _advance_gate_atomic_locked(
         if gate_id == GateId.GATE_1:
             freeze_phase_directory(attempt_dir / "Phase-1")
         elif gate_id == GateId.GATE_2A:
+            # Hook code quality observations into cumulative workspace quality ledger (GAP-F2)
+            review_file = attempt_dir / "Phase-2A" / "pre_commit_review.json"
+            if review_file.is_file() and not review_file.is_symlink():
+                try:
+                    review_data = load_json_file(review_file)
+                    obs = review_data.get("code_quality_observations", [])
+                    if obs:
+                        from stagecheck.core.evidence import update_code_quality_ledger
+                        update_code_quality_ledger(
+                            workspace_root=root,
+                            task_id=resolved_task_id,
+                            attempt=resolved_attempt,
+                            observations=obs,
+                        )
+                except Exception:
+                    pass
             freeze_phase_directory(attempt_dir / "Phase-2A")
         elif gate_id == GateId.GATE_2B:
             freeze_phase_directory(attempt_dir / "Phase-2B")

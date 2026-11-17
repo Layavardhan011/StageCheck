@@ -82,11 +82,21 @@ def run_log_quality(task_id: str, attempt: int = 1, workspace: Optional[str] = N
         return 1
 
     try:
+        from stagecheck.core.agents import resolve_task_attempt_dir
+        from stagecheck.core.utils import load_json_file
+
+        observations: List[Dict[str, Any]] = []
+        attempt_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt)
+        review_file = attempt_dir / "Phase-2A" / "pre_commit_review.json"
+        if review_file.is_file() and not review_file.is_symlink():
+            review_data = load_json_file(review_file)
+            observations = review_data.get("code_quality_observations", [])
+
         update_code_quality_ledger(
             workspace_root=workspace_root,
             task_id=task_id,
             attempt=attempt,
-            observations=[],
+            observations=observations,
         )
         print(f"SUCCESS: Code quality ledger updated for task '{task_id}'.")
         return 0

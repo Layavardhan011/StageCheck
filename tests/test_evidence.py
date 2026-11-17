@@ -259,6 +259,65 @@ class TestEvidenceEngine(unittest.TestCase):
         rel_posix = str(history_path.relative_to(self.workspace_root)).replace("\\", "/")
         self.assertIn(rel_posix, manifest["entries"])
 
+    def test_update_code_quality_ledger(self):
+        """Verify update_code_quality_ledger creates and updates CODE_QUALITY_REPORT.json."""
+        from stagecheck.core.evidence import update_code_quality_ledger
+        from stagecheck.cli.ops_cmd import run_log_quality
+
+        obs = [
+            {
+                "metric": "cyclomatic_complexity",
+                "severity": "LOW",
+                "description": "Refactor nested loop",
+                "blocking": False,
+            }
+        ]
+        report_file = update_code_quality_ledger(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            attempt=1,
+            observations=obs,
+        )
+        self.assertTrue(report_file.is_file())
+        with open(report_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertIn("Code Quality issue", data)
+        self.assertEqual(len(data["Code Quality issue"]), 1)
+        self.assertEqual(data["Code Quality issue"][0]["metric"], "cyclomatic_complexity")
+
+        # Test CLI run_log_quality extracts from Phase-2A/pre_commit_review.json
+        attempt_dir = self.workspace_root / "evidence" / "tasks" / self.task_id / "attempt_1"
+        p2a_dir = attempt_dir / "Phase-2A"
+        p2a_dir.mkdir(parents=True, exist_ok=True)
+        review_data = {
+            "schema_version": "2.0.0",
+            "task_id": self.task_id,
+            "attempt": 1,
+            "cycle": 1,
+            "status": "APPROVED",
+            "summary": "Review summary",
+            "base_commits": {},
+            "pre_existing_issues_ignored": [],
+            "architectural_intents_approved": [],
+            "new_issues_found": [],
+            "code_quality_observations": [
+                {
+                    "metric": "style_naming",
+                    "severity": "MEDIUM",
+                    "description": "Prefer camelCase for internal helpers",
+                    "blocking": False,
+                }
+            ],
+        }
+        (p2a_dir / "pre_commit_review.json").write_text(json.dumps(review_data), encoding="utf-8")
+
+        rc = run_log_quality(task_id=self.task_id, attempt=1, workspace=str(self.workspace_root))
+        self.assertEqual(rc, 0)
+        with open(report_file, "r", encoding="utf-8") as f:
+            data2 = json.load(f)
+        self.assertEqual(len(data2["Code Quality issue"]), 2)
+        self.assertEqual(data2["Code Quality issue"][1]["metric"], "style_naming")
+
 
 if __name__ == "__main__":
     unittest.main()
