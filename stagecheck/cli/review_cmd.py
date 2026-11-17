@@ -342,6 +342,24 @@ def run_approve_review(
             return 1
 
         print(f"Approving Phase 2A review for Task '{task}' (Attempt {attempt}, Cycle {cycle})...")
+        # Extract Agent 1 architectural review findings from agent_reviews.json if present
+        agent_reviews_file = phase2a_dir / "agent_reviews.json"
+        arch_intents = []
+        new_issues = []
+        code_quality_obs = []
+        if agent_reviews_file.is_file():
+            try:
+                ar_data = json.loads(agent_reviews_file.read_text(encoding="utf-8"))
+                arch_intents = ar_data.get("architectural_intents_approved", [])
+                new_issues = ar_data.get("new_issues_found", [])
+                code_quality_obs = ar_data.get("code_quality_observations", [])
+            except Exception:
+                pass
+
+        if new_issues:
+            print("ERROR: [approve.new_issues_present] Cannot approve review with active defects in new_issues_found.", file=sys.stderr)
+            return 1
+
         review_path = record_pre_commit_review(
             workspace_root=workspace_root,
             task_id=task,
@@ -350,6 +368,9 @@ def run_approve_review(
             status="APPROVED",
             summary=f"Pre-commit review approved for cycle {cycle}.",
             base_commits=base_commits,
+            architectural_intents=arch_intents,
+            new_issues=new_issues,
+            code_quality_observations=code_quality_obs,
         )
         print(f"SUCCESS: Pre-commit review APPROVED and recorded at '{review_path}'.")
         return 0

@@ -88,6 +88,13 @@ Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define d
   - **Phase-2A Review Boundaries (Strict Phase Separation):** Review ONLY uncommitted diffs, scope compliance, tests, and secrets in `repos/*`. DO NOT demand, require, or flag missing Phase-2B deliverables (`Phase-2B/report.md`, `Phase-2B/claims.json`, or any Phase-2B files) during Phase 2A review. Phase-2B deliverables CANNOT exist during Phase 2A because Phase 2B is only unlocked AFTER Gate 2A is approved. Demanding Phase-2B deliverables in Phase 2A creates an impossible deadlock.
   - If defects remain in the code/tests/scope, write `"status": "REVISION_REQUIRED"` in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json` so `active_turn` returns to `AGENT_2`, and continue polling until Agent 2 resubmits with an incremented cycle.
   - Once all defects are resolved, approve via `stagecheck approve-review` (`"status": "APPROVED"`) so StageCheck can commit and advance Gate-2A / Gate-2B.
+- **MultiversX Architectural Security Review (5 Invariant Pillars):** During Phase 2A review, audit uncommitted code against core blockchain invariants:
+  1. *Consensus Invariants:* Zero alteration to consensus-critical hash outputs, block headers, round pacing, or leader execution rules.
+  2. *Sharding Invariants:* State isolation, cross-shard miniblock routing, and storage trie integrity remain intact.
+  3. *Serialization & Endianness:* Deterministic big-endian byte layouts; reject un-ordered map iterations and wire format shifts.
+  4. *ZK Boundary Discipline:* Reject unapproved proof-system dependencies, circuits, or fake prover/verifier claims.
+  5. *Caller-Side Non-Disclosure:* Private witness bytes, secret scalars, and proof payloads are never passed to logger arguments.
+  Record passing invariants in `architectural_intents_approved` and any violation in `new_issues_found` with status `"REVISION_REQUIRED"`.
 - **Qualification Suite Mapping (`evals/`):** In Phase 1, inspect `evals/README.md`. If the task impacts qualification-covered contracts, declare `"evals"` in `declared_scope.json["read_only_paths"]`, and explicitly mandate the qualification test runner command (e.g. `cd evals && go test -v <qual_test>.go`) under Section 4 of `Phase-1/prompt.md`.
 
 ## Attempt & Overall Task Monitoring
@@ -311,7 +318,7 @@ def scaffold_agent_instructions(
                 f"### Phase-2 Review & Attempt/Task Monitoring\n"
                 f"- **Do not stop** after authoring `Phase-1/prompt.md` and `declared_scope.json`; continuously poll `stagecheck turn --task <task_id> --json` (e.g., `sleep 5`, max 3 calls per 5s window) until task completion.\n"
                 f"- During `PHASE_2A_CODING`, coordinate via Phase-2A JSON status files without StageCheck interference.\n"
-                f"- After submitting `Phase-2A/pre_commit_status.json` (`\"status\": \"AWAITING_REVIEW\"`), switch to auditor role, author `Phase-2A/agent_reviews.json`, and run `stagecheck review-precommit`; iterate via `REVISION_REQUIRED` until `APPROVED`.\n"
+                f"- After submitting `Phase-2A/pre_commit_status.json` (`\"status\": \"AWAITING_REVIEW\"`), switch to auditor role, audit against the 5 MultiversX Invariant Pillars (consensus, sharding, big-endian serialization, ZK discipline, caller non-disclosure), author `Phase-2A/agent_reviews.json`, and run `stagecheck review-precommit`; iterate via `REVISION_REQUIRED` until `APPROVED`.\n"
                 f"- Continuously monitor `controls/ACTIVE_STATE.json` (`phase`, `status`, `attempt_index`, `circuit_breaker_tripped`) and `Phase-3/verdict.json`; once `SEALED_PASSED` / `COMPLETED`, run `stagecheck plan next` to proceed to the next eligible task.\n\n"
                 f"---\n\n"
                 f"## Part 2: Code Implementation Responsibilities (Phase 2A Implementation & Delivery)\n\n"

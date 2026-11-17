@@ -592,6 +592,81 @@ class TestCooperativeReview(unittest.TestCase):
         self.assertEqual(rev_data["status"], "APPROVED")
         self.assertEqual(len(rev_data.get("new_issues_found", [])), 0)
 
+    def test_approve_review_binds_architectural_intents_and_blocks_on_new_issues(self) -> None:
+        """Verify run_approve_review captures architectural_intents_approved and blocks on new_issues."""
+        from unittest.mock import patch
+        from stagecheck.cli.review_cmd import run_approve_review
+        from stagecheck.core.gate_engine import advance_gate_atomic
+        from stagecheck.core.git import discover_repository
+        from stagecheck.core.scaffold import scaffold_controls_atomic
+        from stagecheck.core.start_manifest import generate_start_manifest
+        from stagecheck.core.state import load_active_state, save_active_state
+        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+
+        baselines = {
+            "backend": discover_repository(self.backend_dir, name="backend", workspace_root=self.workspace)
+        }
+        scaffold_controls_atomic(self.workspace, baselines)
+        generate_start_manifest(self.workspace)
+
+        p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").write_text("# Prompt\nImplement verified logic.\n", encoding="utf-8")
+        (p1_dir / "declared_scope.json").write_text(
+            json.dumps({"schema_version": "2.0", "task_id": self.task_id, "allowed_paths": ["repos/backend/order.py"]}),
+            encoding="utf-8",
+        )
+        freeze_prompt_and_scope(self.workspace, self.task_id, self.attempt)
+
+        state = load_active_state(self.workspace)
+        state["task_id"] = self.task_id
+        state["attempt_index"] = self.attempt
+        state["phase"] = "PHASE_1_PLANNING"
+        save_active_state(self.workspace, state)
+
+        advance_gate_atomic(self.workspace, "Gate-1", task_id=self.task_id, attempt=self.attempt)
+
+        # Agent 2 submits status
+        submit_pre_commit_status(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            cycle=1,
+            touched_repositories=["backend"],
+            base_commits={"backend": self.base_commit},
+        )
+
+        p2a_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
+
+        # 1. Agent 1 reports an invariant defect -> run_approve_review MUST return 1
+        agent_reviews_payload = {
+            "architectural_intents_approved": [
+                {"pillar": "consensus", "status": "VERIFIED", "notes": "No block header mutations"}
+            ],
+            "new_issues_found": [
+                {"defect_id": "ZK-LEAK-01", "severity": "CRITICAL", "description": "Witness bytes logged"}
+            ],
+            "code_quality_observations": [],
+        }
+        (p2a_dir / "agent_reviews.json").write_text(json.dumps(agent_reviews_payload), encoding="utf-8")
+
+        rc_blocked = run_approve_review(task=self.task_id, attempt=self.attempt, workspace=str(self.workspace))
+        self.assertEqual(rc_blocked, 1)
+
+        # 2. Defect resolved -> run_approve_review MUST return 0 and write architectural_intents_approved
+        agent_reviews_payload["new_issues_found"] = []
+        (p2a_dir / "agent_reviews.json").write_text(json.dumps(agent_reviews_payload), encoding="utf-8")
+
+        with patch("stagecheck.core.rubric_engine.verify_complete_rubric_evaluation", return_value=(True, [], [])):
+            rc_ok = run_approve_review(task=self.task_id, attempt=self.attempt, workspace=str(self.workspace))
+        self.assertEqual(rc_ok, 0)
+
+        rev_file = p2a_dir / "pre_commit_review.json"
+        rev_data = json.loads(rev_file.read_text(encoding="utf-8"))
+        self.assertEqual(rev_data["status"], "APPROVED")
+        self.assertEqual(len(rev_data["architectural_intents_approved"]), 1)
+        self.assertEqual(rev_data["architectural_intents_approved"][0]["pillar"], "consensus")
+
 
 if __name__ == "__main__":
     unittest.main()
