@@ -695,14 +695,23 @@ def execute_secure_command(
             )
 
     in_git_repo = (cwd / ".git").exists() or any((p / ".git").exists() for p in cwd.parents)
+    ws_repos: List[Path] = []
     if check_tree_integrity and not in_git_repo:
-        raise CommandSecurityError(
-            f"Tree integrity verification requires a Git repository working directory (got '{cwd}').",
-            exit_code=126,
-        )
+        ws = Path(workspace_root).resolve() if workspace_root else cwd.parent
+        repos_dir = ws / "repos"
+        if repos_dir.is_dir():
+            ws_repos = [r for r in sorted(repos_dir.iterdir()) if r.is_dir() and (r / ".git").exists()]
+        if not ws_repos:
+            raise CommandSecurityError(
+                f"Tree integrity verification requires a Git repository working directory (got '{cwd}').",
+                exit_code=126,
+            )
     before_status = ""
-    if check_tree_integrity and in_git_repo:
-        before_status = capture_git_status_porcelain(cwd)
+    if check_tree_integrity:
+        if in_git_repo:
+            before_status = capture_git_status_porcelain(cwd)
+        elif ws_repos:
+            before_status = "\n".join(f"{r.name}:{capture_git_status_porcelain(r)}" for r in ws_repos)
 
     t0 = time.time()
     t_start_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -760,8 +769,13 @@ def execute_secure_command(
 
     # Audit tree integrity after execution
     tree_mutated = False
-    if check_tree_integrity and in_git_repo:
-        after_status = capture_git_status_porcelain(cwd)
+    if check_tree_integrity:
+        if in_git_repo:
+            after_status = capture_git_status_porcelain(cwd)
+        elif ws_repos:
+            after_status = "\n".join(f"{r.name}:{capture_git_status_porcelain(r)}" for r in ws_repos)
+        else:
+            after_status = ""
         if before_status != after_status:
             tree_mutated = True
 

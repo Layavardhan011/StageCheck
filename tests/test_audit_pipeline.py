@@ -382,5 +382,45 @@ class TestAuditPipeline(unittest.TestCase):
         self.assertEqual(verdict["result"], "BLOCKED")
 
 
+    def test_stage8_rerun_accepts_qualification_directory_command(self) -> None:
+        """Verify Stage 8 rerun permits command citations with cwd under qualification root (evals)."""
+        from stagecheck.checks.stage8_rerun import run_stage8_rerun
+        from stagecheck.core.orchestrator import AuditContext
+
+        evals_dir = self.ws / "evals"
+        evals_dir.mkdir(parents=True, exist_ok=True)
+        (evals_dir / "test_qual.py").write_text(
+            "import unittest\n\n"
+            "class TestQual(unittest.TestCase):\n"
+            "    def test_simple(self):\n"
+            "        self.assertTrue(True)\n"
+        )
+        claims = {
+            "claims": [
+                {
+                    "citations": [
+                        {
+                            "type": "command",
+                            "argv": ["python3", "-m", "unittest", "test_qual.py"],
+                            "cwd": "evals",
+                            "exit_status": 0,
+                        }
+                    ]
+                }
+            ]
+        }
+        ctx = AuditContext(
+            workspace_root=self.ws,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            touched_repos=["api-service"],
+            all_registered_repos=["api-service", "db-service"],
+            claims=claims,
+        )
+        res = run_stage8_rerun(ctx)
+        self.assertEqual(res.status, "CLEAR")
+        self.assertEqual(len(res.defects), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

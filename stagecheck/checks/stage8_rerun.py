@@ -108,13 +108,27 @@ def run_stage8_rerun(ctx: AuditContext) -> StageResult:
             continue
 
         work_dir = (ctx.workspace_root / rel_cwd).resolve()
-        # Security: verify work_dir resides strictly inside a repository under repos/
+        # Security: verify work_dir resides strictly inside a repository under repos/ or authorized qualification root
         repos_root = (ctx.workspace_root / "repos").resolve()
-        if not work_dir.is_relative_to(repos_root) or work_dir == repos_root:
+        qual_root_rel = "evals"
+        qual_config_path = ctx.workspace_root / "controls" / "QUALIFICATION_ROOT.json"
+        if qual_config_path.is_file():
+            try:
+                with open(qual_config_path, "r", encoding="utf-8") as f:
+                    qual_data = json.load(f)
+                qual_root_rel = qual_data.get("qualification_root", "evals")
+            except Exception:
+                pass
+        qual_root = (ctx.workspace_root / qual_root_rel).resolve()
+
+        is_in_repo = work_dir.is_relative_to(repos_root) and work_dir != repos_root
+        is_in_qual = (work_dir == qual_root or work_dir.is_relative_to(qual_root)) and qual_root.is_dir()
+
+        if not (is_in_repo or is_in_qual):
             defects.append(
                 Defect(
                     defect_id="rerun.working_directory_escaped",
-                    message=f"Cited command working directory '{rel_cwd}' must reside inside a repository under repos/",
+                    message=f"Cited command working directory '{rel_cwd}' must reside inside a repository under repos/ or qualification root '{qual_root_rel}'",
                     stage=stage_id,
                     severity="CRITICAL",
                     blocking=True,

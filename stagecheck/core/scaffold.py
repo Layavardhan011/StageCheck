@@ -88,6 +88,7 @@ Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define d
   - **Phase-2A Review Boundaries (Strict Phase Separation):** Review ONLY uncommitted diffs, scope compliance, tests, and secrets in `repos/*`. DO NOT demand, require, or flag missing Phase-2B deliverables (`Phase-2B/report.md`, `Phase-2B/claims.json`, or any Phase-2B files) during Phase 2A review. Phase-2B deliverables CANNOT exist during Phase 2A because Phase 2B is only unlocked AFTER Gate 2A is approved. Demanding Phase-2B deliverables in Phase 2A creates an impossible deadlock.
   - If defects remain in the code/tests/scope, write `"status": "REVISION_REQUIRED"` in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json` so `active_turn` returns to `AGENT_2`, and continue polling until Agent 2 resubmits with an incremented cycle.
   - Once all defects are resolved, approve via `stagecheck approve-review` (`"status": "APPROVED"`) so StageCheck can commit and advance Gate-2A / Gate-2B.
+- **Qualification Suite Mapping (`evals/`):** In Phase 1, inspect `evals/README.md`. If the task impacts qualification-covered contracts, declare `"evals"` in `declared_scope.json["read_only_paths"]`, and explicitly mandate the qualification test runner command (e.g. `cd evals && go test -v <qual_test>.go`) under Section 4 of `Phase-1/prompt.md`.
 
 ## Attempt & Overall Task Monitoring
 - Continuously monitor `controls/ACTIVE_STATE.json` (`phase`, `status`, `attempt_index`, `circuit_breaker_tripped`, `completed_tasks`) and `evidence/tasks/<task_id>/attempt_<N>/Phase-3/verdict.json` (`result`: `PASSED` vs `BLOCKED`).
@@ -238,6 +239,7 @@ Implement source code, unit tests, and regression coverage for approved tasks on
   - `quote` MUST match the verbatim_quote from disk contents within `lines` character-for-character. NEVER use `#L1-L1` or dummy line numbers.
   - Command citations (`type: "command"`) are strictly reserved for test runners (e.g. `go test`, `pytest`) and MUST include `stdout_sha256` and `stderr_sha256` (use `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` if empty).
   - Git branch, commit HEAD, and status witness records must be cited as **`type: "file"`** pointing to `Phase-2B/witnesses/git_*.txt`. DO NOT cite git metadata commands as executable `type: "command"` citations.
+  - Qualification test runners (e.g. `cd evals && go test -v <qual_test>.go`) must be cited as `type: "command"` citations with `"cwd": "evals"` (or under target repo), with test outputs saved under `Phase-2B/witnesses/`. StageCheck Stage 8 independently re-executes and certifies them inside the sandbox.
 
 ## Phase-2B Directory Layout & Witness Storage (Spec 01 / Spec 06)
 - The root of `Phase-2B/` is strictly reserved for primary governance deliverables: `report.md`, `claims.json`, and StageCheck-generated `gate2b_receipt.json`.
@@ -336,6 +338,7 @@ def scaffold_agent_instructions(
                 f"- In each claim, `id`, `kind`, `text`, `scope`, `label`, `citations`, and `blast_radius` are mandatory.\n"
                 f"- File citations (`type: \"file\"`) require `path`, `sha256`, line_range brackets in `lines: [start_line, end_line]`, and verbatim_quote in `quote`.\n"
                 f"- Command citations (`type: \"command\"`) are strictly for approved test runners and MUST include `stdout_sha256` and `stderr_sha256` (use `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` if empty).\n"
+                f"- Qualification test runners (e.g. `cd evals && go test -v <qual_test>.go`) must be cited as `type: \"command\"` citations with `\"cwd\": \"evals\"` (or under target repo), with outputs under `Phase-2B/witnesses/`.\n"
                 f"- Never use `#L1-L1` or placeholder line numbers.\n"
                 f"- Group all raw test outputs, command records, and git witness logs in `Phase-2B/witnesses/` or `Phase-2B/rerun_outputs/`; do not place loose text files directly in `Phase-2B/` root.\n\n"
                 f"### Security Invariants & Negative Prohibitions\n"
