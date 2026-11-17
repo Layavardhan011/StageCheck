@@ -335,10 +335,41 @@ class TestPrettyJSONFormatting(unittest.TestCase):
         )
 
         elevate_permissions_for_teardown(self.workspace)
+        rubric_eval_file = self.workspace / "evidence" / "tasks" / "task-orch" / "attempt_1" / "Phase-3" / "rubric_evaluation.json"
+        self.assert_pretty_json_file(rubric_eval_file)
         verdict_file = self.workspace / "evidence" / "tasks" / "task-orch" / "attempt_1" / "Phase-3" / "verdict.json"
         self.assert_pretty_json_file(verdict_file)
         task_root_verdict = self.workspace / "evidence" / "tasks" / "task-orch" / "verdict.json"
         self.assert_pretty_json_file(task_root_verdict)
+
+    def test_update_rubric_artifacts_is_pretty_printed(self) -> None:
+        """Verify update_rubric_artifacts writes pretty-printed multi-line JSON."""
+        from stagecheck.core.rubric_engine import run_rubric_evaluation, update_rubric_artifacts
+
+        run_init(workspace=str(self.workspace), repos="core", agent1="claude", agent2="codex")
+        elevate_permissions_for_teardown(self.workspace)
+
+        p2a_dir = self.workspace / "evidence" / "tasks" / "task-rub" / "attempt_1" / "Phase-2A"
+        p2a_dir.mkdir(parents=True, exist_ok=True)
+        record_pre_commit_review(
+            workspace_root=self.workspace,
+            task_id="task-rub",
+            attempt=1,
+            cycle=1,
+            status="APPROVED",
+            summary="Approved",
+            base_commits={"core": self.head_sha},
+        )
+
+        rubric_payload, _ = run_rubric_evaluation(
+            workspace_root=self.workspace,
+            task_id="task-rub",
+            attempt=1,
+            cycle=1,
+        )
+        rubric_file, updated_rev = update_rubric_artifacts(self.workspace, rubric_payload)
+        self.assert_pretty_json_file(rubric_file)
+        self.assert_pretty_json_file(updated_rev)
 
 
 if __name__ == "__main__":

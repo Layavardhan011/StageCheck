@@ -33,6 +33,7 @@ from stagecheck.core.utils import (
     SerializationError,
     canonical_json_dumps,
     load_json_file,
+    pretty_json_dumps,
     sha256_file,
     validate_schema,
 )
@@ -3760,7 +3761,7 @@ def update_rubric_artifacts(
     p2a_dir.mkdir(parents=True, exist_ok=True)
 
     rubric_file = p2a_dir / "rubric_evaluation.json"
-    rubric_file.write_text(canonical_json_dumps(rubric_payload), encoding="utf-8")
+    rubric_file.write_text(pretty_json_dumps(rubric_payload, indent=2), encoding="utf-8")
 
     review_file = p2a_dir / "pre_commit_review.json"
     updated_review = None
@@ -3802,7 +3803,7 @@ def update_rubric_artifacts(
                             f"{rubric_payload.get('expected_rule_count', 270)}) cannot authorize approval."
                         ),
                     })
-            review_file.write_text(canonical_json_dumps(rev_data), encoding="utf-8")
+            review_file.write_text(pretty_json_dumps(rev_data, indent=2), encoding="utf-8")
             updated_review = review_file
         except (SerializationError, JSONParseError):
             raise

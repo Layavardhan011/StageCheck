@@ -96,6 +96,7 @@ Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define d
   5. *Caller-Side Non-Disclosure:* Private witness bytes, secret scalars, and proof payloads are never passed to logger arguments.
   Record passing invariants in `architectural_intents_approved` and any violation in `new_issues_found` with status `"REVISION_REQUIRED"`.
 - **Qualification Suite Mapping (`evals/`):** In Phase 1, inspect `evals/README.md`. If the task impacts qualification-covered contracts, declare `"evals"` in `declared_scope.json["read_only_paths"]`, and explicitly mandate the qualification test runner command (e.g. `cd evals && go test -v <qual_test>.go`) under Section 4 of `Phase-1/prompt.md`.
+- **JSON Formatting Standard:** All JSON artifacts authored by Agent 1 (`Phase-2A/agent_reviews.json`, `Phase-2A/pre_commit_review.json`, etc.) MUST be formatted multi-line with 2-space indentation (`indent=2`) and a single trailing newline (`\n`). NEVER write minified or single-line JSON files.
 
 ## Attempt & Overall Task Monitoring
 - Continuously monitor `controls/ACTIVE_STATE.json` (`phase`, `status`, `attempt_index`, `circuit_breaker_tripped`, `completed_tasks`) and `evidence/tasks/<task_id>/attempt_<N>/Phase-3/verdict.json` (`result`: `PASSED` vs `BLOCKED`).
@@ -318,7 +319,7 @@ def scaffold_agent_instructions(
                 f"### Phase-2 Review & Attempt/Task Monitoring\n"
                 f"- **Do not stop** after authoring `Phase-1/prompt.md` and `declared_scope.json`; continuously poll `stagecheck turn --task <task_id> --json` (e.g., `sleep 5`, max 3 calls per 5s window) until task completion.\n"
                 f"- During `PHASE_2A_CODING`, coordinate via Phase-2A JSON status files without StageCheck interference.\n"
-                f"- After submitting `Phase-2A/pre_commit_status.json` (`\"status\": \"AWAITING_REVIEW\"`), switch to auditor role, audit against the 5 MultiversX Invariant Pillars (consensus, sharding, big-endian serialization, ZK discipline, caller non-disclosure), author `Phase-2A/agent_reviews.json`, and run `stagecheck review-precommit`; iterate via `REVISION_REQUIRED` until `APPROVED`.\n"
+                f"- After submitting `Phase-2A/pre_commit_status.json` (`\"status\": \"AWAITING_REVIEW\"`), switch to auditor role, audit against the 5 MultiversX Invariant Pillars (consensus, sharding, big-endian serialization, ZK discipline, caller non-disclosure), author `Phase-2A/agent_reviews.json` (formatting with `indent=2`), and run `stagecheck review-precommit`; iterate via `REVISION_REQUIRED` until `APPROVED`.\n"
                 f"- Continuously monitor `controls/ACTIVE_STATE.json` (`phase`, `status`, `attempt_index`, `circuit_breaker_tripped`) and `Phase-3/verdict.json`; once `SEALED_PASSED` / `COMPLETED`, run `stagecheck plan next` to proceed to the next eligible task.\n\n"
                 f"---\n\n"
                 f"## Part 2: Code Implementation Responsibilities (Phase 2A Implementation & Delivery)\n\n"
