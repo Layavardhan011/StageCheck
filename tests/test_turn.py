@@ -275,6 +275,23 @@ class TestTurnProtocol(unittest.TestCase):
         self.assertIn("watchdog", state_after)
         self.assertIn("last_active_timestamp", state_after["watchdog"])
 
+    def test_turn_does_not_modify_agents_contract_or_manifest(self) -> None:
+        """Verify 'stagecheck turn' watchdog tick does not rewrite AGENTS.md or mutate contract digest."""
+        from stagecheck.core.utils import sha256_file
+        agents_md = self.workspace / "AGENTS.md"
+        sha_before = sha256_file(agents_md)
+        mtime_before = agents_md.stat().st_mtime_ns
+
+        # Run stagecheck turn (which triggers watchdog update in active agent phase)
+        rc = main(["turn", "--task", self.task_id, "--workspace", str(self.workspace)])
+        self.assertEqual(rc, 0)
+
+        # AGENTS.md must be completely untouched to preserve rubric context digests
+        sha_after = sha256_file(agents_md)
+        mtime_after = agents_md.stat().st_mtime_ns
+        self.assertEqual(sha_before, sha_after)
+        self.assertEqual(mtime_before, mtime_after)
+
     def test_concurrent_turn_rate_limit(self) -> None:
         """Verify concurrent callers accurately hit the 3-call rate limit without file corruption (SC-SEC-04)."""
         def _invoke(_: int) -> bool:

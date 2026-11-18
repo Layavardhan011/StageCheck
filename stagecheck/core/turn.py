@@ -286,7 +286,9 @@ def compute_turn_status(
                     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
                     fresh.setdefault("watchdog", {})["last_active_timestamp"] = now_iso
                     fresh.setdefault("watchdog", {})["last_active_monotonic"] = time.monotonic()
-                    save_active_state(root, fresh)
+                    # Heartbeat update: do NOT rewrite AGENTS.md or EVIDENCE_MANIFEST.json
+                    # to prevent invalidating rubric context digests during turn polling loops.
+                    save_active_state(root, fresh, update_contract=False, update_manifest=False)
         except Exception:
             pass
 
