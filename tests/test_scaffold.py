@@ -252,6 +252,8 @@ class TestAtomicScaffolding(unittest.TestCase):
         self.assertIn("MUST NOT include `controls/`", a1_text)
         self.assertIn("MUST NOT demand, require, or flag missing Phase-2B deliverables", a1_text)
         self.assertIn("Phase-2A Review Boundaries (Strict Phase Separation)", a1_text)
+        self.assertIn("Continuous Roadmap Waiting & Processing Loop", a1_text)
+        self.assertIn("Do not stop or exit until all roadmap tasks are complete", a1_text)
 
         # Agent 2 instruction checks
         self.assertIn("Phase-2B/claims.json", a2_text)
@@ -277,6 +279,8 @@ class TestAtomicScaffolding(unittest.TestCase):
         self.assertIn("Repository Identifier Formatting", a2_text)
         self.assertIn("MUST NOT resubmit `pre_commit_status.json` with the same `cycle` number", a2_text)
         self.assertIn("MUST NOT use repository path prefixes", a2_text)
+        self.assertIn("Continuous Lifecycle & Mandatory Waiting States", a2_text)
+        self.assertIn("Do NOT terminate after Phase 2B", a2_text)
 
         # Single-agent instruction checks
         single_paths = scaffold_agent_instructions(

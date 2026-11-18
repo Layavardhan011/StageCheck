@@ -98,10 +98,18 @@ Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define d
 - **Qualification Suite Mapping (`evals/`):** In Phase 1, inspect `evals/README.md`. If the task impacts qualification-covered contracts, declare `"evals"` in `declared_scope.json["read_only_paths"]`, and explicitly mandate the qualification test runner command (e.g. `cd evals && go test -v <qual_test>.go`) under Section 4 of `Phase-1/prompt.md`.
 - **JSON Formatting Standard:** All JSON artifacts authored by Agent 1 (`Phase-2A/agent_reviews.json`, `Phase-2A/pre_commit_review.json`, etc.) MUST be formatted multi-line with 2-space indentation (`indent=2`) and a single trailing newline (`\n`). NEVER write minified or single-line JSON files.
 
-## Attempt & Overall Task Monitoring
-- Continuously monitor `controls/ACTIVE_STATE.json` (`phase`, `status`, `attempt_index`, `circuit_breaker_tripped`, `completed_tasks`) and `evidence/tasks/<task_id>/attempt_<N>/Phase-3/verdict.json` (`result`: `PASSED` vs `BLOCKED`).
-- If an attempt fails Phase-3 audit, track remaining attempt budget (`attempt_index <= 3`); if `phase == "AWAITING_HUMAN_DISPOSITION"` or `circuit_breaker_tripped == true`, pause for human disposition/reset.
-- Once the current task reaches `SEALED_PASSED` / `COMPLETED`, run `stagecheck plan next` (against `specs/TASK_PLAN.json`) to proceed to the next eligible task (`stagecheck start --task <next_task_id>`).
+## Continuous Roadmap Waiting & Processing Loop (Multi-Task Lifecycle)
+- **Do not stop or exit until all roadmap tasks are complete:** Agent 1 must remain active in a persistent polling and waiting loop across all roadmap tasks until the entire project is completed and sealed.
+- **Phase-Specific Waiting States:**
+  1. *Phase 1 -> 2A Waiting:* After executing `stagecheck verify-prompt` and freezing Phase 1, enter WAITING state (`sleep 5`, respecting max 3 calls per 5s window on `stagecheck turn --json`). Wait while Agent 2 implements code until `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` has `"status": "AWAITING_REVIEW"` (and `active_turn == "AGENT_1"`).
+  2. *Phase 2A Revision Waiting:* If review findings report `"status": "REVISION_REQUIRED"`, return to WAITING state until Agent 2 addresses review defects, increments `cycle`, and resubmits `pre_commit_status.json`.
+  3. *Phase 2B & Phase 3 Waiting:* Once review is approved (`"status": "APPROVED"`), enter WAITING state while Agent 2 commits locally on task branch, authors Phase-2B deliverables, and StageCheck runs Phase-3 audit and seals Gate-4.
+- **Roadmap Progression & Termination Condition:**
+  - Continuously monitor `controls/ACTIVE_STATE.json` (`phase`, `status`, `attempt_index`, `circuit_breaker_tripped`, `completed_tasks`) and `evidence/tasks/<task_id>/attempt_<N>/Phase-3/verdict.json` (`result`: `PASSED` vs `BLOCKED`).
+  - If an attempt fails Phase-3 audit, track remaining attempt budget (`attempt_index <= 3`); if `phase == "AWAITING_HUMAN_DISPOSITION"` or `circuit_breaker_tripped == true`, pause for human disposition/reset.
+  - When the active task reaches `SEALED_PASSED` / `COMPLETED`, check roadmap progression by running `stagecheck plan next --activate` (or `stagecheck plan next` followed by `stagecheck start --task <next_task_id>`).
+  - If a next eligible task is available, proceed immediately to begin Phase 1 of the next task.
+  - Terminate ONLY when `stagecheck plan next` outputs `"Notice: No pending eligible tasks found in roadmap. All tasks completed or blocked."`
 
 ## Must Not
 - MUST NOT execute mutating Git commands (`git commit`, `git push`, `git merge`, `git rebase`).
@@ -161,18 +169,21 @@ Implement source code, unit tests, and regression coverage for approved tasks on
   - `schema_version` must be string `"2.0.0"`. `status` must be `"AWAITING_REVIEW"` (or `"IN_REVISION"`).
   - **Repository Identifier Formatting:** `touched_repositories` and `base_commits` keys MUST be bare repository names matching `controls/PRODUCT_REPOSITORIES.json` (e.g. `"mx-chain-core-go"`). DO NOT prefix them with `"repos/"` (e.g., do NOT write `"repos/mx-chain-core-go"`).
 
-## Phase-2 Implementation & Cooperative Repair Loop (JSON Status)
-- **Do not stop** until the local commit, `Phase-2B/report.md`, and `Phase-2B/claims.json` are complete.
-- Continuously poll `stagecheck turn --task <task_id> --json` (e.g., `sleep 5`, max 3 calls per 5s window) and `controls/ACTIVE_STATE.json` until `phase == "PHASE_2A_CODING"` and `active_turn == "AGENT_2"`.
-- Implement changes strictly within `Phase-1/declared_scope.json`, run local tests and `gitleaks protect --staged`, and write `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` with `"status": "AWAITING_REVIEW"`, `cycle`, `touched_repositories`, and `base_commits`.
-- Continuously poll `Phase-2A/pre_commit_review.json` (and `stagecheck turn --task <task_id> --json`, max 3 calls per 5s window):
-  - If `"status": "REVISION_REQUIRED"`, inspect the defects in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json`.
-  - **CRITICAL REVISION INVARIANT:** You MUST modify and fix the underlying source code and test files in `repos/*` to resolve the review defects. Merely editing, updating schema fields, or re-saving `pre_commit_status.json` DOES NOT resolve review defects and will cause review rejection.
-  - **MANDATORY CYCLE INCREMENT (Turn Engine Invariant):** You MUST increment `cycle` so that it is strictly greater than the review cycle (`cycle = rev_cycle + 1`, e.g. if review `cycle` is 2, set `"cycle": 3`). If `cycle` is not strictly greater than `rev_cycle`, the turn engine will consider the revision incomplete and keep the turn on Agent 2 (`waiting_for: Phase-2A/pre_commit_status.json`), preventing Agent 1 from ever reviewing!
-  - After fixing the code/tests in `repos/*`, verifying tests pass locally, and incrementing `cycle` in `Phase-2A/pre_commit_status.json`, set `"status": "AWAITING_REVIEW"` and resubmit.
-  - Repeat until `Phase-2A/pre_commit_review.json` reports `"status": "APPROVED"`.
-- **Strict Phase 2A Completion Requirement:** DO NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first. Phase 2A is completed ONLY when `Phase-2A/pre_commit_review.json` reports `"status": "APPROVED"` and StageCheck advances the active phase to `PHASE_2B_COMMITTING`. Generating Phase-2B deliverables before Phase 2A approval is strictly prohibited and violates governance lifecycle ordering.
-- Once `phase == "PHASE_2B_COMMITTING"`, commit locally on the task branch and deliver BOTH `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/report.md` AND `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/claims.json` so StageCheck can advance Gate-2B to Phase 3.
+## Continuous Lifecycle & Mandatory Waiting States
+- **Persistent Multi-Task Lifecycle (Do NOT terminate after Phase 2B):** Agent 2 must NOT exit or terminate after delivering `Phase-2B/report.md` and `Phase-2B/claims.json`. Agent 2 must remain running in a continuous polling and waiting state across all roadmap tasks and attempt retries.
+- **Phase-Specific Waiting States:**
+  1. *Phase 1 Planning Wait:* While the workspace is in `PHASE_1_PLANNING`, remain in WAITING state (`sleep 5`, max 3 calls per 5s window on `stagecheck turn --task <task_id> --json`). Do NOT modify files in `repos/*` or touch evidence files until StageCheck advances Gate 1 and `controls/ACTIVE_STATE.json` reports `phase == "PHASE_2A_CODING"` with `active_turn == "AGENT_2"`.
+  2. *Phase 2A Implementation:* Implement changes strictly within `Phase-1/declared_scope.json`, run local tests and `gitleaks protect --staged`, and write `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` with `"status": "AWAITING_REVIEW"`, `cycle`, `touched_repositories`, and `base_commits`.
+  3. *Phase 2A Review Wait:* After authoring `pre_commit_status.json`, enter WAITING state. Continuously poll `Phase-2A/pre_commit_review.json` (and `stagecheck turn --task <task_id> --json`, max 3 calls per 5s window). Do NOT start generating Phase-2B deliverables.
+  4. *Phase 2A Revision Loop:* If `"status": "REVISION_REQUIRED"`, wake from waiting, inspect defects in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json`.
+     - **CRITICAL REVISION INVARIANT:** You MUST modify and fix the underlying source code and test files in `repos/*` to resolve review defects. Merely editing, updating schema fields, or re-saving `pre_commit_status.json` DOES NOT resolve defects and will cause review rejection.
+     - **MANDATORY CYCLE INCREMENT (Turn Engine Invariant):** You MUST increment `cycle` so that it is strictly greater than the review cycle (`cycle = rev_cycle + 1`, e.g. if review `cycle` is 2, set `"cycle": 3`). If `cycle` is not strictly greater than `rev_cycle`, the turn engine will consider the revision incomplete and keep the turn on Agent 2 (`waiting_for: Phase-2A/pre_commit_status.json`), preventing Agent 1 from ever reviewing!
+     - After fixing the code/tests in `repos/*`, verifying tests pass locally, and incrementing `cycle` in `Phase-2A/pre_commit_status.json`, set `"status": "AWAITING_REVIEW"` and resubmit.
+     - Repeat until `Phase-2A/pre_commit_review.json` reports `"status": "APPROVED"`.
+  5. *Strict Phase 2A Completion Requirement:* DO NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first. Phase 2A is completed ONLY when `Phase-2A/pre_commit_review.json` reports `"status": "APPROVED"` and StageCheck advances the active phase to `PHASE_2B_COMMITTING`. Generating Phase-2B deliverables before Phase 2A approval is strictly prohibited and violates governance lifecycle ordering.
+  6. *Phase 2B Delivery:* Once `phase == "PHASE_2B_COMMITTING"`, commit locally on the task branch and deliver BOTH `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/report.md` AND `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/claims.json` so StageCheck can advance Gate-2B to Phase 3.
+  7. *Phase 3 Audit & Inter-Task Waiting:* After delivering `Phase-2B/report.md` and `Phase-2B/claims.json`, enter WAITING state while StageCheck executes Phase 3 audit and Gate 4 sealing. Remain in WAITING state polling `controls/ACTIVE_STATE.json` and `stagecheck turn --json` until the next attempt or next roadmap task advances to `PHASE_2A_CODING` with `active_turn == "AGENT_2"`.
+  8. *Termination Condition:* Terminate ONLY when `controls/ACTIVE_STATE.json` reaches `COMPLETED` and `stagecheck plan next` confirms that all roadmap tasks have completed and sealed.
 
 ## Phase-2B Deliverable Contracts & Citation Standards
 - **`Phase-2B/report.md`:** Must document the implementation summary, blast radius analysis, tests executed, and commit hashes.
@@ -317,11 +328,11 @@ def scaffold_agent_instructions(
                 f"- Permitted Git commands during review are read-only: `git status`, `git log`, `git diff`, `git show`, `git blame`, `git branch`.\n"
                 f"- MUST NOT demand or check for Phase-2B deliverables (`report.md`, `claims.json`) during Phase 2A pre-commit review. Phase 2B deliverables belong strictly to Phase 2B.\n"
                 f"- MUST NOT include `controls/` or any file within `controls/` in `Phase-1/declared_scope.json` (neither under `read_write_paths` nor under `read_only_paths`).\n\n"
-                f"### Phase-2 Review & Attempt/Task Monitoring\n"
-                f"- **Do not stop** after authoring `Phase-1/prompt.md` and `declared_scope.json`; continuously poll `stagecheck turn --task <task_id> --json` (e.g., `sleep 5`, max 3 calls per 5s window) until task completion.\n"
-                f"- During `PHASE_2A_CODING`, coordinate via Phase-2A JSON status files without StageCheck interference.\n"
-                f"- After submitting `Phase-2A/pre_commit_status.json` (`\"status\": \"AWAITING_REVIEW\"`), switch to auditor role, audit against the 5 MultiversX Invariant Pillars (consensus, sharding, big-endian serialization, ZK discipline, caller non-disclosure), author `Phase-2A/agent_reviews.json` (formatting with `indent=2`), and run `stagecheck review-precommit`; iterate via `REVISION_REQUIRED` until `APPROVED`.\n"
-                f"- Continuously monitor `controls/ACTIVE_STATE.json` (`phase`, `status`, `attempt_index`, `circuit_breaker_tripped`) and `Phase-3/verdict.json`; once `SEALED_PASSED` / `COMPLETED`, run `stagecheck plan next` to proceed to the next eligible task.\n\n"
+                f"### Phase-2 Review & Continuous Roadmap Waiting Loop\n"
+                f"- **Do not stop or exit until all roadmap tasks are complete:** Continuously poll `stagecheck turn --task <task_id> --json` (e.g., `sleep 5`, max 3 calls per 5s window) across all phases and roadmap tasks.\n"
+                f"- In planning phase, wait until prompt and scope are drafted and frozen; enter waiting state while code is being implemented until `pre_commit_status.json` has `status: \"AWAITING_REVIEW\"`.\n"
+                f"- After submitting `Phase-2A/pre_commit_status.json`, switch to auditor role, audit against the 5 MultiversX Invariant Pillars (consensus, sharding, big-endian serialization, ZK discipline, caller non-disclosure), author `Phase-2A/agent_reviews.json` (formatting with `indent=2`), and run `stagecheck review-precommit`; iterate via `REVISION_REQUIRED` until `APPROVED`.\n"
+                f"- Continuously monitor `controls/ACTIVE_STATE.json` (`phase`, `status`, `attempt_index`, `circuit_breaker_tripped`) and `Phase-3/verdict.json`; once `SEALED_PASSED` / `COMPLETED`, run `stagecheck plan next --activate` to proceed to the next eligible task until all roadmap tasks are sealed.\n\n"
                 f"---\n\n"
                 f"## Part 2: Code Implementation Responsibilities (Phase 2A Implementation & Delivery)\n\n"
                 f"### Purpose\n"
@@ -340,7 +351,8 @@ def scaffold_agent_instructions(
                 f"- Run local secret check (`gitleaks protect --staged`) prior to local commit.\n"
                 f"- In Phase 2A, submit `Phase-2A/pre_commit_status.json` adhering to `pre_commit_status.schema.json` (`schema_version`: \"2.0.0\", `status`: \"AWAITING_REVIEW\"). Use bare repository names matching `controls/PRODUCT_REPOSITORIES.json` without `repos/` prefix.\n"
                 f"- When Phase-2A review reports `REVISION_REQUIRED`, you MUST fix the defects in your source code and tests in `repos/*` and increment `cycle` (`cycle = rev_cycle + 1`) before resubmitting. DO NOT resubmit with the same cycle number or merely re-save `pre_commit_status.json`.\n"
-                f"- Strict Phase 2A Completion Requirement: DO NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first (`Phase-2A/pre_commit_review.json` status must be `\"APPROVED\"` and active phase advanced to `PHASE_2B_COMMITTING`).\n\n"
+                f"- Strict Phase 2A Completion Requirement: DO NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first (`Phase-2A/pre_commit_review.json` status must be `\"APPROVED\"` and active phase advanced to `PHASE_2B_COMMITTING`).\n"
+                f"- Do NOT terminate after Phase 2B: Enter waiting state while StageCheck runs Phase 3 audit and Gate 4 sealing, and wait for the next roadmap task to reach Phase 2A.\n\n"
                 f"### Phase-2B Deliverable Contracts & Citation Standards\n"
                 f"- Deliver both `Phase-2B/report.md` and `Phase-2B/claims.json` strictly conforming to `claims.schema.json`.\n"
                 f"- Root fields `task_id`, `iteration`, `contract_sha256`, `record`, `record_sha256`, and `claims` are mandatory.\n"
