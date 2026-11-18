@@ -43,10 +43,11 @@ class UntouchedRepoViolationError(BranchGovernanceError):
     """Raised when an out-of-scope untouched repository is unexpectedly mutated."""
 
 
-# Default pattern allows <project>/<sprint>, <project>/<task>, task-<id>, or feature branches
+# Default pattern allows <project>/<sprint>, <project>/<task>, <sprint>/<task>, task-<id>, or feature branches
 DEFAULT_PERMITTED_BRANCH_PATTERN = (
-    r"^[a-zA-Z0-9._-]+/(task-[a-zA-Z0-9._-]+|sprint-[a-zA-Z0-9._-]+)$|"
-    r"^task-[a-zA-Z0-9._-]+$|"
+    r"^(sprint-[a-zA-Z0-9._-]+)/(task-[a-zA-Z0-9._-]+)(/[a-zA-Z0-9._-]+)?$|"
+    r"^[a-zA-Z0-9._-]+/(task-[a-zA-Z0-9._-]+|sprint-[a-zA-Z0-9._-]+)(/[a-zA-Z0-9._-]+)?$|"
+    r"^task-[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)?$|"
     r"^feature/[a-zA-Z0-9._-]+$"
 )
 

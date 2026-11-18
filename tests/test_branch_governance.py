@@ -71,6 +71,10 @@ class TestBranchGovernance(unittest.TestCase):
         validate_branch_compliance("web-client/sprint-12")
         validate_branch_compliance("task-404")
         validate_branch_compliance("feature/resilient-orders")
+        validate_branch_compliance("sprint-01/task-02-zk-public-input")
+        validate_branch_compliance("sprint-01/task-02/zk-public-input")
+        validate_branch_compliance("task-02-zk-public-input")
+        validate_branch_compliance("task-02/zk-public-input")
 
     def test_branch_policy_rejects_non_compliant_branches(self) -> None:
         """Verify non-compliant arbitrary branch names are rejected."""

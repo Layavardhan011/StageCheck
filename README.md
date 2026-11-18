@@ -126,7 +126,7 @@ StageCheck is developed across 5 modular phases (25 total tasks — **100% Compl
 ### Phase 3 — Agent Protocol, Scope, Commands & Multi-Repository Verification `[COMPLETED]`
 * **P3-T1:** Provider-neutral agent registration and evidence directory routing.
 * **P3-T2:** Prompt verification (`stagecheck verify-prompt`) and declared-scope validation gate.
-* **P3-T3:** Task branch governance (`fincore/<task_id>`) and multi-repo baseline binding.
+* **P3-T3:** Task branch governance (`<sprint>/task-<ID>-<slug>` or `task-<ID>-<slug>`) and multi-repo baseline binding.
 * **P3-T4:** Tokenized command runner with argument whitelisting and process group cleanup.
 * **P3-T5:** Phase 2A cooperative pre-commit review handshake (`review-precommit`, `approve-review`).
 

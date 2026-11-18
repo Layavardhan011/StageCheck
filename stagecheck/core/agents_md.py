@@ -72,7 +72,7 @@ Their initial cryptographic digests are recorded below:
 
 ### Agent 2: Code Implementer (`code_implementation`)
 * **Responsibilities:**
-  1. Checks out designated task branches (`fincore/<task_id>`).
+  1. Checks out designated task branches named by task ID and descriptive task slug (e.g., `task-<ID>-<task_name>` such as `task-02-zk-public-input`, or `<sprint>/task-<ID>-<task_name>` when a sprint is defined). Committing directly to `main` or `master` is strictly prohibited.
   2. Implements code changes strictly within `approved_scope` across target repositories (`repos/*`). Product repositories are Agent 2's primary implementation workspace.
   3. Emits `pre_commit_status.json` conforming to `pre_commit_status.schema.json` and participates in Phase 2A review cycles (resolving review defects by modifying source code and tests in `repos/*`, not merely re-saving status files).
   4. Commits changes **locally only** and generates delivery `claims.json` and `report.md` only after Phase 2A approval.

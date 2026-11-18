@@ -122,6 +122,7 @@ Implement source code, unit tests, and regression coverage for approved tasks on
 
 ## Workspace Authority & Scope Boundaries
 - **Product Repositories (`repos/*`):** `repos/<repo_name>/` is YOUR PRIMARY WORKSPACE and is **NOT** prohibited. You are the Code Implementer; your primary duty is to implement and fix source code and tests in `repos/*` strictly within `Phase-1/declared_scope.json`.
+- **Task Branches:** Always check out designated task branches named by task ID and descriptive task slug (e.g., `task-<ID>-<task_name>` such as `task-02-zk-public-input`, or `<sprint>/task-<ID>-<task_name>` when a sprint is defined). Committing directly to `main` or `master` is strictly prohibited.
 - **Evidence Tree (`evidence/tasks/<task_id>/attempt_<N>/`):** The evidence directory is **NOT** an unrestricted workspace. You are ONLY authorized to author and modify your designated deliverables:
   - `Phase-2A/pre_commit_status.json`
   - `Phase-2B/report.md`
@@ -187,8 +188,8 @@ Implement source code, unit tests, and regression coverage for approved tasks on
       {
         "id": "CLAIM-001",
         "kind": "observation",
-        "text": "Repository mx-chain-core-go checked out cleanly on task branch.",
-        "scope": "repos/mx-chain-core-go",
+        "text": "Repository core checked out cleanly on task branch.",
+        "scope": "repos/core",
         "label": "SOURCE_PROVEN",
         "citations": [
           {
@@ -196,7 +197,7 @@ Implement source code, unit tests, and regression coverage for approved tasks on
             "path": "evidence/tasks/<task_id>/attempt_1/Phase-2B/witnesses/git_branch.txt",
             "sha256": "<64_hex_sha256_of_file>",
             "lines": [1, 1],
-            "quote": "fincore/task-01"
+            "quote": "task-01-baseline-verification"
           }
         ],
         "blast_radius": [
@@ -212,7 +213,7 @@ Implement source code, unit tests, and regression coverage for approved tasks on
         "id": "CLAIM-002",
         "kind": "completion",
         "text": "Unit tests pass cleanly",
-        "scope": "repos/mx-chain-core-go",
+        "scope": "repos/core",
         "label": "TEST_PROVEN",
         "citations": [
           {
@@ -359,7 +360,7 @@ def scaffold_agent_instructions(
                 f"- MUST NOT cite non-test commands (such as `git rev-parse`, `git status`) as executable `type: \"command\"` citations in `Phase-2B/claims.json`. Repository witness records must be cited as `type: \"file\"`.\n"
                 f"- MUST NOT omit required fields (`stdout_sha256`, `stderr_sha256`, `record_sha256`, `exit_status`, `argv`, `cwd`) in `type: \"command\"` citations.\n"
                 f"- MUST NOT execute remote push operations (`git push` is strictly forbidden).\n"
-                f"- MUST NOT commit directly to `main` or `master` branch.\n"
+                f"- MUST NOT commit directly to `main` or `master` branch. Always check out designated task branches named by task ID and descriptive task slug (e.g., `task-<ID>-<task_name>` such as `task-02-zk-public-input`, or `<sprint>/task-<ID>-<task_name>` when a sprint is defined).\n"
                 f"- MUST NOT modify control descriptors in `controls/*` or edit `.stagecheck.lock`.\n"
                 f"- MUST NOT alter Gitleaks configuration or create `.gitleaksignore` override files.\n"
             )
