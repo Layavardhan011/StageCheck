@@ -302,6 +302,63 @@ def run_supervisor_cmd(
                     print(format_attempt_banner(res.attempt, res.task_id, enabled=use_color))
                 last_attempt = res.attempt
 
+                # Check if a phase transition occurred
+                phase_transition = (
+                    res.status == "ADVANCED"
+                    or (
+                        last_phase is not None
+                        and res.current_phase != last_phase
+                        and res.current_phase not in ("NOT_STARTED", "IDLE")
+                    )
+                )
+
+                if phase_transition:
+                    # 1. If step() itself performed an advancement, show ADVANCED status line first
+                    if res.status == "ADVANCED":
+                        if output_json:
+                            if state_key != last_state_key:
+                                print(json.dumps(res.__dict__))
+                                last_state_key = state_key
+                        else:
+                            if state_key != last_state_key:
+                                if last_state_key is not None:
+                                    elapsed = current_time - action_start_time
+                                    prev_status, _, _, _ = last_state_key
+                                    if prev_status == "WAITING" or elapsed >= 1.0:
+                                        print(format_completed_line("Completed", format_duration(elapsed), enabled=use_color))
+                                print(
+                                    format_status_line(
+                                        res.status,
+                                        res.current_phase,
+                                        res.action_taken,
+                                        res.message,
+                                        enabled=use_color,
+                                    )
+                                )
+                                last_state_key = state_key
+                    else:
+                        # Phase changed externally (e.g. gate advanced by CLI command)
+                        if not output_json and last_state_key is not None:
+                            elapsed = current_time - action_start_time
+                            prev_status, _, _, _ = last_state_key
+                            if prev_status == "WAITING" or elapsed >= 1.0:
+                                print(format_completed_line("Completed", format_duration(elapsed), enabled=use_color))
+
+                    # 2. Announce phase transition and pause for stability interval BEFORE displaying the new phase waiting status
+                    if phase_delay > 0:
+                        if not output_json:
+                            print(format_transition_line(res.current_phase, int(phase_delay), enabled=use_color))
+                        time.sleep(phase_delay)
+                        if not output_json:
+                            print(format_completed_line("Completed", format_duration(phase_delay), enabled=use_color))
+                        action_start_time = time.time()
+                        current_time = action_start_time
+
+                    last_phase = res.current_phase
+                    if res.status != "ADVANCED":
+                        last_state_key = None
+
+                # 3. Output normal status line (e.g. WAITING) AFTER the transition has completed
                 if output_json:
                     if state_key != last_state_key:
                         print(json.dumps(res.__dict__))
@@ -338,14 +395,6 @@ def run_supervisor_cmd(
                         print(f"{color_status('Waiting', enabled=use_color)} for 60 sec...")
                         time.sleep(60.0)
                     return 0 if res.status == "COMPLETED" else 1
-
-                # Sleep time between phase changes (e.g. 30 sec between each phase)
-                if res.status == "ADVANCED" or (last_phase is not None and res.current_phase != last_phase):
-                    if phase_delay > 0:
-                        if not output_json:
-                            print(format_transition_line(res.current_phase, int(phase_delay), enabled=use_color))
-                        time.sleep(phase_delay)
-                        action_start_time = time.time()
 
                 last_phase = res.current_phase
                 time.sleep(2.0)

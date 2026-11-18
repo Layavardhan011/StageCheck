@@ -727,6 +727,63 @@ class TestSupervisorCLI(unittest.TestCase):
         self.assertIn("[Waiting]", output)
         self.assertIn("for 60 sec", output)
 
+    def test_supervisor_transition_banner_precedes_waiting_status_on_phase_change(self) -> None:
+        """Verify that on phase transition, [TRANSITION] is output BEFORE [WAITING] for the new phase."""
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+        from stagecheck.cli.supervisor_cmd import run_supervisor_cmd
+        from stagecheck.core.supervisor import SupervisorStepResult
+
+        step_results = [
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=1,
+                current_phase="PHASE_1_PLANNING",
+                action_taken="WAITING_FOR_BLUEPRINT",
+                status="WAITING",
+                message="Waiting for Agent 1 to write Phase-1/prompt.md.",
+            ),
+            # Phase changed externally or advanced to PHASE_2A_CODING
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=1,
+                current_phase="PHASE_2A_CODING",
+                action_taken="WAITING_FOR_PRECOMMIT_STATUS",
+                status="WAITING",
+                message="Waiting for Agent 2 to implement code.",
+            ),
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=1,
+                current_phase="SEALED_PASSED",
+                action_taken="GATE4_SEALED",
+                status="COMPLETED",
+                message="Task completed and sealed.",
+            ),
+        ]
+
+        buf = io.StringIO()
+        with patch("stagecheck.cli.supervisor_cmd.SupervisorEngine.step", side_effect=step_results):
+            with patch("time.sleep", return_value=None):
+                with redirect_stdout(buf):
+                    rc = run_supervisor_cmd(
+                        workspace=str(self.ws),
+                        watch=True,
+                        phase_delay=30.0,
+                        color=False,
+                    )
+
+        output = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("[TRANSITION] Phase advanced to PHASE_2A_CODING", output)
+        self.assertIn("[WAITING] Phase: PHASE_2A_CODING | Action: WAITING_FOR_PRECOMMIT_STATUS", output)
+
+        # Crucial ordering check: [TRANSITION] must appear BEFORE [WAITING] for PHASE_2A_CODING
+        trans_idx = output.index("[TRANSITION] Phase advanced to PHASE_2A_CODING")
+        wait_p2a_idx = output.index("[WAITING] Phase: PHASE_2A_CODING | Action: WAITING_FOR_PRECOMMIT_STATUS")
+        self.assertLess(trans_idx, wait_p2a_idx, "Expected [TRANSITION] to precede [WAITING] for PHASE_2A_CODING")
+
     def test_supervisor_step_triggers_audit_automatically_on_phase_3(self) -> None:
         """When in PHASE_3_AUDIT and verdict.json is missing, step() triggers run_audit outside lock."""
         from unittest.mock import patch
