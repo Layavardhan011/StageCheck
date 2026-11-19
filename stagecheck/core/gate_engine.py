@@ -694,6 +694,17 @@ def evaluate_gate_2b_criteria(
     # 4. Discover repositories to evaluate
     from stagecheck.core.cooperative_review import resolve_governed_repo_path
 
+    # Load repo_baseline.json captured at task start if available (Spec 14 §3)
+    baseline_file = attempt_dir / "repo_baseline.json"
+    repo_baseline_data: Dict[str, Dict[str, Any]] = {}
+    if baseline_file.is_file():
+        try:
+            loaded_bl = load_json_file(baseline_file)
+            if isinstance(loaded_bl, dict):
+                repo_baseline_data = loaded_bl
+        except Exception:
+            repo_baseline_data = {}
+
     repos_to_check: Dict[str, Path] = {}
     baseline_heads: Dict[str, str] = {}
     prod_repos_file = workspace_root / "controls" / "PRODUCT_REPOSITORIES.json"
@@ -704,8 +715,14 @@ def evaluate_gate_2b_criteria(
                 rp = resolve_governed_repo_path(workspace_root, repo_name)
                 if (rp / ".git").exists():
                     repos_to_check[repo_name] = rp
-                    if meta.get("baseline_head"):
-                        baseline_heads[repo_name] = str(meta["baseline_head"])
+                    # Priority: repo_baseline.json captured at task start > PRODUCT_REPOSITORIES.json baseline_head
+                    auth_b = None
+                    if repo_name in repo_baseline_data and isinstance(repo_baseline_data[repo_name], dict):
+                        auth_b = repo_baseline_data[repo_name].get("head_commit")
+                    if not auth_b and meta.get("baseline_head"):
+                        auth_b = str(meta["baseline_head"])
+                    if auth_b:
+                        baseline_heads[repo_name] = auth_b
         except Exception as err:
             criteria.append(GateCriterion(
                 criterion_id="gate2b.repositories_registry",
@@ -866,6 +883,13 @@ def evaluate_gate_2b_criteria(
                                 status="FAILED",
                                 message=f"Diff fidelity check failed: {err}",
                             ))
+                else:
+                    criteria.append(GateCriterion(
+                        criterion_id=f"gate2b.commit_fidelity.{repo_name}",
+                        description=f"Committed diff fidelity in '{repo_name}'",
+                        status="MET",
+                        message=f"Repository '{repo_name}' was not modified in this task (HEAD matches baseline); committed diff fidelity check skipped.",
+                    ))
 
         # D. Remote Authority Whitelist (SR-08 / DEC-021 / FP-ORG)
         try:
@@ -904,29 +928,42 @@ def evaluate_gate_2b_criteria(
 
         # E. Structured Commit Protocol Lint (when sprint branch governance is active)
         if expected_sprint_prefix:
-            log_proc = _run_git_cmd(repo_p, ["log", "-1", "--format=%s"])
-            if log_proc.returncode == 0 and log_proc.stdout.strip():
-                latest_commit_msg = log_proc.stdout.strip()
-                is_valid, reason = validate_commit_message(
-                    commit_message=latest_commit_msg,
-                    attempt=attempt,
-                    expected_sprint_prefix=expected_sprint_prefix,
-                    expected_task_id=task_id,
-                )
-                if not is_valid:
-                    criteria.append(GateCriterion(
-                        criterion_id=f"gate2b.commit_lint.{repo_name}",
-                        description=f"Commit message lint in '{repo_name}'",
-                        status="FAILED",
-                        message=f"Structured commit protocol violation in '{repo_name}': {reason}",
-                    ))
-                else:
-                    criteria.append(GateCriterion(
-                        criterion_id=f"gate2b.commit_lint.{repo_name}",
-                        description=f"Commit message lint in '{repo_name}'",
-                        status="MET",
-                        message=f"Latest commit conforms to structured commit protocol: '{latest_commit_msg}'.",
-                    ))
+            head_proc_lint = _run_git_cmd(repo_p, ["rev-parse", "HEAD"])
+            curr_target_commit = head_proc_lint.stdout.strip() if head_proc_lint.returncode == 0 else ""
+            repo_auth_base = baseline_heads.get(repo_name)
+            repo_touched = (repo_name in base_commits) or (repo_auth_base and curr_target_commit != repo_auth_base)
+
+            if not repo_touched:
+                criteria.append(GateCriterion(
+                    criterion_id=f"gate2b.commit_lint.{repo_name}",
+                    description=f"Commit message lint in '{repo_name}'",
+                    status="MET",
+                    message=f"Repository '{repo_name}' was not modified in this task; commit lint skipped.",
+                ))
+            else:
+                log_proc = _run_git_cmd(repo_p, ["log", "-1", "--format=%s"])
+                if log_proc.returncode == 0 and log_proc.stdout.strip():
+                    latest_commit_msg = log_proc.stdout.strip()
+                    is_valid, reason = validate_commit_message(
+                        commit_message=latest_commit_msg,
+                        attempt=attempt,
+                        expected_sprint_prefix=expected_sprint_prefix,
+                        expected_task_id=task_id,
+                    )
+                    if not is_valid:
+                        criteria.append(GateCriterion(
+                            criterion_id=f"gate2b.commit_lint.{repo_name}",
+                            description=f"Commit message lint in '{repo_name}'",
+                            status="FAILED",
+                            message=f"Structured commit protocol violation in '{repo_name}': {reason}",
+                        ))
+                    else:
+                        criteria.append(GateCriterion(
+                            criterion_id=f"gate2b.commit_lint.{repo_name}",
+                            description=f"Commit message lint in '{repo_name}'",
+                            status="MET",
+                            message=f"Latest commit conforms to structured commit protocol: '{latest_commit_msg}'.",
+                        ))
 
     # 6. Agent 2 zero remote push policy verification (SEC-08 / FP-04)
     criteria.append(GateCriterion(

@@ -83,6 +83,23 @@ def run_start(workspace: Optional[Path] = None, task: Optional[str] = None) -> i
                     "resume_reason",
                 ):
                     state.pop(stale_key, None)
+
+                # Sync target_repositories from specs/TASK_PLAN.json for this task (Spec 04 §4.1 / Spec 09 §3)
+                task_plan_file = ws_root / "specs" / "TASK_PLAN.json"
+                if task_plan_file.is_file():
+                    try:
+                        from stagecheck.core.task_plan import get_task_id
+                        from stagecheck.core.utils import load_json_file
+
+                        plan_data = load_json_file(task_plan_file)
+                        for t in plan_data.get("tasks", []):
+                            if get_task_id(t) == task:
+                                if t.get("target_repositories"):
+                                    state["target_repositories"] = list(t["target_repositories"])
+                                break
+                    except Exception:
+                        pass
+
                 save_active_state(ws_root, state)
 
                 task_phase1_dir = task_dir / "attempt_1" / "Phase-1"

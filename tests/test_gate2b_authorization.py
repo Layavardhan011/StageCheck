@@ -572,6 +572,85 @@ class TestGate2BAuthorization(unittest.TestCase):
         crit_map = {c.criterion_id: c.status for c in criteria}
         self.assertEqual(crit_map.get("gate2b.commit_lint.payment-service"), "FAILED")
 
+    def test_gate2b_multi_repo_untouched_repo_exempt(self) -> None:
+        """Verify untouched repos in multi-repo workspaces pass Gate 2B without commit lint or diff fidelity errors."""
+        # 1. Setup second repo 'notification-service'
+        notif_dir = self.ws / "repos" / "notification-service"
+        notif_dir.mkdir(parents=True, exist_ok=True)
+        _git_run(["init", "-b", "sprint/sprint-01-payment-hardening"], cwd=notif_dir)
+        _git_run(["config", "user.name", "Test Committer"], cwd=notif_dir)
+        _git_run(["config", "user.email", "test@stagecheck.local"], cwd=notif_dir)
+        (notif_dir / "README.md").write_text("# Notification\n", encoding="utf-8")
+        _git_run(["add", "README.md"], cwd=notif_dir)
+        # Prior commit from task-01
+        _git_run(["commit", "-m", "[sp-01] T-01: init notification service"], cwd=notif_dir)
+        notif_head = _git_run(["rev-parse", "HEAD"], cwd=notif_dir).stdout.strip()
+
+        # 2. Update PRODUCT_REPOSITORIES.json
+        from stagecheck.core.permissions import controlled_write_transaction
+        prod_repos_path = self.ws / "controls" / "PRODUCT_REPOSITORIES.json"
+        prod_data = json.loads(prod_repos_path.read_text(encoding="utf-8"))
+        prod_data["repositories"]["notification-service"] = {
+            "path": "repos/notification-service",
+            "branch": "sprint/sprint-01-payment-hardening",
+            "baseline_head": notif_head,
+            "remotes": [],
+        }
+        with controlled_write_transaction(self.ws / "controls"):
+            prod_repos_path.write_text(json.dumps(prod_data), encoding="utf-8")
+
+        # 3. Setup approved review for task-101 (only touching payment-service)
+        self._setup_approved_review("def process_payment(): return True\n")
+
+        # Set up sprint branch and commit on payment-service
+        _git_run(["checkout", "-b", "sprint/sprint-01-payment-hardening"], cwd=self.repo_dir)
+        _git_run(["add", "service.py"], cwd=self.repo_dir)
+        _git_run(["commit", "-m", "[sp-01] T-101: implement payment service"], cwd=self.repo_dir)
+        (self.p2b_dir / "report.md").write_text("# Delivery Report\n", encoding="utf-8")
+
+        # Configure TASK_PLAN.json with sprint-01 for task-101
+        plan_data = {
+            "schema_version": "2.0",
+            "project_name": "sprint-test",
+            "created_at": "2026-11-04T10:00:00Z",
+            "updated_at": "2026-11-04T10:00:00Z",
+            "sprints": [{"id": "sprint-01", "name": "payment-hardening"}],
+            "tasks": [
+                {
+                    "task_id": self.task_id,
+                    "sprint": "sprint-01",
+                    "title": "Payment Service",
+                    "status": "planned",
+                    "priority": "HIGH",
+                    "dependencies": [],
+                    "target_repositories": ["payment-service"],
+                }
+            ],
+        }
+        (self.ws / "specs" / "TASK_PLAN.json").write_text(json.dumps(plan_data), encoding="utf-8")
+
+        # Record repo_baseline.json for task attempt
+        baseline_data = {
+            "payment-service": {"head_commit": self.base_commit},
+            "notification-service": {"head_commit": notif_head},
+        }
+        (self.p2a_dir.parent / "repo_baseline.json").write_text(json.dumps(baseline_data), encoding="utf-8")
+
+        criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+
+        # Touched repo (payment-service) evaluated fully
+        self.assertEqual(crit_map.get("gate2b.working_tree_clean.payment-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.branch_governance.payment-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.commit_fidelity.payment-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.commit_lint.payment-service"), "MET")
+
+        # Untouched repo (notification-service) clean and exempt from commit lint / diff fidelity
+        self.assertEqual(crit_map.get("gate2b.working_tree_clean.notification-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.branch_governance.notification-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.commit_fidelity.notification-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.commit_lint.notification-service"), "MET")
+
 
 if __name__ == "__main__":
     unittest.main()
