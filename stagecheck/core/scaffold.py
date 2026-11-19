@@ -130,7 +130,7 @@ Implement source code, unit tests, and regression coverage for approved tasks on
 
 ## Workspace Authority & Scope Boundaries
 - **Product Repositories (`repos/*`):** `repos/<repo_name>/` is YOUR PRIMARY WORKSPACE and is **NOT** prohibited. You are the Code Implementer; your primary duty is to implement and fix source code and tests in `repos/*` strictly within `Phase-1/declared_scope.json`.
-- **Task Branches:** Always check out designated task branches named by task ID and descriptive task slug (e.g., `task-<ID>-<task_name>` such as `task-02-zk-public-input`, or `<sprint>/task-<ID>-<task_name>` when a sprint is defined). Committing directly to `main` or `master` is strictly prohibited.
+- **Dedicated Sprint Branches:** Always work and commit on the dedicated sprint branch (`sprint/<sprint-id>-<sprint-name>` e.g. `sprint/sprint-01-zk-readiness` as defined in `specs/TASK_PLAN.json`, or fallback `sprint/sprint-00-UNKNOWN`). All tasks in a sprint chain sequentially on this single dedicated branch. Committing directly to `main`, `master`, or `Development` is strictly prohibited.
 - **Evidence Tree (`evidence/tasks/<task_id>/attempt_<N>/`):** The evidence directory is **NOT** an unrestricted workspace. You are ONLY authorized to author and modify your designated deliverables:
   - `Phase-2A/pre_commit_status.json`
   - `Phase-2B/report.md`
@@ -181,7 +181,20 @@ Implement source code, unit tests, and regression coverage for approved tasks on
      - After fixing the code/tests in `repos/*`, verifying tests pass locally, and incrementing `cycle` in `Phase-2A/pre_commit_status.json`, set `"status": "AWAITING_REVIEW"` and resubmit.
      - Repeat until `Phase-2A/pre_commit_review.json` reports `"status": "APPROVED"`.
   5. *Strict Phase 2A Completion Requirement:* DO NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first. Phase 2A is completed ONLY when `Phase-2A/pre_commit_review.json` reports `"status": "APPROVED"` and StageCheck advances the active phase to `PHASE_2B_COMMITTING`. Generating Phase-2B deliverables before Phase 2A approval is strictly prohibited and violates governance lifecycle ordering.
-  6. *Phase 2B Delivery:* Once `phase == "PHASE_2B_COMMITTING"`, commit locally on the task branch and deliver BOTH `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/report.md` AND `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/claims.json` so StageCheck can advance Gate-2B to Phase 3.
+  6. *Phase 2B Delivery & Structured Commit Protocol:* Once `phase == "PHASE_2B_COMMITTING"`, commit locally on the dedicated sprint branch and deliver BOTH `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/report.md` AND `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/claims.json` so StageCheck can advance Gate-2B to Phase 3.
+     - **Commit Timing:** Commits occur strictly in Phase 2B after Phase 2A review approval.
+     - **Forward-Only Attempt Repair Model:** History rewriting (`git commit --amend`, `git reset`, `git rebase`) is strictly prohibited. If an attempt fails Phase-3 audit and a repair attempt begins (Attempt 2+), produce forward-only fix commits building directly upon prior attempts.
+     - **Structured Commit Message Format:**
+       - Initial Attempt (Attempt 1):
+         `[sp-<sprint_index>] T-<task_index>: <summary>`
+         Format: `[sp-XX] T-YY: <brief summary>`
+         Example: `[sp-01] T-02: Implement canonical ZK public input encoder`
+       - Repair Attempt (Attempt 2+):
+         `[sp-<sprint_index>] T-<task_index> AT-<attempt_index> SEC-<section_refs>: <summary>`
+         Format: `[sp-XX] T-YY AT-ZZ SEC-WW: <brief summary>`
+         Example: `[sp-01] T-02 AT-02 SEC-03: Resolve missing error check`
+         Or multi-section: `[sp-01] T-04 AT-02 SEC-01-SEC-03: Resolve claims schema and witness citations`
+         Link section references directly to issue sections in `TASK_<ID>_ISSUE_HISTORY.md`.
   7. *Phase 3 Audit & Inter-Task Waiting:* After delivering `Phase-2B/report.md` and `Phase-2B/claims.json`, enter WAITING state while StageCheck executes Phase 3 audit and Gate 4 sealing. Remain in WAITING state polling `controls/ACTIVE_STATE.json` and `stagecheck turn --json` until the next attempt or next roadmap task advances to `PHASE_2A_CODING` with `active_turn == "AGENT_2"`.
   8. *Termination Condition:* Terminate ONLY when `controls/ACTIVE_STATE.json` reaches `COMPLETED` and `stagecheck plan next` confirms that all roadmap tasks have completed and sealed.
 
@@ -276,7 +289,8 @@ Implement source code, unit tests, and regression coverage for approved tasks on
 - MUST NOT cite non-test commands (such as `git rev-parse`, `git status`, `git branch`) as executable `type: "command"` citations in `Phase-2B/claims.json`. Repository metadata witness records must be cited as `type: "file"`.
 - MUST NOT omit required fields (`stdout_sha256`, `stderr_sha256`, `record_sha256`, `exit_status`, `argv`, `cwd`) in `type: "command"` citations in `Phase-2B/claims.json`.
 - MUST NOT execute remote push operations (`git push` is strictly forbidden).
-- MUST NOT commit directly to `main` or `master` branch.
+- MUST NOT commit directly to `main`, `master`, or `Development` branch.
+- MUST NOT use `git commit --amend`, `git reset`, or `git rebase` (history rewriting is strictly prohibited; all repairs must be forward-only commits).
 - MUST NOT modify control descriptors in `controls/*`.
 - MUST NOT alter Gitleaks configuration or create `.gitleaksignore` override files.
 """
@@ -372,7 +386,8 @@ def scaffold_agent_instructions(
                 f"- MUST NOT cite non-test commands (such as `git rev-parse`, `git status`) as executable `type: \"command\"` citations in `Phase-2B/claims.json`. Repository witness records must be cited as `type: \"file\"`.\n"
                 f"- MUST NOT omit required fields (`stdout_sha256`, `stderr_sha256`, `record_sha256`, `exit_status`, `argv`, `cwd`) in `type: \"command\"` citations.\n"
                 f"- MUST NOT execute remote push operations (`git push` is strictly forbidden).\n"
-                f"- MUST NOT commit directly to `main` or `master` branch. Always check out designated task branches named by task ID and descriptive task slug (e.g., `task-<ID>-<task_name>` such as `task-02-zk-public-input`, or `<sprint>/task-<ID>-<task_name>` when a sprint is defined).\n"
+                f"- MUST NOT commit directly to `main` or `master` branch (or `Development` under sprint governance). Always work on designated sprint branch (`sprint/<sprint-id>-<sprint-name>` e.g. `sprint/sprint-01-zk-readiness` or fallback `sprint/sprint-00-UNKNOWN`).\n"
+                f"- MUST NOT use `git commit --amend`, `git reset`, or `git rebase` (history rewriting is strictly prohibited; all repairs must be forward-only commits).\n"
                 f"- MUST NOT modify control descriptors in `controls/*` or edit `.stagecheck.lock`.\n"
                 f"- MUST NOT alter Gitleaks configuration or create `.gitleaksignore` override files.\n"
             )
@@ -421,9 +436,18 @@ def scaffold_task_plan(
             "project_name": project_name,
             "created_at": "2026-11-04T00:00:00Z",
             "updated_at": "2026-11-04T00:00:00Z",
+            "sprints": [
+                {
+                    "id": "sprint-01",
+                    "name": "bootstrap",
+                    "title": "Initial workspace bootstrap and baseline verification",
+                    "description": "Establish baseline repository structure and execute initial preflight validation.",
+                }
+            ],
             "tasks": [
                 {
                     "task_id": "TASK-01",
+                    "sprint": "sprint-01",
                     "title": "Initial workspace bootstrap and baseline verification",
                     "description": "Establish baseline repository structure and execute initial preflight validation.",
                     "status": "planned",

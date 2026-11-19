@@ -43,8 +43,13 @@ class UntouchedRepoViolationError(BranchGovernanceError):
     """Raised when an out-of-scope untouched repository is unexpectedly mutated."""
 
 
-# Default pattern allows <project>/<sprint>, <project>/<task>, <sprint>/<task>, task-<id>, or feature branches
+class CommitLintError(BranchGovernanceError):
+    """Raised when a commit message violates structured commit conventions."""
+
+
+# Default pattern allows sprint/<sprint-id>-<sprint-name>, <sprint>/<task>, task-<id>, or feature branches
 DEFAULT_PERMITTED_BRANCH_PATTERN = (
+    r"^sprint/[a-zA-Z0-9._-]+$|"
     r"^(sprint-[a-zA-Z0-9._-]+)/(task-[a-zA-Z0-9._-]+)(/[a-zA-Z0-9._-]+)?$|"
     r"^[a-zA-Z0-9._-]+/(task-[a-zA-Z0-9._-]+|sprint-[a-zA-Z0-9._-]+)(/[a-zA-Z0-9._-]+)?$|"
     r"^task-[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)?$|"
@@ -70,12 +75,12 @@ def validate_branch_compliance(
         allow_development: Whether Development branch is allowed.
 
     Raises:
-        ProtectedBranchPolicyError: If branch is main or master.
+        ProtectedBranchPolicyError: If branch is main, master, or Development (when allow_development is False).
         NonCompliantBranchError: If branch fails naming pattern.
     """
     clean_branch = branch_name.strip()
 
-    if clean_branch in ("main", "master"):
+    if clean_branch in ("main", "master") or (not allow_development and clean_branch == "Development"):
         raise ProtectedBranchPolicyError(
             f"Branch governance violation: Committing directly to protected branch '{clean_branch}' "
             "is strictly forbidden. AI agents must create a permitted sprint/task branch."
@@ -90,6 +95,71 @@ def validate_branch_compliance(
             f"Branch governance violation: Branch '{clean_branch}' does not conform to "
             f"permitted task branch pattern '{pattern}'."
         )
+
+
+def validate_commit_message(
+    commit_message: str,
+    attempt: int = 1,
+    expected_sprint_prefix: Optional[str] = None,
+    expected_task_id: Optional[str] = None,
+) -> Tuple[bool, str]:
+    r"""Validate commit message subject against Structured Commit Protocol.
+
+    Rules:
+      - Attempt 1: ^\[sp-[0-9]{2}\] T-[0-9]+: .+$
+      - Attempt >= 2: ^\[sp-[0-9]{2}\] T-[0-9]+ AT-[0-9]{2} SEC-.+: .+$
+      - If expected_sprint_prefix provided (e.g. '[sp-01]'), commit subject must begin with it.
+      - If expected_task_id provided (e.g. 'task-02'), task token T-<num> must match.
+
+    Returns:
+        (is_valid, error_reason)
+    """
+    subject = commit_message.strip().splitlines()[0].strip() if commit_message.strip() else ""
+    if not subject:
+        return False, "Commit message cannot be empty."
+
+    if attempt <= 1:
+        pattern = r"^\[sp-[0-9]{2}\] T-[0-9]+: .+$"
+        if not re.match(pattern, subject):
+            return (
+                False,
+                f"Initial attempt commit subject must match format '[sp-XX] T-YY: <summary>', got: '{subject}'",
+            )
+    else:
+        pattern = r"^\[sp-[0-9]{2}\] T-[0-9]+ AT-[0-9]{2} SEC-.+: .+$"
+        if not re.match(pattern, subject):
+            return (
+                False,
+                f"Repair attempt commit subject must match format '[sp-XX] T-YY AT-ZZ SEC-WW: <summary>', got: '{subject}'",
+            )
+
+    if expected_sprint_prefix:
+        clean_prefix = expected_sprint_prefix.strip()
+        if not subject.startswith(clean_prefix):
+            return (
+                False,
+                f"Commit subject must start with sprint prefix '{clean_prefix}', got: '{subject}'",
+            )
+
+    if expected_task_id:
+        exp_m = re.search(r"(\d+)", expected_task_id)
+        if exp_m:
+            task_match = re.search(r"T-([0-9]+)", subject)
+            if task_match and int(task_match.group(1)) != int(exp_m.group(1)):
+                return (
+                    False,
+                    f"Commit task token 'T-{task_match.group(1)}' does not match expected task '{expected_task_id}'.",
+                )
+
+    if attempt >= 2:
+        at_match = re.search(r"AT-([0-9]+)", subject)
+        if at_match and int(at_match.group(1)) != int(attempt):
+            return (
+                False,
+                f"Commit attempt token 'AT-{at_match.group(1)}' does not match active attempt '{attempt}'.",
+            )
+
+    return True, ""
 
 
 def _assert_safe_git_rev(rev: str, repo_name: str) -> None:

@@ -60,12 +60,31 @@ def _validate_and_bind_precommit_status(
     if not isinstance(registered, dict) or not registered:
         raise ReviewGateError("controls/PRODUCT_REPOSITORIES.json has no registered repositories.")
 
+    # Check if a task attempt baseline was recorded (e.g. from stagecheck start)
+    attempt_dir = resolve_task_attempt_dir(workspace_root, task, attempt)
+    baseline_file = attempt_dir / "repo_baseline.json"
+    repo_baseline_data: dict[str, dict] = {}
+    if baseline_file.is_file():
+        try:
+            loaded_bl = json.loads(baseline_file.read_text(encoding="utf-8"))
+            if isinstance(loaded_bl, dict):
+                repo_baseline_data = loaded_bl
+        except Exception:
+            repo_baseline_data = {}
+
     bound_commits: dict[str, str] = {}
     for repo_name in touched_repos:
         resolve_governed_repo_path(workspace_root, repo_name)
         if repo_name not in registered:
             raise ReviewGateError(f"Unregistered repository '{repo_name}' in touched_repositories.")
-        auth_base = registered[repo_name].get("baseline_head")
+
+        # Priority: repo_baseline.json captured at task start > PRODUCT_REPOSITORIES.json baseline_head
+        auth_base = None
+        if repo_name in repo_baseline_data and isinstance(repo_baseline_data[repo_name], dict):
+            auth_base = repo_baseline_data[repo_name].get("head_commit")
+        if not auth_base:
+            auth_base = registered[repo_name].get("baseline_head")
+
         if not auth_base:
             raise ReviewGateError(f"Repository '{repo_name}' lacks baseline_head in PRODUCT_REPOSITORIES.json.")
         validate_commit_sha(auth_base, repo_name)

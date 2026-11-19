@@ -739,6 +739,21 @@ def evaluate_gate_2b_criteria(
     base_commits = rev_data.get("base_commits", {}) if rev_data else {}
     approved_diff_hashes = rev_data.get("approved_diff_hashes", {}) if rev_data else {}
 
+    from stagecheck.core.branch_governance import validate_commit_message
+    from stagecheck.core.task_plan import get_sprint_for_task, resolve_sprint_branch
+
+    expected_sprint_branch: Optional[str] = None
+    expected_sprint_prefix: Optional[str] = None
+    task_plan_file = workspace_root / "specs" / "TASK_PLAN.json"
+    if task_plan_file.is_file():
+        try:
+            plan_data = load_json_file(task_plan_file)
+            sprint_meta = get_sprint_for_task(plan_data, task_id)
+            if sprint_meta:
+                expected_sprint_branch, expected_sprint_prefix = resolve_sprint_branch(plan_data, task_id)
+        except Exception:
+            pass
+
     for repo_name, repo_p in repos_to_check.items():
         # A. Working tree clean check
         st_proc = _run_git_cmd(repo_p, ["status", "--porcelain=v1", "--untracked-files=all"])
@@ -760,20 +775,43 @@ def evaluate_gate_2b_criteria(
         # B. Branch governance check
         br_proc = _run_git_cmd(repo_p, ["rev-parse", "--abbrev-ref", "HEAD"])
         current_branch = br_proc.stdout.strip() if br_proc.returncode == 0 else "unknown"
-        if current_branch in ("main", "master"):
-            criteria.append(GateCriterion(
-                criterion_id=f"gate2b.branch_governance.{repo_name}",
-                description=f"Branch governance respected in '{repo_name}'",
-                status="FAILED",
-                message=f"Direct commits on protected branch '{current_branch}' are forbidden.",
-            ))
+        if expected_sprint_branch:
+            if current_branch in ("main", "master", "Development"):
+                criteria.append(GateCriterion(
+                    criterion_id=f"gate2b.branch_governance.{repo_name}",
+                    description=f"Branch governance respected in '{repo_name}'",
+                    status="FAILED",
+                    message=f"Direct commits on protected branch '{current_branch}' are forbidden. Commits must be made on sprint branch '{expected_sprint_branch}'.",
+                ))
+            elif current_branch != expected_sprint_branch:
+                criteria.append(GateCriterion(
+                    criterion_id=f"gate2b.branch_governance.{repo_name}",
+                    description=f"Branch governance respected in '{repo_name}'",
+                    status="FAILED",
+                    message=f"Repository '{repo_name}' is on branch '{current_branch}', expected dedicated sprint branch '{expected_sprint_branch}'.",
+                ))
+            else:
+                criteria.append(GateCriterion(
+                    criterion_id=f"gate2b.branch_governance.{repo_name}",
+                    description=f"Branch governance respected in '{repo_name}'",
+                    status="MET",
+                    message=f"Repository '{repo_name}' is on dedicated sprint branch '{current_branch}'.",
+                ))
         else:
-            criteria.append(GateCriterion(
-                criterion_id=f"gate2b.branch_governance.{repo_name}",
-                description=f"Branch governance respected in '{repo_name}'",
-                status="MET",
-                message=f"Repository '{repo_name}' is on permitted task branch '{current_branch}'.",
-            ))
+            if current_branch in ("main", "master"):
+                criteria.append(GateCriterion(
+                    criterion_id=f"gate2b.branch_governance.{repo_name}",
+                    description=f"Branch governance respected in '{repo_name}'",
+                    status="FAILED",
+                    message=f"Direct commits on protected branch '{current_branch}' are forbidden.",
+                ))
+            else:
+                criteria.append(GateCriterion(
+                    criterion_id=f"gate2b.branch_governance.{repo_name}",
+                    description=f"Branch governance respected in '{repo_name}'",
+                    status="MET",
+                    message=f"Repository '{repo_name}' is on permitted task branch '{current_branch}'.",
+                ))
 
         # C. Committed Diff Fidelity (SEC-E1 & GAP-I2)
         if rev_data:
@@ -863,6 +901,32 @@ def evaluate_gate_2b_criteria(
                     status="MET",
                     message=f"All configured remote push URLs in '{repo_name}' comply with authorized whitelist.",
                 ))
+
+        # E. Structured Commit Protocol Lint (when sprint branch governance is active)
+        if expected_sprint_prefix:
+            log_proc = _run_git_cmd(repo_p, ["log", "-1", "--format=%s"])
+            if log_proc.returncode == 0 and log_proc.stdout.strip():
+                latest_commit_msg = log_proc.stdout.strip()
+                is_valid, reason = validate_commit_message(
+                    commit_message=latest_commit_msg,
+                    attempt=attempt,
+                    expected_sprint_prefix=expected_sprint_prefix,
+                    expected_task_id=task_id,
+                )
+                if not is_valid:
+                    criteria.append(GateCriterion(
+                        criterion_id=f"gate2b.commit_lint.{repo_name}",
+                        description=f"Commit message lint in '{repo_name}'",
+                        status="FAILED",
+                        message=f"Structured commit protocol violation in '{repo_name}': {reason}",
+                    ))
+                else:
+                    criteria.append(GateCriterion(
+                        criterion_id=f"gate2b.commit_lint.{repo_name}",
+                        description=f"Commit message lint in '{repo_name}'",
+                        status="MET",
+                        message=f"Latest commit conforms to structured commit protocol: '{latest_commit_msg}'.",
+                    ))
 
     # 6. Agent 2 zero remote push policy verification (SEC-08 / FP-04)
     criteria.append(GateCriterion(

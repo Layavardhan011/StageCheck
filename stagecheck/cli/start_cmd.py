@@ -88,6 +88,25 @@ def run_start(workspace: Optional[Path] = None, task: Optional[str] = None) -> i
                 task_phase1_dir = task_dir / "attempt_1" / "Phase-1"
                 task_phase1_dir.mkdir(parents=True, exist_ok=True)
 
+                # Capture baseline for registered repositories
+                prod_repos_file = controls_dir / "PRODUCT_REPOSITORIES.json"
+                if prod_repos_file.is_file():
+                    try:
+                        from stagecheck.core.branch_governance import capture_multi_repo_task_baseline
+                        from stagecheck.core.utils import load_json_file
+
+                        prod_data = load_json_file(prod_repos_file)
+                        registered = list((prod_data.get("repositories") or {}).keys())
+                        if registered:
+                            capture_multi_repo_task_baseline(
+                                workspace_root=ws_root,
+                                task_id=task,
+                                attempt=1,
+                                repo_names=registered,
+                            )
+                    except Exception:
+                        pass
+
         from stagecheck.cli.supervisor_cmd import format_task_started_banner, should_use_color
         print(format_task_started_banner(task, enabled=should_use_color()))
         print(f"SUCCESS: Task '{task}' started in attempt 1 (PHASE_1_PLANNING).")

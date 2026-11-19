@@ -17,6 +17,7 @@ from stagecheck.core.branch_governance import (
     capture_multi_repo_task_baseline,
     compute_diff_hash,
     validate_branch_compliance,
+    validate_commit_message,
     verify_multi_repo_governance,
 )
 
@@ -183,6 +184,76 @@ class TestBranchGovernance(unittest.TestCase):
                 touched_repos=["backend"],
                 all_registered_repos=all_repos,
             )
+
+    def test_branch_policy_permits_sprint_branch_pattern(self) -> None:
+        """Verify dedicated sprint branch patterns pass compliance."""
+        validate_branch_compliance("sprint/sprint-01-zk-readiness")
+        validate_branch_compliance("sprint/sprint-00-UNKNOWN")
+        validate_branch_compliance("sprint/sprint-02")
+
+    def test_validate_commit_message_attempt_1(self) -> None:
+        """Verify structured commit messages for initial attempt 1."""
+        valid_msg = "[sp-01] T-02: Implement canonical ZK public input encoder"
+        ok, reason = validate_commit_message(
+            valid_msg,
+            attempt=1,
+            expected_sprint_prefix="[sp-01]",
+            expected_task_id="task-02",
+        )
+        self.assertTrue(ok, f"Expected valid, got reason: {reason}")
+
+    def test_validate_commit_message_attempt_2_repair(self) -> None:
+        """Verify structured commit messages for forward-only repair attempts."""
+        valid_repair = "[sp-01] T-02 AT-02 SEC-03: Resolve missing error check"
+        ok, reason = validate_commit_message(
+            valid_repair,
+            attempt=2,
+            expected_sprint_prefix="[sp-01]",
+            expected_task_id="task-02",
+        )
+        self.assertTrue(ok, f"Expected valid, got reason: {reason}")
+
+        valid_multi_sec = "[sp-01] T-04 AT-02 SEC-01-SEC-03: Resolve claims schema and witness citations"
+        ok, reason = validate_commit_message(
+            valid_multi_sec,
+            attempt=2,
+            expected_sprint_prefix="[sp-01]",
+            expected_task_id="task-04",
+        )
+        self.assertTrue(ok, f"Expected valid, got reason: {reason}")
+
+    def test_validate_commit_message_rejects_invalid_formats(self) -> None:
+        """Verify rejection of non-conforming commit messages."""
+        # Missing structured prefix
+        ok, reason = validate_commit_message("feat: some commit", attempt=1)
+        self.assertFalse(ok)
+
+        # Attempt 1 message supplied for attempt 2 repair
+        ok, reason = validate_commit_message("[sp-01] T-02: Fix bug", attempt=2)
+        self.assertFalse(ok)
+
+        # Mismatched sprint prefix
+        ok, reason = validate_commit_message(
+            "[sp-02] T-02: Implement encoder",
+            attempt=1,
+            expected_sprint_prefix="[sp-01]",
+        )
+        self.assertFalse(ok)
+
+        # Mismatched task id
+        ok, reason = validate_commit_message(
+            "[sp-01] T-03: Implement encoder",
+            attempt=1,
+            expected_task_id="task-02",
+        )
+        self.assertFalse(ok)
+
+        # Mismatched attempt index
+        ok, reason = validate_commit_message(
+            "[sp-01] T-02 AT-03 SEC-01: Fix bug",
+            attempt=2,
+        )
+        self.assertFalse(ok)
 
 
 if __name__ == "__main__":

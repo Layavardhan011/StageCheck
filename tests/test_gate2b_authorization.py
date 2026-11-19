@@ -519,6 +519,59 @@ class TestGate2BAuthorization(unittest.TestCase):
         res = run_stage3_citations(ctx)
         self.assertTrue(res.is_clear, f"Stage 3 citations failed to resolve relocated witness: {res.defects}")
 
+    def test_gate2b_enforces_sprint_branch_and_commit_lint(self) -> None:
+        """Verify Gate 2B enforces sprint branch name and structured commit protocol when defined."""
+        self._setup_approved_review("def process_payment(): return True\n")
+
+        # Configure TASK_PLAN.json with sprint-01 for task-101
+        plan_data = {
+            "schema_version": "2.0",
+            "project_name": "sprint-test",
+            "created_at": "2026-11-04T10:00:00Z",
+            "updated_at": "2026-11-04T10:00:00Z",
+            "sprints": [
+                {
+                    "id": "sprint-01",
+                    "name": "payment-hardening",
+                    "title": "Payment Hardening",
+                }
+            ],
+            "tasks": [
+                {
+                    "task_id": self.task_id,
+                    "sprint": "sprint-01",
+                    "title": "Payment Service",
+                    "status": "planned",
+                    "priority": "HIGH",
+                    "dependencies": [],
+                    "target_repositories": ["payment-service"],
+                }
+            ],
+        }
+        (self.ws / "specs" / "TASK_PLAN.json").write_text(json.dumps(plan_data), encoding="utf-8")
+
+        # 1. Non-conforming branch (feature branch instead of sprint branch)
+        _git_run(["add", "service.py"], cwd=self.repo_dir)
+        _git_run(["commit", "-m", "[sp-01] T-101: implement payment service"], cwd=self.repo_dir)
+        (self.p2b_dir / "report.md").write_text("# Delivery Report\n", encoding="utf-8")
+
+        criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+        self.assertEqual(crit_map.get("gate2b.branch_governance.payment-service"), "FAILED")
+
+        # 2. Switch to compliant sprint branch
+        _git_run(["checkout", "-b", "sprint/sprint-01-payment-hardening"], cwd=self.repo_dir)
+        criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+        self.assertEqual(crit_map.get("gate2b.branch_governance.payment-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.commit_lint.payment-service"), "MET")
+
+        # 3. Bad commit message fails commit lint
+        _git_run(["commit", "--amend", "-m", "invalid commit format"], cwd=self.repo_dir)
+        criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+        self.assertEqual(crit_map.get("gate2b.commit_lint.payment-service"), "FAILED")
+
 
 if __name__ == "__main__":
     unittest.main()
