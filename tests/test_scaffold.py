@@ -230,6 +230,48 @@ class TestAtomicScaffolding(unittest.TestCase):
         self.assertEqual(rc_rec, 0)
         self.assertEqual(get_approved_remote_urls(ws), {url1, url2})
 
+    def test_init_automatically_secures_unapproved_remote_push_urls(self) -> None:
+        """Verify init automatically sets unapproved remote push URLs to DISABLED (SEC-08 / DEC-021)."""
+        import subprocess
+        from stagecheck.cli.main import main
+        from stagecheck.core.git import get_repo_remote_push_urls
+
+        ws = self.workspace / "secure_remotes_ws"
+        repo1 = ws / "repos" / "core"
+        repo2 = ws / "repos" / "logger"
+        repo1.mkdir(parents=True, exist_ok=True)
+        repo2.mkdir(parents=True, exist_ok=True)
+
+        for r, url in [(repo1, "https://github.com/Layavardhan24/core.git"), (repo2, "https://github.com/Layavardhan24/logger.git")]:
+            subprocess.run(["git", "-C", str(r), "init", "-b", "main"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(r), "config", "user.name", "Tester"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(r), "config", "user.email", "tester@example.com"], check=True, capture_output=True)
+            (r / "README.md").write_text("# Repo\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(r), "add", "README.md"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(r), "commit", "-m", "init"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(r), "remote", "add", "origin", url], check=True, capture_output=True)
+
+        # Before init: push URLs match remote URLs
+        self.assertEqual(get_repo_remote_push_urls(repo1), ["https://github.com/Layavardhan24/core.git"])
+        self.assertEqual(get_repo_remote_push_urls(repo2), ["https://github.com/Layavardhan24/logger.git"])
+
+        # Run init with repo2 explicitly approved, but repo1 NOT approved
+        approved_url = "https://github.com/Layavardhan24/logger.git"
+        rc = main(["init", "--workspace", str(ws), "--agent1", "agent1", "--agent2", "agent2", "--approve-remote", approved_url])
+        self.assertEqual(rc, 0)
+
+        # After init:
+        # repo1 (unapproved) had its push URL automatically secured to DISABLED
+        self.assertEqual(get_repo_remote_push_urls(repo1), ["DISABLED"])
+        # repo2 (approved via --approve-remote) retained its approved push URL
+        self.assertEqual(get_repo_remote_push_urls(repo2), [approved_url])
+
+        # Fetch URLs for both repos remain completely intact
+        fetch1 = subprocess.run(["git", "-C", str(repo1), "remote", "get-url", "origin"], check=True, capture_output=True, text=True).stdout.strip()
+        fetch2 = subprocess.run(["git", "-C", str(repo2), "remote", "get-url", "origin"], check=True, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(fetch1, "https://github.com/Layavardhan24/core.git")
+        self.assertEqual(fetch2, "https://github.com/Layavardhan24/logger.git")
+
     def test_scaffold_instructions_contain_role_exclusions_and_citation_standards(self) -> None:
         """Verify generated agent instructions enforce role exclusions, controls warning, and citation standards."""
         from stagecheck.core.scaffold import scaffold_agent_instructions

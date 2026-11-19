@@ -14,7 +14,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union
 
 from stagecheck.core.agents_md import verify_agents_contract, write_agents_contract
-from stagecheck.core.git import GitError, RepoBaseline, discover_multi_repositories, discover_repository
+from stagecheck.core.git import (
+    GitError,
+    RepoBaseline,
+    discover_multi_repositories,
+    discover_repository,
+    get_approved_remote_urls,
+    secure_repo_push_remotes,
+)
 from stagecheck.core.locking import LockCollisionError, acquire_bootstrap_lock
 from stagecheck.core.permissions import (
     MODE_DIR_RW,
@@ -255,6 +262,15 @@ def run_init(
                 workspace_root=workspace_root,
                 approve_remotes=approve_remotes,
             )
+
+            # Step 4a-ter: Secure git remotes in all discovered repositories (SEC-08 / DEC-021)
+            approved_urls = get_approved_remote_urls(workspace_root)
+            for repo_name in repo_list:
+                repo_path = workspace_root / "repos" / repo_name
+                if repo_path.is_dir():
+                    secured = secure_repo_push_remotes(repo_path, approved_push_urls=approved_urls)
+                    for rem in secured:
+                        print(f"[INFO] Secured remote '{rem}' in repos/{repo_name}: push URL set to 'DISABLED' (Zero Remote Push).")
 
             # Step 4b: Scaffold agent instructions & role definitions (Specs 03, 08)
             print("Reconciling agent instructions under instructions/...")

@@ -651,3 +651,55 @@ def get_approved_remote_urls(workspace_root: Union[str, Path]) -> Set[str]:
 
     return approved
 
+
+def secure_repo_push_remotes(
+    repo_path: Union[str, Path],
+    approved_push_urls: Optional[Set[str]] = None,
+) -> List[str]:
+    """Ensure all git remote push URLs for a repository are secured (FP-ORG / SEC-08).
+
+    For each configured remote (e.g., 'origin'):
+    - If push URL is already 'DISABLED' or matches approved_push_urls, leave it intact.
+    - Otherwise, sets push URL to 'DISABLED' via 'git remote set-url --push <remote> DISABLED'.
+
+    Returns:
+        List of remote names whose push URL was updated to 'DISABLED'.
+    """
+    p = Path(repo_path).resolve()
+    if not (p / ".git").exists():
+        return []
+
+    approved = approved_push_urls or set()
+    remotes_proc = _run_git_cmd(p, ["remote"])
+    if remotes_proc.returncode != 0 or not remotes_proc.stdout.strip():
+        return []
+
+    secured_remotes: List[str] = []
+    for remote_line in remotes_proc.stdout.splitlines():
+        remote_name = remote_line.strip()
+        if not remote_name:
+            continue
+
+        # Get current push URLs for this remote
+        url_proc = _run_git_cmd(p, ["remote", "get-url", "--push", "--all", "--", remote_name])
+        if url_proc.returncode != 0:
+            continue
+
+        push_urls = [u.strip() for u in url_proc.stdout.splitlines() if u.strip()]
+        needs_securing = False
+        if not push_urls:
+            needs_securing = True
+        else:
+            for u in push_urls:
+                if u != "DISABLED" and not approved_remote(u, approved):
+                    needs_securing = True
+                    break
+
+        if needs_securing:
+            set_proc = _run_git_cmd(p, ["remote", "set-url", "--push", remote_name, "DISABLED"])
+            if set_proc.returncode == 0:
+                secured_remotes.append(remote_name)
+
+    return secured_remotes
+
+
