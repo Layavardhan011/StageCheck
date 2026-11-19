@@ -179,6 +179,52 @@ class TestTaskPlanValidation(unittest.TestCase):
         self.assertEqual(fb_branch, "sprint/sprint-00-UNKNOWN")
         self.assertEqual(fb_prefix, "[sp-00]")
 
+    def test_minimal_v2_schema_validation(self):
+        """Verify minimal v2 plan without project_name or optional task fields passes validation."""
+        minimal_plan = {
+            "schema_version": "2.0",
+            "sprints": [
+                {
+                    "id": "sprint-01",
+                    "name": "zk-readiness",
+                    "title": "Zero Knowledge Public Input and Commitment Hardening",
+                },
+                {
+                    "id": "sprint-02",
+                    "name": "batch-verification",
+                    "title": "Batch Signature and Proof Aggregation",
+                },
+            ],
+            "tasks": [
+                {
+                    "id": "task-01",
+                    "sprint": "sprint-01",
+                    "name": "Local workspace alignment and baseline verification",
+                    "target_repositories": ["core", "logger", "Crypto"],
+                },
+                {
+                    "id": "task-02",
+                    "sprint": "sprint-01",
+                    "name": "Core repository ZK public-input contract and canonical encoder",
+                    "target_repositories": ["core"],
+                },
+                {
+                    "id": "task-03",
+                    "sprint": "sprint-01",
+                    "name": "Domain-separated commitment adapter",
+                    "target_repositories": ["core"],
+                },
+                {
+                    "id": "task-04",
+                    "sprint": "sprint-01",
+                    "name": "Crypto repository ZK readiness compatibility tests",
+                    "target_repositories": ["Crypto"],
+                },
+            ],
+        }
+        topo = validate_task_plan(minimal_plan, registered_repos=["core", "logger", "Crypto"])
+        self.assertEqual(topo, ["task-01", "task-02", "task-03", "task-04"])
+
 
 if __name__ == "__main__":
     unittest.main()
