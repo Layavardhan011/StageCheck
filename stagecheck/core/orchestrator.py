@@ -100,7 +100,20 @@ class AuditOrchestrator:
         resolved_task_id = task_id or active_state.get("task_id", "task-default")
         resolved_attempt = attempt or active_state.get("attempt_index", 1)
 
-        # 2. Product Repositories
+        # 2. Resolve Attempt Directory & Pre-Commit Status for dynamic baseline resolution
+        attempt_dir = resolve_task_attempt_dir(self.workspace_root, resolved_task_id, resolved_attempt)
+        p2a_status_path = attempt_dir / "Phase-2A" / "pre_commit_status.json"
+        p2a_status = _load_optional_json(p2a_status_path)
+        has_declared_touched = (
+            "touched_repositories" in p2a_status
+            and isinstance(p2a_status["touched_repositories"], list)
+        )
+
+        baseline_file = attempt_dir / "repo_baseline.json"
+        repo_baseline_data = _load_optional_json(baseline_file) if baseline_file.is_file() else {}
+        p2a_base_commits = p2a_status.get("base_commits", {}) if isinstance(p2a_status, dict) else {}
+
+        # 3. Product Repositories
         prod_repos = _load_optional_json(self.workspace_root / "controls" / "PRODUCT_REPOSITORIES.json")
         repo_dict = prod_repos.get("repositories", {})
         all_registered = list(repo_dict.keys())
@@ -108,7 +121,16 @@ class AuditOrchestrator:
         target_commits: Dict[str, str] = {}
 
         for name, meta in repo_dict.items():
-            base_commits[name] = meta.get("baseline_head", "0" * 40)
+            # Priority: attempt repo_baseline.json > pre_commit_status.json > PRODUCT_REPOSITORIES.json
+            auth_b = None
+            if isinstance(repo_baseline_data, dict) and isinstance(repo_baseline_data.get(name), dict):
+                auth_b = repo_baseline_data[name].get("head_commit")
+            if not auth_b and isinstance(p2a_base_commits, dict) and p2a_base_commits.get(name):
+                auth_b = p2a_base_commits[name]
+            if not auth_b:
+                auth_b = meta.get("baseline_head", "0" * 40)
+            base_commits[name] = auth_b
+
             rel_p = meta.get("path", f"repos/{name}")
             repo_path = self.workspace_root / rel_p
             if (repo_path / ".git").exists():
@@ -129,15 +151,6 @@ class AuditOrchestrator:
                     base_commits["root"] = target_commits["root"]
             except Exception:
                 pass
-
-        # 3. Resolve Attempt Directory & Pre-Commit Status
-        attempt_dir = resolve_task_attempt_dir(self.workspace_root, resolved_task_id, resolved_attempt)
-        p2a_status_path = attempt_dir / "Phase-2A" / "pre_commit_status.json"
-        p2a_status = _load_optional_json(p2a_status_path)
-        has_declared_touched = (
-            "touched_repositories" in p2a_status
-            and isinstance(p2a_status["touched_repositories"], list)
-        )
 
         # Detect touched repos
         touched: List[str] = []
