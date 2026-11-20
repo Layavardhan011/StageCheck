@@ -116,30 +116,98 @@ def run_stage1_preflight(ctx: AuditContext) -> StageResult:
                     )
                 )
 
-    # 4. Check for unresolved placeholders in touched repositories (reject symlinks & >20 MiB reads)
+    # 4. Check for unresolved placeholders in task-scoped changes within touched repositories
+    # Confines scan to task modifications (git diff, uncommitted status, declared_scope)
+    # instead of scanning whole multi-thousand file repositories, preventing false positives
+    # on pre-existing upstream code and eliminating severe disk I/O bottlenecks.
     max_preflight_bytes = 20 * 1024 * 1024
+    from stagecheck.core.git import parse_git_porcelain_z, run_safe_git, split_git_nul_paths
+    from stagecheck.core.paths import read_bytes_nofollow
+
     for repo_name in ctx.touched_repos:
-        repo_dir = ctx.workspace_root / "repos" / repo_name
-        if repo_dir.is_dir() and not repo_dir.is_symlink():
+        repo_dir = ctx.workspace_root / "repos" / repo_name if repo_name != "root" else ctx.workspace_root
+        if not repo_dir.is_dir() or repo_dir.is_symlink():
+            continue
+
+        candidate_files: set[Path] = set()
+
+        if (repo_dir / ".git").exists():
+            base_commit = ctx.base_commits.get(repo_name)
+            target_commit = ctx.target_commits.get(repo_name, "HEAD")
+
+            # A. Check committed changes for the task
+            if base_commit:
+                diff_cmd = ["diff", "--name-only", "-z", "--end-of-options", f"{base_commit}..{target_commit}", "--"]
+                res = run_safe_git(repo_dir, diff_cmd)
+                if res.returncode == 0:
+                    for rel_str in split_git_nul_paths(res.stdout):
+                        if rel_str:
+                            candidate_files.add(repo_dir / rel_str)
+            else:
+                # Fallback when base_commit not bound: inspect files in target_commit
+                show_res = run_safe_git(repo_dir, ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", str(target_commit)])
+                if show_res.returncode == 0:
+                    for rel_str in split_git_nul_paths(show_res.stdout):
+                        if rel_str:
+                            candidate_files.add(repo_dir / rel_str)
+
+            # B. Check working-tree uncommitted changes and untracked files
+            status_res = run_safe_git(repo_dir, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+            if status_res.returncode == 0:
+                for rel_str in parse_git_porcelain_z(status_res.stdout, include_rename_sources=True):
+                    if rel_str:
+                        candidate_files.add(repo_dir / rel_str)
+
+            # C. Check paths specified in declared_scope
+            if ctx.declared_scope:
+                prefix = f"repos/{repo_name}/" if repo_name != "root" else ""
+                for path_key in ("allowed_paths", "read_write_paths"):
+                    for allowed in ctx.declared_scope.get(path_key, []):
+                        if isinstance(allowed, str):
+                            if allowed.startswith(prefix):
+                                rel = allowed[len(prefix):]
+                                p = repo_dir / rel
+                                if p.is_file():
+                                    candidate_files.add(p)
+                            elif repo_name == "root":
+                                p = repo_dir / allowed
+                                if p.is_file():
+                                    candidate_files.add(p)
+        else:
+            # Fallback for non-git repository fixtures
             for p in repo_dir.rglob("*"):
                 if p.is_symlink() or not p.is_file() or any(part.startswith(".") for part in p.relative_to(repo_dir).parts):
                     continue
-                try:
-                    from stagecheck.core.paths import read_bytes_nofollow
-                    text = read_bytes_nofollow(p, max_bytes=max_preflight_bytes).decode("utf-8", errors="ignore")
-                    if _PLACEHOLDER_PATTERN.search(text):
-                        defects.append(
-                            Defect(
-                                defect_id="preflight.unresolved_placeholder",
-                                message=f"Unresolved template placeholder detected in '{p.relative_to(ctx.workspace_root)}'.",
-                                stage=stage_id,
-                                severity="CRITICAL",
-                                blocking=True,
-                                repo=repo_name,
-                            )
+                candidate_files.add(p)
+
+        for p in sorted(candidate_files):
+            if p.is_symlink() or not p.is_file():
+                continue
+            try:
+                rel_parts = p.relative_to(repo_dir).parts
+                if any(part.startswith(".") for part in rel_parts):
+                    continue
+            except Exception:
+                pass
+            try:
+                text = read_bytes_nofollow(p, max_bytes=max_preflight_bytes).decode("utf-8", errors="ignore")
+                if _PLACEHOLDER_PATTERN.search(text):
+                    try:
+                        rel_display = p.relative_to(ctx.workspace_root)
+                    except ValueError:
+                        rel_display = p
+                    defects.append(
+                        Defect(
+                            defect_id="preflight.unresolved_placeholder",
+                            message=f"Unresolved template placeholder detected in '{rel_display}'.",
+                            stage=stage_id,
+                            severity="CRITICAL",
+                            blocking=True,
+                            repo=repo_name,
                         )
-                except Exception:
-                    pass
+                    )
+            except Exception:
+                pass
 
     # 5. Gitleaks Binary & Version Check (SEC-L2) - Fail Closed
     from stagecheck.core.scanner import SecretScanner

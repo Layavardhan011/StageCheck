@@ -306,6 +306,41 @@ class TestNineStageVerification(unittest.TestCase):
             self.assertFalse(res.is_clear)
             self.assertTrue(any(d.defect_id.startswith("preflight.gitleaks_") and d.blocking for d in res.defects))
 
+    def test_stage1_preflight_unresolved_placeholder_task_scoped(self):
+        """Verify preflight placeholder check scopes strictly to task changes and ignores pre-existing files."""
+        self._setup_valid_prompt_and_scope()
+
+        # 1. Commit pre-existing upstream file with template placeholder (e.g., legacy docker script)
+        legacy_file = self.repo_dir / "legacy_clean.sh"
+        legacy_file.write_text("#!/bin/bash\necho {{UPSTREAM_PLACEHOLDER}}\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo_dir), "add", "legacy_clean.sh"], check=True)
+        subprocess.run(["git", "-C", str(self.repo_dir), "commit", "-m", "upstream commit"], check=True)
+
+        rev_res = subprocess.run(["git", "-C", str(self.repo_dir), "rev-parse", "HEAD"], check=True, capture_output=True, text=True)
+        base_commit = rev_res.stdout.strip()
+
+        # 2. Preflight with base_commit set should NOT flag legacy_clean.sh
+        ctx = AuditContext(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            touched_repos=["app"],
+            all_registered_repos=["app"],
+            base_commits={"app": base_commit},
+            target_commits={"app": "HEAD"},
+        )
+        res = run_stage1_preflight(ctx)
+        self.assertFalse(any(d.defect_id == "preflight.unresolved_placeholder" for d in res.defects))
+
+        # 3. Introduce an uncommitted task file with TODO_IMPLEMENT
+        task_file = self.repo_dir / "new_feature.py"
+        task_file.write_text("def solve():\n    TODO_IMPLEMENT\n", encoding="utf-8")
+
+        res_task = run_stage1_preflight(ctx)
+        placeholder_defects = [d for d in res_task.defects if d.defect_id == "preflight.unresolved_placeholder"]
+        self.assertEqual(len(placeholder_defects), 1)
+        self.assertIn("new_feature.py", placeholder_defects[0].message)
+
     def test_stage6_secrets_strict_and_report_only_modes(self):
         """Test Stage 6 enforces fail-closed behavior when scanner is missing."""
         ctx = AuditContext(
