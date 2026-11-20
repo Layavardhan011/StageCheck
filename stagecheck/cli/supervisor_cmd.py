@@ -349,8 +349,6 @@ def run_supervisor_cmd(
                         if not output_json:
                             print(format_transition_line(res.current_phase, int(phase_delay), enabled=use_color))
                         time.sleep(phase_delay)
-                        if not output_json:
-                            print(format_completed_line("Completed", format_duration(phase_delay), enabled=use_color))
                         action_start_time = time.time()
                         current_time = action_start_time
 

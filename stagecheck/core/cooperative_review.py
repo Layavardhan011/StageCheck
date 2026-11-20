@@ -303,12 +303,20 @@ def compute_uncommitted_diff_hashes(
             sha256_digest("\n".join(untracked_lines).encode("utf-8")) if untracked_lines else "0" * 64
         )
 
-        res = run_safe_git_bytes(
-            repo_path,
-            ["diff", "--binary", "--end-of-options", base_commit, "--"],
-            check=True,
-        )
-        diff_bytes = res.stdout
+        # Register untracked non-ignored files with intent-to-add (-N) so git diff includes them in approved_diff_hashes,
+        # but reset the index immediately afterwards to preserve index context digest for rubric verification.
+        if untracked_files:
+            run_safe_git(repo_path, ["add", "-N", "--"] + untracked_files, check=False)
+        try:
+            res = run_safe_git_bytes(
+                repo_path,
+                ["diff", "--binary", "--end-of-options", base_commit, "--"],
+                check=True,
+            )
+            diff_bytes = res.stdout
+        finally:
+            if untracked_files:
+                run_safe_git(repo_path, ["reset", "HEAD", "--"] + untracked_files, check=False)
 
         total_diff_bytes += len(diff_bytes)
         if total_diff_bytes > MAX_DIFF_BYTES:
