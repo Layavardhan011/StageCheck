@@ -76,6 +76,17 @@ def _detect_timeout_masking(workspace_root: Path, task_id: str, attempt: int) ->
     if not prod_repos_file.is_file():
         return False
 
+    baseline_file = attempt_dir / "repo_baseline.json"
+    repo_baseline_data: Dict[str, Any] = {}
+    if baseline_file.is_file():
+        try:
+            with open(baseline_file, "r", encoding="utf-8") as bf:
+                loaded_bl = json.load(bf)
+                if isinstance(loaded_bl, dict):
+                    repo_baseline_data = loaded_bl
+        except Exception:
+            repo_baseline_data = {}
+
     try:
         with open(prod_repos_file, "r", encoding="utf-8") as f:
             repo_meta = json.load(f).get("repositories", {})
@@ -87,7 +98,11 @@ def _detect_timeout_masking(workspace_root: Path, task_id: str, attempt: int) ->
         if not (repo_dir / ".git").is_dir():
             continue
 
-        base_head = meta.get("baseline_head")
+        base_head = None
+        if repo_name in repo_baseline_data and isinstance(repo_baseline_data[repo_name], dict):
+            base_head = repo_baseline_data[repo_name].get("head_commit")
+        if not base_head:
+            base_head = meta.get("baseline_head")
         if not base_head:
             continue
 
@@ -426,6 +441,23 @@ def reset_circuit_breaker(
                 "from_attempt": current_attempt,
                 "to_attempt": next_attempt,
             })
+
+            # Pre-capture repository baseline snapshot for the new attempt
+            prod_repos_file = controls_dir / "PRODUCT_REPOSITORIES.json"
+            if prod_repos_file.is_file():
+                try:
+                    from stagecheck.core.branch_governance import capture_multi_repo_task_baseline
+                    prod_data = json.loads(prod_repos_file.read_text(encoding="utf-8"))
+                    registered = list((prod_data.get("repositories") or {}).keys())
+                    if registered:
+                        capture_multi_repo_task_baseline(
+                            workspace_root=workspace_root,
+                            task_id=task_id,
+                            attempt=next_attempt,
+                            repo_names=registered,
+                        )
+                except Exception:
+                    pass
 
             save_active_state(workspace_root, active_state)
 

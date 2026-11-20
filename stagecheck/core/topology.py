@@ -31,7 +31,9 @@ from stagecheck.core.git import (
     discover_repository,
     run_safe_git,
 )
+from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.paths import safe_resolve
+from stagecheck.core.utils import load_json_file
 
 
 TASK_ID_REGEX = re.compile(r"^[a-zA-Z0-9._-]+$")
@@ -196,7 +198,19 @@ class TopologyWorktreeManager:
                     require_clean=self.enforce_clean_baseline,
                 )
 
-                base_commit = meta.get("baseline_head") or baseline.head_commit
+                # Priority: attempt repo_baseline.json > meta.baseline_head > live baseline.head_commit
+                attempt_dir = resolve_task_attempt_dir(self.workspace_root, self.task_id, self.attempt_index)
+                baseline_file = attempt_dir / "repo_baseline.json"
+                task_baseline_head = None
+                if baseline_file.is_file():
+                    try:
+                        bl_data = load_json_file(baseline_file)
+                        if isinstance(bl_data, dict) and isinstance(bl_data.get(repo_name), dict):
+                            task_baseline_head = bl_data[repo_name].get("head_commit")
+                    except Exception:
+                        task_baseline_head = None
+
+                base_commit = task_baseline_head or meta.get("baseline_head") or baseline.head_commit
                 if not base_commit:
                     raise WorktreeSetupError(
                         f"No valid baseline commit found for repository '{repo_name}'"
