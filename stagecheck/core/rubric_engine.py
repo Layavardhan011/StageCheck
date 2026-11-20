@@ -2223,10 +2223,24 @@ def _collect_rubric_context(
                         if fpath.is_file() and not fpath.is_symlink() and fpath.stat().st_size <= 1024 * 1024:
                             if _SECRET_RE.search(fpath.read_text(encoding="utf-8", errors="ignore")):
                                 secrets_found.append(ws_rel)
-                # Inspect committed task branch diff scope vs baseline_head
-                base_sha = registered_repos.get(r_dir.name, {}).get("baseline_head")
+                # Priority: attempt repo_baseline.json > PRODUCT_REPOSITORIES.json baseline_head
+                base_sha = None
+                baseline_file = attempt_dir / "repo_baseline.json"
+                if baseline_file.is_file():
+                    try:
+                        bl_data, _ = _safe_load_json(baseline_file)
+                        if isinstance(bl_data, dict) and isinstance(bl_data.get(r_dir.name), dict):
+                            base_sha = bl_data[r_dir.name].get("head_commit")
+                    except Exception:
+                        base_sha = None
+                if not base_sha:
+                    base_sha = registered_repos.get(r_dir.name, {}).get("baseline_head")
+
                 cur_sha = repo_heads.get(r_dir.name)
-                if base_sha and cur_sha and base_sha.lower() != cur_sha.lower():
+                # Skip diff inspection for untouched repositories if touched_repo_names is specified
+                if touched_repo_names is not None and r_dir.name not in touched_repo_names:
+                    pass
+                elif base_sha and cur_sha and base_sha.lower() != cur_sha.lower():
                     d_names = run_safe_git(r_dir, ["diff", "--name-only", "-z", "--end-of-options", f"{base_sha}..{cur_sha}", "--"])
                     if d_names.returncode == 0:
                         for changed_rel in split_git_nul_paths(d_names.stdout):
