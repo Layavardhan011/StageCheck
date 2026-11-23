@@ -721,8 +721,8 @@ class SupervisorEngine:
 
             if post_phase != "PHASE_3_AUDIT" or verdict_file.is_file():
                 return self.step(
-                    task_id=audit_task,
-                    attempt=audit_att,
+                    task_id=post_state.get("task_id", audit_task),
+                    attempt=int(post_state.get("attempt_index", audit_att)),
                     now=now,
                 )
 

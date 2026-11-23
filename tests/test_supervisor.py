@@ -838,6 +838,68 @@ class TestSupervisorCLI(unittest.TestCase):
             self.assertEqual(res.current_phase, "GATE_4_SEALING")
             self.assertEqual(res.action_taken, "GATE3_ADVANCED")
 
+    def test_supervisor_step_handles_audit_failure_and_transitions_to_attempt_2(self) -> None:
+        """When audit fails on attempt 1, supervisor transitions to attempt 2 and re-steps with attempt=2."""
+        from unittest.mock import patch
+        from stagecheck.cli.start_cmd import run_start
+        from stagecheck.core.agents import resolve_task_attempt_dir
+        from stagecheck.core.gate_engine import handle_audit_verdict
+        from stagecheck.core.permissions import controlled_write_transaction, freeze_phase_directory
+        from stagecheck.core.supervisor import SupervisorEngine
+
+        self.assertEqual(run_start(workspace=self.ws, task="task-audit-fail"), 0)
+        with controlled_write_transaction(self.ws / "controls"):
+            st = load_active_state(self.ws)
+            st["phase"] = "PHASE_3_AUDIT"
+            st["turn"] = "STAGECHECK_AUDITING"
+            st["cleared_gates"] = {
+                "GATE_1": "1" * 64,
+                "GATE_2A": "2" * 64,
+                "GATE_2B": "3" * 64,
+            }
+            save_active_state(self.ws, st)
+
+        engine = SupervisorEngine(self.ws)
+        attempt1_dir = resolve_task_attempt_dir(self.ws, "task-audit-fail", 1)
+        p3_dir = attempt1_dir / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+
+        def fake_failing_audit(workspace_root, task_id, attempt):
+            verdict_payload = {
+                "task_id": task_id,
+                "attempt": attempt,
+                "iteration": attempt,
+                "status": "FAILED",
+                "result": "BLOCKED",
+                "counts": {"blocking": 1, "non_blocking": 0},
+                "blocking_defects_count": 1,
+                "defects": [
+                    {
+                        "defect_id": "test_defect",
+                        "stage": "stage4_secrets",
+                        "severity": "CRITICAL",
+                        "blocking": True,
+                        "message": "Critical defect found",
+                    }
+                ],
+            }
+            (p3_dir / "verdict.json").write_text(json.dumps(verdict_payload, indent=2), encoding="utf-8")
+            handle_audit_verdict(workspace_root, task_id, attempt, verdict_payload)
+            freeze_phase_directory(attempt1_dir / "Phase-1")
+            return False, verdict_payload
+
+        with patch("stagecheck.core.orchestrator.run_audit", side_effect=fake_failing_audit):
+            res = engine.step(task_id="task-audit-fail", attempt=1)
+            self.assertEqual(res.attempt, 2)
+            self.assertEqual(res.current_phase, "PHASE_1_PLANNING")
+            self.assertEqual(res.status, "WAITING")
+            self.assertEqual(res.action_taken, "WAITING_FOR_BLUEPRINT")
+
+        st_after = load_active_state(self.ws)
+        self.assertEqual(st_after["attempt_index"], 2)
+        self.assertEqual(st_after["phase"], "PHASE_1_PLANNING")
+        self.assertEqual(st_after["turn"], "AGENT1_PLANNING")
+
 
 
 if __name__ == "__main__":
