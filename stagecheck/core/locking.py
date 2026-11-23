@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import os
+import stat
 from pathlib import Path
 from typing import Generator, Optional
 
@@ -37,59 +38,111 @@ def acquire_bootstrap_lock(workspace_root: Path) -> Generator[int, None, None]:
     root = Path(workspace_root).resolve()
     lock_file = root / ".stagecheck-init.lock"
 
-    fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o600)
-    try:
+    open_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    for _ in range(16):
+        if lock_file.is_symlink():
+            raise LockError(f"Refusing unsafe symlink bootstrap lock '{lock_file}'.")
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (BlockingIOError, OSError) as err:
-            raise LockCollisionError(
-                f"Workspace initialization is already running (locked by .stagecheck-init.lock)."
-            ) from err
+            fd = os.open(str(lock_file), open_flags, 0o600)
+        except OSError as err:
+            raise LockError(f"Refusing unsafe lock path '{lock_file}': {err}") from err
+        locked_current = False
+        try:
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise LockError(f"Bootstrap lock path '{lock_file}' is not a regular file.")
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (BlockingIOError, OSError) as err:
+                raise LockCollisionError(
+                    "Workspace initialization is already running (locked by .stagecheck-init.lock)."
+                ) from err
 
+            try:
+                fd_stat = os.fstat(fd)
+                path_stat = os.lstat(lock_file)
+            except FileNotFoundError:
+                path_stat = None
+
+            if (
+                path_stat is not None
+                and stat.S_ISREG(path_stat.st_mode)
+                and (fd_stat.st_dev, fd_stat.st_ino) == (path_stat.st_dev, path_stat.st_ino)
+            ):
+                locked_current = True
+                break
+        finally:
+            if not locked_current:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+    else:
+        raise LockCollisionError("Exceeded retry limit acquiring bootstrap lock.")
+
+    try:
         yield fd
 
     finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        os.close(fd)
-        # Attempt to unlink bootstrap lock file on completion
+        # Unlink only if lock_file still refers to the inode we locked, before unlocking/closing
         with contextlib.suppress(OSError):
-            lock_file.unlink(missing_ok=True)
+            fd_stat = os.fstat(fd)
+            path_stat = os.lstat(lock_file)
+            if (fd_stat.st_dev, fd_stat.st_ino) == (path_stat.st_dev, path_stat.st_ino):
+                lock_file.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 @contextlib.contextmanager
-def acquire_runtime_lock(controls_dir: Path) -> Generator[int, None, None]:
-    """Acquire the shared exclusive non-blocking runtime lock on controls/.stagecheck.lock.
+def acquire_runtime_lock(target_dir: Path) -> Generator[int, None, None]:
+    """Acquire the shared exclusive non-blocking runtime lock on .stagecheck.lock.
+
+    Standardizes on .stagecheck.lock at workspace root (mode 0600) to decouple from
+    read-only controls/ (mode 0555) and eliminate TOCTOU races (SEC-05 / SR-06).
 
     Args:
-        controls_dir: Path to the controls/ directory.
+        target_dir: Path to workspace_root or controls/ directory.
 
     Yields:
         Open file descriptor for the runtime lock.
 
     Raises:
-        LockCollisionError: If workspace is locked by an active StageCheck audit or operation.
+        LockCollisionError: If workspace runtime is locked by an active StageCheck operation.
     """
-    lock_file = Path(controls_dir).resolve() / ".stagecheck.lock"
-    if not lock_file.exists():
-        # Pre-create lock file if missing
-        fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o600)
-    else:
-        fd = os.open(str(lock_file), os.O_RDWR)
+    resolved = Path(target_dir).resolve()
+    ws_root = resolved.parent if resolved.name == "controls" else resolved
+    lock_file = ws_root / ".stagecheck.lock"
 
+    # Atomic creation and descriptor acquisition with mode 0600 (reject symlinks & non-regular files)
+    if lock_file.is_symlink():
+        raise LockError(f"Refusing unsafe symlink runtime lock '{lock_file}'.")
+    open_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     try:
+        fd = os.open(str(lock_file), open_flags, 0o600)
+    except OSError as err:
+        raise LockError(f"Refusing unsafe lock path '{lock_file}': {err}") from err
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise LockError(f"Runtime lock path '{lock_file}' is not a regular file.")
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (BlockingIOError, OSError) as err:
             raise LockCollisionError(
-                "Workspace is locked by another active StageCheck command (.stagecheck.lock busy)."
+                "Workspace runtime is locked by an active StageCheck operation (.stagecheck.lock held)."
             ) from err
+
+        try:
+            os.utime(fd, None)
+        except OSError:
+            pass
 
         yield fd
 
     finally:
+        try:
+            os.utime(fd, None)
+        except OSError:
+            pass
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)
         except OSError:

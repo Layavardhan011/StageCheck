@@ -13,7 +13,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from stagecheck.core.paths import find_workspace_root
+from stagecheck.core.paths import StageCheckPathError, find_workspace_root, safe_resolve, sha256_file_nofollow
+from stagecheck.core.sealing import verify_attempt_merkle_seal
 from stagecheck.core.task_plan import (
     CircularDependencyError,
     TaskPlanError,
@@ -49,15 +50,20 @@ def run_plan(
         print(f"ERROR: [plan.invalid_json] Failed to parse roadmap JSON: {err}", file=sys.stderr)
         return 1
 
-    # Load declared product repositories
+    # Load declared product repositories (fail closed if registry missing or malformed)
     product_repos_file = workspace_root / "controls" / "PRODUCT_REPOSITORIES.json"
-    registered_repos = None
-    if product_repos_file.is_file():
-        try:
-            repos_data = load_json_file(product_repos_file)
-            registered_repos = list(repos_data.get("repositories", {}).keys())
-        except Exception:
-            pass
+    if not product_repos_file.is_file():
+        print(f"ERROR: [plan.missing_repos] Registry not found at '{product_repos_file}'.", file=sys.stderr)
+        return 1
+    try:
+        repos_data = load_json_file(product_repos_file)
+    except Exception as err:
+        print(f"ERROR: [plan.invalid_repos] Failed to read repository registry: {err}", file=sys.stderr)
+        return 1
+    if not isinstance(repos_data, dict) or not isinstance(repos_data.get("repositories"), dict):
+        print("ERROR: [plan.invalid_repos] Malformed PRODUCT_REPOSITORIES.json.", file=sys.stderr)
+        return 1
+    registered_repos = list(repos_data["repositories"].keys())
 
     if action == "validate":
         try:
@@ -78,15 +84,95 @@ def run_plan(
             return 1
 
     elif action == "next":
-        # Load completed tasks from ACTIVE_STATE.json if present
-        completed_tasks = set()
+        try:
+            validate_task_plan(plan_data, registered_repos=registered_repos)
+        except CircularDependencyError as err:
+            print(f"ERROR: [plan.circular_dependency] {err}", file=sys.stderr)
+            return 1
+        except UnknownDependencyError as err:
+            print(f"ERROR: [plan.unknown_dependency] {err}", file=sys.stderr)
+            return 1
+        except UnauthorizedRepositoryError as err:
+            print(f"ERROR: [plan.unauthorized_repo] {err}", file=sys.stderr)
+            return 1
+        except Exception as err:
+            print(f"ERROR: [plan.validation_error] {err}", file=sys.stderr)
+            return 1
+
+        # Derive completed tasks from roadmap status, sealed evidence, and ACTIVE_STATE.json
+        completed_tasks = {
+            t["task_id"]
+            for t in plan_data.get("tasks", [])
+            if isinstance(t, dict) and t.get("status") == "completed" and t.get("task_id")
+        }
         active_state_file = workspace_root / "controls" / "ACTIVE_STATE.json"
-        if active_state_file.is_file():
+        if active_state_file.is_file() and not active_state_file.is_symlink():
             try:
                 state_data = load_json_file(active_state_file)
-                completed_tasks = set(state_data.get("completed_tasks", []))
+                completed_tasks.update(state_data.get("completed_tasks", []))
+                if (
+                    state_data.get("phase") == "SEALED_PASSED"
+                    or state_data.get("status") == "SEALED_PASSED"
+                ) and state_data.get("task_id"):
+                    completed_tasks.add(str(state_data["task_id"]))
             except Exception:
                 pass
+
+        manifest_sealed_tasks = {}
+        manifest_path = workspace_root / "evidence" / "EVIDENCE_MANIFEST.json"
+        if manifest_path.is_file() and not manifest_path.is_symlink():
+            try:
+                manifest_data = load_json_file(manifest_path)
+                if isinstance(manifest_data, dict) and isinstance(manifest_data.get("sealed_tasks"), dict):
+                    manifest_sealed_tasks = manifest_data["sealed_tasks"]
+            except Exception:
+                manifest_sealed_tasks = {}
+
+        tasks_evidence_dir = workspace_root / "evidence" / "tasks"
+        if tasks_evidence_dir.is_dir() and not tasks_evidence_dir.is_symlink():
+            for seal_file in sorted(tasks_evidence_dir.glob("*/attempt_*/seal.json")):
+                try:
+                    safe_seal = safe_resolve(seal_file, workspace_root, allow_symlinks=False)
+                    if safe_seal.is_symlink() or not safe_seal.is_file():
+                        continue
+                    seal_data = load_json_file(safe_seal)
+                    if not isinstance(seal_data, dict):
+                        continue
+                    expected_task = safe_seal.parent.parent.name
+                    tid = seal_data.get("task_id")
+                    if tid != expected_task:
+                        continue
+                    attempt_name = safe_seal.parent.name
+                    if not attempt_name.startswith("attempt_") or not attempt_name[8:].isdigit():
+                        continue
+                    att_idx = int(attempt_name[8:])
+                    recorded_att = seal_data.get("attempt_index", seal_data.get("attempt"))
+                    if isinstance(recorded_att, bool) or recorded_att != att_idx:
+                        continue
+
+                    indexed_entry = (
+                        manifest_sealed_tasks.get(str(tid), {}).get(attempt_name)
+                        if isinstance(manifest_sealed_tasks.get(str(tid)), dict)
+                        else None
+                    )
+                    if not isinstance(indexed_entry, dict):
+                        continue
+                    if indexed_entry.get("seal_sha256") != sha256_file_nofollow(safe_seal):
+                        continue
+
+                    ok_seal, _ = verify_attempt_merkle_seal(safe_seal.parent, workspace_root)
+                    if not ok_seal:
+                        continue
+
+                    verdict = seal_data.get("verdict")
+                    verdict_passed = (
+                        isinstance(verdict, dict)
+                        and (verdict.get("status") in ("PASSED", "CLEAR") or verdict.get("result") in ("PASSED", "CLEAR"))
+                    )
+                    if verdict_passed or seal_data.get("outcome") == "PASSED":
+                        completed_tasks.add(str(tid))
+                except (StageCheckPathError, Exception):
+                    pass
 
         next_task = get_next_eligible_task(plan_data, completed_tasks=completed_tasks)
         if not next_task:

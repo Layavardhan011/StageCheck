@@ -16,6 +16,7 @@ from stagecheck.core.cooperative_review import (
     assert_commit_authorization,
     compute_uncommitted_diff_hashes,
     record_pre_commit_review,
+    resolve_governed_repo_path,
     submit_pre_commit_status,
     verify_committed_diff_fidelity,
 )
@@ -101,7 +102,7 @@ class TestCooperativeReview(unittest.TestCase):
         self.assertTrue(response_file.is_file())
 
         # Verify cumulative issue history updated
-        history_file = self.workspace / "evidence" / "tasks" / self.task_id / f"{self.task_id.upper()}_ISSUE_HISTORY.md"
+        history_file = self.workspace / "evidence" / "tasks" / self.task_id / f"TASK_{self.task_id}_ISSUE_HISTORY.md"
         self.assertTrue(history_file.is_file())
         history_text = history_file.read_text(encoding="utf-8")
         self.assertIn("ARCH-01", history_text)
@@ -173,6 +174,12 @@ class TestCooperativeReview(unittest.TestCase):
 
     def test_cli_review_precommit_and_approve_subcommands(self) -> None:
         """Verify CLI 'review-precommit' and 'approve-review' subcommands."""
+        from stagecheck.core.gate_engine import advance_gate_atomic
+        from stagecheck.core.git import discover_repository
+        from stagecheck.core.scaffold import scaffold_controls_atomic
+        from stagecheck.core.start_manifest import generate_start_manifest
+        from stagecheck.core.state import load_active_state, save_active_state
+
         # Step 1: Submit pre-commit status
         submit_pre_commit_status(
             workspace_root=self.workspace,
@@ -182,6 +189,170 @@ class TestCooperativeReview(unittest.TestCase):
             touched_repositories=["backend"],
             base_commits={"backend": self.base_commit},
         )
+
+        # Calling review-precommit before Gate 1 is cleared must fail fail-closed
+        ret_rev_premature = main([
+            "review-precommit",
+            "--task", self.task_id,
+            "--attempt", str(self.attempt),
+            "--workspace", str(self.workspace),
+        ])
+        self.assertEqual(ret_rev_premature, 1)
+
+        # Scaffolding controls and satisfying Gate 1
+        baselines = {
+            "backend": discover_repository(
+                self.backend_dir,
+                name="backend",
+                workspace_root=self.workspace,
+            )
+        }
+        scaffold_controls_atomic(self.workspace, baselines)
+        generate_start_manifest(self.workspace)
+
+        from stagecheck.core.agents_md import write_agents_contract
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.rubric_engine import load_270_rule_catalog
+        from stagecheck.core.utils import canonical_json_dumps, sha256_file
+
+        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+
+        p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").write_text("# Prompt\nImplement validated order logic.\n", encoding="utf-8")
+        (p1_dir / "declared_scope.json").write_text(
+            json.dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "allowed_paths": ["repos/backend/order.py", "repos/backend/test_order.py"],
+            }),
+            encoding="utf-8",
+        )
+        freeze_prompt_and_scope(self.workspace, self.task_id, self.attempt)
+
+        # Compliant tests, evals, waivers, reviews, and phase evidence for strict 270-rule check-rubric
+        (self.backend_dir / "test_order.py").write_text(
+            "import unittest\n\n\n"
+            "def validate_qty(q):\n"
+            "    if not isinstance(q, int):\n"
+            "        raise TypeError('int expected')\n"
+            "    if q <= 0:\n"
+            "        raise ValueError('must be positive')\n"
+            "    return q\n\n\n"
+            "class TestOrder(unittest.TestCase):\n"
+            "    def test_positive(self):\n"
+            "        self.assertEqual(validate_qty(3), 3)\n\n"
+            "    def test_negative_boundary(self):\n"
+            "        with self.assertRaises(ValueError):\n"
+            "            validate_qty(0)\n\n"
+            "    def test_malformed_input(self):\n"
+            "        with self.assertRaises(TypeError):\n"
+            "            validate_qty(None)\n\n"
+            "    def test_duplicate_replay_idempotent(self):\n"
+            "        self.assertEqual(validate_qty(2), validate_qty(2))\n",
+            encoding="utf-8",
+        )
+        (self.workspace / "evals").mkdir(parents=True, exist_ok=True)
+        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from stagecheck.core.rubric_engine import build_agent_reviews_artifact
+
+        waiver_evidence = self.workspace / "evidence" / "waiver_coop.txt"
+        waiver_evidence.parent.mkdir(parents=True, exist_ok=True)
+        waiver_evidence.write_text("Cooperative pre-commit waiver support.\n", encoding="utf-8")
+
+        catalog = load_270_rule_catalog()
+        waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        w_entry = build_waiver_entry(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            defect_id=waiver_ids[0],
+            rationale="Authorized for cooperative pre-commit CLI test",
+            authorized_by="owner@stagecheck.local",
+            attempt=self.attempt,
+            evidence_path="evidence/waiver_coop.txt",
+            rule_id=waiver_ids[0],
+            waived_rules=waiver_ids,
+        )
+        disp_doc = {
+            "schema_version": "2.0",
+            "dispositions": [w_entry],
+        }
+        with controlled_write_transaction(self.workspace / "controls"):
+            (self.workspace / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps(disp_doc), encoding="utf-8"
+            )
+        record_waiver_in_replay_ledger(self.workspace, w_entry)
+        write_agents_contract(self.workspace)
+        if not (self.workspace / "evidence" / "issue_history.json").is_file():
+            (self.workspace / "evidence" / "issue_history.json").write_text(
+                canonical_json_dumps({"schema_version": "1.0", "issues": []}), encoding="utf-8"
+            )
+        p2a_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
+        agent_reviews = {
+            r.rule_id: {
+                "status": "PASS",
+                "rationale": f"Verified semantic criterion for {r.title}.",
+                "evidence_path": "Phase-2A/agent_reviews.json",
+            }
+            for r in catalog
+            if r.category == "AGENT_ASSISTED"
+        }
+        reviews_artifact = build_agent_reviews_artifact(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            reviews=agent_reviews,
+            reviewer="agent1",
+            reviewer_role="prompt_and_audit",
+        )
+        (p2a_dir / "agent_reviews.json").write_text(
+            canonical_json_dumps(reviews_artifact),
+            encoding="utf-8",
+        )
+        p2b_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2B"
+        p2b_dir.mkdir(parents=True, exist_ok=True)
+        report_file = p2b_dir / "report.md"
+        report_file.write_text("# Delivery Report\nImplemented order service.\n", encoding="utf-8")
+        (p2b_dir / "claims.json").write_text(
+            canonical_json_dumps({
+                "task_id": self.task_id,
+                "iteration": 1,
+                "contract_sha256": sha256_file(self.workspace / "AGENTS.md"),
+                "record": "Phase-2B/report.md",
+                "record_sha256": sha256_file(report_file),
+                "claims": [],
+            }),
+            encoding="utf-8",
+        )
+        p3_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        (p3_dir / "test_execution.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "status": "PASS",
+                "repositories": {"backend": {"status": "PASS", "exit_code": 0}},
+            }),
+            encoding="utf-8",
+        )
+        (p3_dir / "scanner_report.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "status": "CLEAN", "findings": []}),
+            encoding="utf-8",
+        )
+        (p3_dir / "verdict.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "result": "CLEAR", "counts": {"blocking": 0}}),
+            encoding="utf-8",
+        )
+
+        state = load_active_state(self.workspace)
+        state["task_id"] = self.task_id
+        state["attempt_index"] = self.attempt
+        state["phase"] = "PHASE_1_PLANNING"
+        save_active_state(self.workspace, state)
+
+        # Advance Gate 1 to transition to PHASE_2A_CODING
+        advance_gate_atomic(self.workspace, "Gate-1", task_id=self.task_id, attempt=self.attempt)
 
         # Step 2: Run review-precommit CLI
         ret_rev = main([
@@ -204,6 +375,297 @@ class TestCooperativeReview(unittest.TestCase):
         # Assert authorization now passes
         approved = assert_commit_authorization(self.workspace, self.task_id, self.attempt)
         self.assertEqual(approved["status"], "APPROVED")
+
+    def test_untracked_limits_and_index_lock_enforcement(self) -> None:
+        """Verify untracked file ceilings (20 MiB, 500 files) and git index lock (FR-09 / ARCH-03)."""
+        from stagecheck.core.cooperative_review import (
+            GitIndexLockedError,
+            UntrackedBytesExceededError,
+            UntrackedCountExceededError,
+            inspect_untracked_files,
+        )
+
+        # 1. Clean repo inspection
+        untracked, count, total_bytes = inspect_untracked_files(self.backend_dir)
+        self.assertEqual(count, 0)
+        self.assertEqual(total_bytes, 0)
+
+        # 2. Test Git Index Lock
+        lock_file = self.backend_dir / ".git" / "index.lock"
+        lock_file.write_text("lock", encoding="utf-8")
+        try:
+            with self.assertRaises(GitIndexLockedError):
+                inspect_untracked_files(self.backend_dir)
+        finally:
+            if lock_file.exists():
+                lock_file.unlink()
+
+        # 3. Test untracked count ceiling (> 500 files)
+        scratch_dir = self.backend_dir / "untracked_bulk"
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            for i in range(505):
+                (scratch_dir / f"file_{i}.txt").write_text("x", encoding="utf-8")
+
+            with self.assertRaises(UntrackedCountExceededError):
+                inspect_untracked_files(self.backend_dir)
+        finally:
+            import shutil
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+
+    def test_scope_containment_violation_returns_127(self) -> None:
+        """Verify modifying files outside declared scope causes review-precommit to exit with code 127."""
+        from stagecheck.core.gate_engine import advance_gate_atomic
+        from stagecheck.core.git import discover_repository
+        from stagecheck.core.scaffold import scaffold_controls_atomic
+        from stagecheck.core.start_manifest import generate_start_manifest
+        from stagecheck.core.state import load_active_state, save_active_state
+
+        baselines = {
+            "backend": discover_repository(self.backend_dir, name="backend", workspace_root=self.workspace)
+        }
+        scaffold_controls_atomic(self.workspace, baselines)
+        generate_start_manifest(self.workspace)
+
+        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+        p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").write_text("# Prompt\nImplement validated order logic.\n", encoding="utf-8")
+        (p1_dir / "declared_scope.json").write_text(
+            json.dumps({"schema_version": "2.0", "task_id": self.task_id, "allowed_paths": ["repos/backend/order.py"]}),
+            encoding="utf-8",
+        )
+        freeze_prompt_and_scope(self.workspace, self.task_id, self.attempt)
+
+        state = load_active_state(self.workspace)
+        state["task_id"] = self.task_id
+        state["attempt_index"] = self.attempt
+        state["phase"] = "PHASE_1_PLANNING"
+        save_active_state(self.workspace, state)
+
+        advance_gate_atomic(self.workspace, "Gate-1", task_id=self.task_id, attempt=self.attempt)
+
+        # Agent 2 introduces an unauthorized file outside declared scope
+        unauth = self.backend_dir / "unauthorized_exploit.py"
+        unauth.write_text("# exploit\n", encoding="utf-8")
+
+        submit_pre_commit_status(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            cycle=1,
+            touched_repositories=["backend"],
+            base_commits={"backend": self.base_commit},
+        )
+
+        ret_rev = main([
+            "review-precommit",
+            "--task", self.task_id,
+            "--attempt", str(self.attempt),
+            "--workspace", str(self.workspace),
+        ])
+        self.assertEqual(ret_rev, 127, "Scope escape must exit with code 127")
+
+    def test_repair_cycles_do_not_consume_attempt_budget(self) -> None:
+        """Verify multiple repair cycles in Phase 2A increment cycle without consuming attempt budget (FR-06)."""
+        from stagecheck.core.state import load_active_state, save_active_state
+
+        state = load_active_state(self.workspace) if (self.workspace / "controls" / "ACTIVE_STATE.json").is_file() else {}
+        initial_attempt = state.get("attempt_index", 1)
+
+        # Cycle 1: Revision required
+        record_pre_commit_review(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            cycle=1,
+            status="REVISION_REQUIRED",
+            summary="Defects found in cycle 1",
+            base_commits={"backend": self.base_commit},
+            new_issues=[{"defect_id": "BUG-01", "description": "Fix bug 1"}],
+        )
+
+        # Cycle 2: Revision required
+        record_pre_commit_review(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            cycle=2,
+            status="REVISION_REQUIRED",
+            summary="Defects found in cycle 2",
+            base_commits={"backend": self.base_commit},
+            new_issues=[{"defect_id": "BUG-02", "description": "Fix bug 2"}],
+        )
+
+        # Cycle 3: Approved
+        record_pre_commit_review(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            cycle=3,
+            status="APPROVED",
+            summary="Approved in cycle 3",
+            base_commits={"backend": self.base_commit},
+        )
+
+        # Verify attempt index was NOT incremented
+        if (self.workspace / "controls" / "ACTIVE_STATE.json").is_file():
+            final_state = load_active_state(self.workspace)
+            self.assertEqual(final_state.get("attempt_index", 1), initial_attempt)
+
+    def test_readonly_empty_touched_repositories_supported(self) -> None:
+        """Verify read-only/evidence-only tasks with touched_repositories=[] validate and fail if dirty."""
+        from stagecheck.core.agents import resolve_task_attempt_dir
+        from stagecheck.core.cooperative_review import verify_precommit_scope
+        from stagecheck.core.utils import validate_schema
+        from stagecheck.schemas import get_schema_path
+
+        p1_dir = resolve_task_attempt_dir(self.workspace, self.task_id, self.attempt) / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "declared_scope.json").write_text(
+            json.dumps({"task_id": self.task_id, "allowed_paths": ["evidence/**"]}),
+            encoding="utf-8",
+        )
+        (self.workspace / "controls").mkdir(parents=True, exist_ok=True)
+        (self.workspace / "controls" / "PRODUCT_REPOSITORIES.json").write_text(
+            json.dumps({"repositories": {"backend": {"baseline_head": self.base_commit}}}),
+            encoding="utf-8",
+        )
+
+        schema = json.loads(get_schema_path("pre_commit_status.schema.json").read_text(encoding="utf-8"))
+        status_doc = {
+            "schema_version": "2.0",
+            "task_id": self.task_id,
+            "attempt": self.attempt,
+            "cycle": 1,
+            "status": "AWAITING_REVIEW",
+            "touched_repositories": [],
+            "base_commits": {},
+            "summary": "Read-only evidence task",
+        }
+        validate_schema(status_doc, schema)
+        self.assertEqual(verify_precommit_scope(self.workspace, self.task_id, self.attempt, [], {}), [])
+
+        review_file = record_pre_commit_review(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            cycle=1,
+            status="APPROVED",
+            summary="Approved read-only task",
+            base_commits={},
+        )
+        self.assertEqual(json.loads(review_file.read_text(encoding="utf-8"))["status"], "APPROVED")
+
+        # Dirty repo with touched_repositories=[] must be rejected by verify_precommit_scope
+        (self.backend_dir / "sneaky.py").write_text("x = 1\n", encoding="utf-8")
+        violations = verify_precommit_scope(self.workspace, self.task_id, self.attempt, [], {})
+        self.assertTrue(any("uncommitted modifications" in v for v in violations))
+
+    def test_resolve_governed_repo_path_normalizes_repos_prefix(self) -> None:
+        """Verify resolve_governed_repo_path handles both bare and 'repos/' prefixed names."""
+        bare_path = resolve_governed_repo_path(self.workspace, "backend")
+        prefixed_path = resolve_governed_repo_path(self.workspace, "repos/backend")
+        self.assertEqual(bare_path, prefixed_path)
+        self.assertEqual(bare_path, self.backend_dir)
+
+    def test_record_pre_commit_review_filters_premature_phase2b_defects(self) -> None:
+        """Verify premature Phase-2B/Phase-3 defects in Phase-2A review are filtered to prevent deadlock."""
+        premature_issue = {
+            "defect_id": "TASK01-BASELINE-007",
+            "severity": "BLOCKING",
+            "location": f"evidence/tasks/{self.task_id}/attempt_{self.attempt}/Phase-2B",
+            "description": "Missing Phase-2B/report.md and Phase-2B/claims.json",
+        }
+        # If the only defect is premature Phase-2B, record_pre_commit_review filters it out
+        rev_file = record_pre_commit_review(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            cycle=1,
+            status="APPROVED",
+            summary="Clean code",
+            base_commits={"backend": self.base_commit},
+            new_issues=[premature_issue],
+        )
+        rev_data = json.loads(rev_file.read_text(encoding="utf-8"))
+        self.assertEqual(rev_data["status"], "APPROVED")
+        self.assertEqual(len(rev_data.get("new_issues_found", [])), 0)
+
+    def test_approve_review_binds_architectural_intents_and_blocks_on_new_issues(self) -> None:
+        """Verify run_approve_review captures architectural_intents_approved and blocks on new_issues."""
+        from unittest.mock import patch
+        from stagecheck.cli.review_cmd import run_approve_review
+        from stagecheck.core.gate_engine import advance_gate_atomic
+        from stagecheck.core.git import discover_repository
+        from stagecheck.core.scaffold import scaffold_controls_atomic
+        from stagecheck.core.start_manifest import generate_start_manifest
+        from stagecheck.core.state import load_active_state, save_active_state
+        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+
+        baselines = {
+            "backend": discover_repository(self.backend_dir, name="backend", workspace_root=self.workspace)
+        }
+        scaffold_controls_atomic(self.workspace, baselines)
+        generate_start_manifest(self.workspace)
+
+        p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").write_text("# Prompt\nImplement verified logic.\n", encoding="utf-8")
+        (p1_dir / "declared_scope.json").write_text(
+            json.dumps({"schema_version": "2.0", "task_id": self.task_id, "allowed_paths": ["repos/backend/order.py"]}),
+            encoding="utf-8",
+        )
+        freeze_prompt_and_scope(self.workspace, self.task_id, self.attempt)
+
+        state = load_active_state(self.workspace)
+        state["task_id"] = self.task_id
+        state["attempt_index"] = self.attempt
+        state["phase"] = "PHASE_1_PLANNING"
+        save_active_state(self.workspace, state)
+
+        advance_gate_atomic(self.workspace, "Gate-1", task_id=self.task_id, attempt=self.attempt)
+
+        # Agent 2 submits status
+        submit_pre_commit_status(
+            workspace_root=self.workspace,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            cycle=1,
+            touched_repositories=["backend"],
+            base_commits={"backend": self.base_commit},
+        )
+
+        p2a_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
+
+        # 1. Agent 1 reports an invariant defect -> run_approve_review MUST return 1
+        agent_reviews_payload = {
+            "architectural_intents_approved": [
+                {"pillar": "consensus", "status": "VERIFIED", "notes": "No block header mutations"}
+            ],
+            "new_issues_found": [
+                {"defect_id": "ZK-LEAK-01", "severity": "CRITICAL", "description": "Witness bytes logged"}
+            ],
+            "code_quality_observations": [],
+        }
+        (p2a_dir / "agent_reviews.json").write_text(json.dumps(agent_reviews_payload), encoding="utf-8")
+
+        rc_blocked = run_approve_review(task=self.task_id, attempt=self.attempt, workspace=str(self.workspace))
+        self.assertEqual(rc_blocked, 1)
+
+        # 2. Defect resolved -> run_approve_review MUST return 0 and write architectural_intents_approved
+        agent_reviews_payload["new_issues_found"] = []
+        (p2a_dir / "agent_reviews.json").write_text(json.dumps(agent_reviews_payload), encoding="utf-8")
+
+        with patch("stagecheck.core.rubric_engine.verify_complete_rubric_evaluation", return_value=(True, [], [])):
+            rc_ok = run_approve_review(task=self.task_id, attempt=self.attempt, workspace=str(self.workspace))
+        self.assertEqual(rc_ok, 0)
+
+        rev_file = p2a_dir / "pre_commit_review.json"
+        rev_data = json.loads(rev_file.read_text(encoding="utf-8"))
+        self.assertEqual(rev_data["status"], "APPROVED")
+        self.assertEqual(len(rev_data["architectural_intents_approved"]), 1)
+        self.assertEqual(rev_data["architectural_intents_approved"][0]["pillar"], "consensus")
 
 
 if __name__ == "__main__":

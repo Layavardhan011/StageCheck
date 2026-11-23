@@ -1,0 +1,5 @@
+title = "StageCheck Authoritative Gitleaks Configuration"
+
+[extend]
+useDefault = true
+

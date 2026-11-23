@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stagecheck"
-version = "1.0.0"
+version = "2.0.0"
 description = "Enterprise AI Software Delivery Governance, Dual-Agent Verification & Multi-Repository Audit Harness"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -43,6 +43,7 @@ include = ["stagecheck*"]
 stagecheck = [
     "schemas/assets/*.json",
     "config/defaults/*.json",
+    "config/.gitleaks.toml",
     "agent_instructions/*.md",
 ]
 

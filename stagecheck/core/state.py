@@ -10,8 +10,8 @@ from typing import Any, Dict, Union
 from stagecheck.core.agents_md import write_agents_contract
 from stagecheck.core.evidence import update_evidence_manifest
 from stagecheck.core.permissions import controlled_write_transaction
-from stagecheck.core.utils import canonical_json_dumps, load_json_file
-from stagecheck.schemas.validator import validate_schema
+from stagecheck.core.utils import load_json_file, pretty_json_dumps
+from stagecheck.schemas.validator import validate_active_state
 
 
 def get_active_state_path(workspace_root: Union[str, Path]) -> Path:
@@ -38,15 +38,11 @@ def save_active_state(
     controls_dir = root / "controls"
     state_file = controls_dir / "ACTIVE_STATE.json"
 
-    # Schema validation
-    try:
-        validate_schema(state_data, "active_state.schema.json")
-    except Exception:
-        # Allow flexible in-progress state transitions while maintaining valid json
-        pass
+    # Strict fail-closed schema validation (SEC-04 / SR-05)
+    validate_active_state(state_data)
 
     with controlled_write_transaction(controls_dir):
-        state_file.write_text(canonical_json_dumps(state_data) + "\n", encoding="utf-8")
+        state_file.write_text(pretty_json_dumps(state_data), encoding="utf-8")
         state_file.chmod(0o444)
 
         if update_contract:

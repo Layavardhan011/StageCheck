@@ -14,14 +14,18 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from stagecheck.core.agents import resolve_task_attempt_dir
+from stagecheck.core.git import run_safe_git
 from stagecheck.core.locking import acquire_runtime_lock
-from stagecheck.core.paths import find_workspace_root
+from stagecheck.core.paths import find_workspace_root, resolve_task_dir
 from stagecheck.core.permissions import controlled_write_transaction
-from stagecheck.core.utils import canonical_json_dumps
+from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps
 
 MAX_DEFAULT_ATTEMPTS = 3
 
@@ -32,6 +36,10 @@ class CircuitBreakerError(Exception):
 
 class ResetAttemptsError(CircuitBreakerError):
     """Raised when stagecheck reset-attempts preconditions fail."""
+
+
+class AttemptBudgetExhaustedError(CircuitBreakerError):
+    """Raised when an attempt retry is requested but maximum attempt budget (3) is exhausted (FR-06 / DEC-028)."""
 
 
 @dataclass
@@ -58,7 +66,7 @@ def _get_defects_from_verdict(verdict_path: Path) -> Set[str]:
 
 def _detect_timeout_masking(workspace_root: Path, task_id: str, attempt: int) -> bool:
     """Detect if the only code modification made was increasing timeouts or sleep delays."""
-    attempt_dir = workspace_root / "evidence" / "tasks" / task_id / f"attempt_{attempt}"
+    attempt_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt)
     review_file = attempt_dir / "Phase-2A" / "pre_commit_review.json"
     if not review_file.is_file():
         return False
@@ -67,6 +75,17 @@ def _detect_timeout_masking(workspace_root: Path, task_id: str, attempt: int) ->
     prod_repos_file = workspace_root / "controls" / "PRODUCT_REPOSITORIES.json"
     if not prod_repos_file.is_file():
         return False
+
+    baseline_file = attempt_dir / "repo_baseline.json"
+    repo_baseline_data: Dict[str, Any] = {}
+    if baseline_file.is_file():
+        try:
+            with open(baseline_file, "r", encoding="utf-8") as bf:
+                loaded_bl = json.load(bf)
+                if isinstance(loaded_bl, dict):
+                    repo_baseline_data = loaded_bl
+        except Exception:
+            repo_baseline_data = {}
 
     try:
         with open(prod_repos_file, "r", encoding="utf-8") as f:
@@ -79,12 +98,15 @@ def _detect_timeout_masking(workspace_root: Path, task_id: str, attempt: int) ->
         if not (repo_dir / ".git").is_dir():
             continue
 
-        base_head = meta.get("baseline_head")
+        base_head = None
+        if repo_name in repo_baseline_data and isinstance(repo_baseline_data[repo_name], dict):
+            base_head = repo_baseline_data[repo_name].get("head_commit")
+        if not base_head:
+            base_head = meta.get("baseline_head")
         if not base_head:
             continue
 
-        cmd = ["git", "-C", str(repo_dir), "diff", "-U0", f"{base_head}..HEAD"]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+        res = run_safe_git(repo_dir, ["diff", "-U0", f"{base_head}..HEAD"])
         if res.returncode != 0:
             continue
 
@@ -222,9 +244,12 @@ def write_escalation_report(
     defects: List[Dict[str, Any]],
 ) -> Path:
     """Generate diagnostic escalation_report.md under evidence/tasks/<task_id>/."""
-    task_dir = workspace_root / "evidence" / "tasks" / task_id
+    from stagecheck.core.paths import find_workspace_root, resolve_task_dir, safe_resolve, write_text_nofollow
+    ws_root = Path(workspace_root).resolve()
+    safe_resolve(f"evidence/tasks/{task_id}", ws_root, allow_symlinks=False)
+    task_dir = resolve_task_dir(ws_root, task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
-    report_file = task_dir / "escalation_report.md"
+    report_file = safe_resolve(f"evidence/tasks/{task_id}/escalation_report.md", ws_root, allow_symlinks=False)
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     lines = [
@@ -256,11 +281,20 @@ def write_escalation_report(
         "\n## Actionable Developer Resolution Paths\n\n",
         "- **Option A (Manual Code Fix):** Fix the defect directly in `repos/`, commit locally, and run `stagecheck audit`.\n",
         "- **Option B (Human Disposition):** Waive defect via `stagecheck disposition add --task <task_id> --defect <id>`.\n",
-        "- **Option C (Attempt Reset):** Unlatch breaker via `stagecheck reset-attempts --task <task_id>` to allocate Attempt 4+.\n",
-        "- **Option D (Permanent Halt):** Discontinue task; all commits and evidence remain permanently preserved.\n",
     ])
+    if attempt < MAX_DEFAULT_ATTEMPTS:
+        lines.append(
+            f"- **Option C (Attempt Reset):** Unlatch breaker via `stagecheck reset-attempts --task <task_id>` to allocate Attempt {attempt + 1} of {MAX_DEFAULT_ATTEMPTS}.\n"
+        )
+    else:
+        lines.append(
+            f"- **Option C (Attempt Reset):** Attempt budget exhausted ({attempt}/{MAX_DEFAULT_ATTEMPTS} attempts used). Retries are strictly prohibited; resolve via Option A, B, or D.\n"
+        )
+    lines.append(
+        "- **Option D (Permanent Halt):** Discontinue task; all commits and evidence remain permanently preserved.\n"
+    )
 
-    report_file.write_text("".join(lines), encoding="utf-8")
+    write_text_nofollow(report_file, "".join(lines), append=False, mode=0o644)
     return report_file
 
 
@@ -272,49 +306,40 @@ def trip_circuit_breaker(
     current_defects: List[Dict[str, Any]],
 ) -> Path:
     """Trip the circuit breaker, update ACTIVE_STATE.json, and emit alerts."""
-    state_file = workspace_root / "controls" / "ACTIVE_STATE.json"
-    active_state = {}
-    if state_file.is_file():
-        try:
-            with open(state_file, "r", encoding="utf-8") as f:
-                active_state = json.load(f)
-        except Exception:
-            pass
+    from stagecheck.core.dispositions import mark_waivers_finalized
+    from stagecheck.core.state import load_active_state, save_active_state
 
-    # Update state under controlled write transaction and lock
     controls_dir = workspace_root / "controls"
     controls_dir.mkdir(parents=True, exist_ok=True)
-    with controlled_write_transaction(controls_dir):
-        with acquire_runtime_lock(controls_dir):
+    with acquire_runtime_lock(controls_dir):
+        with controlled_write_transaction(controls_dir):
+            state_file = controls_dir / "ACTIVE_STATE.json"
+            active_state = load_active_state(workspace_root) if state_file.is_file() else {}
+            active_state.pop("halt_trigger", None)
+            active_state.pop("last_reset", None)
             active_state["phase"] = "AWAITING_HUMAN_DISPOSITION"
             active_state["circuit_breaker_tripped"] = True
             active_state["halt_reason"] = evaluation.reason
-            active_state["halt_trigger"] = evaluation.trigger
             active_state["task_id"] = task_id
             active_state["attempt_index"] = attempt
+            save_active_state(workspace_root, active_state)
 
-            with open(state_file, "w", encoding="utf-8") as f:
-                f.write(canonical_json_dumps(active_state) + "\n")
+    mark_waivers_finalized(workspace_root, task_id, attempt)
 
     # Generate escalation report
     report_path = write_escalation_report(workspace_root, task_id, attempt, evaluation, current_defects)
 
     # Optional desktop alert (non-failing)
-    if shutil.which("notify-send"):
-        try:
-            subprocess.run(
-                [
-                    "notify-send",
-                    "-u",
-                    "critical",
-                    "STAGECHECK CIRCUIT BREAKER TRIPPED",
-                    f"{task_id}: {evaluation.reason[:80]}...",
-                ],
-                capture_output=True,
-                check=False,
-            )
-        except Exception:
-            pass
+    try:
+        from stagecheck.core.sentinel import send_desktop_notification
+        send_desktop_notification(
+            title="STAGECHECK CIRCUIT BREAKER TRIPPED",
+            message=f"{task_id}: {evaluation.reason[:80]}...",
+            urgency="critical",
+            icon="dialog-error",
+        )
+    except Exception:
+        pass
 
     return report_path
 
@@ -322,26 +347,53 @@ def trip_circuit_breaker(
 def reset_circuit_breaker(
     workspace_root: Path,
     task_id: str,
-    authorized_by: str = "human-operator",
+    authorized_by: str = "",
+    require_tty: bool = False,
+    confirmed: bool = True,
 ) -> Dict[str, Any]:
     """Execute human-authorized reset-attempts command.
 
     Unlatches breaker state, preserves existing attempt directories intact (no resets),
-    sets attempt_budget_base = current_attempt (enabling monotonic Attempt 4+ allocation),
+    enforces human identity + OWNER_GRANTS.md CIRCUIT_BREAKER_RESET authorization + optional TTY/yes check,
     and transitions state to PHASE_1_PLANNING (GAP-C3, GAP-L2, GAP-X1).
     """
     state_file = workspace_root / "controls" / "ACTIVE_STATE.json"
     if not state_file.is_file():
         raise ResetAttemptsError("ACTIVE_STATE.json not found in controls directory.")
 
+    if require_tty and not confirmed:
+        if not sys.stdin.isatty():
+            raise ResetAttemptsError(
+                "Non-interactive reset-attempts blocked: resetting circuit breaker requires an "
+                "interactive terminal or explicit human confirmation (--yes)."
+            )
+
+    from stagecheck.core.dispositions import UnauthorizedDispositionError, is_human_identity, parse_owner_grants
+    from stagecheck.core.state import load_active_state, save_active_state
+
     controls_dir = workspace_root / "controls"
-    with controlled_write_transaction(controls_dir):
-        with acquire_runtime_lock(controls_dir):
+    with acquire_runtime_lock(controls_dir):
+        with controlled_write_transaction(controls_dir):
             try:
-                with open(state_file, "r", encoding="utf-8") as f:
-                    active_state = json.load(f)
+                active_state = load_active_state(workspace_root)
             except Exception as err:
                 raise ResetAttemptsError(f"Failed to read ACTIVE_STATE.json: {err}") from err
+
+            # 0. Human identity & OWNER_GRANTS.md CIRCUIT_BREAKER_RESET check
+            auth_clean = str(authorized_by or "").strip()
+            if not auth_clean or not is_human_identity(auth_clean, active_state):
+                raise ResetAttemptsError(
+                    f"Identity '{authorized_by}' is not a valid human operator identity."
+                )
+            try:
+                grants = parse_owner_grants(workspace_root)
+            except UnauthorizedDispositionError as err:
+                raise ResetAttemptsError(str(err)) from err
+            perms = grants.get(auth_clean, set())
+            if not ({"CIRCUIT_BREAKER_RESET", "OWNER"} & perms):
+                raise ResetAttemptsError(
+                    f"Operator '{auth_clean}' lacks CIRCUIT_BREAKER_RESET grant in controls/OWNER_GRANTS.md."
+                )
 
             # 1. Task Match Precondition (GAP-L2)
             current_task = active_state.get("task_id") or active_state.get("execution_progress", {}).get("current_task")
@@ -358,20 +410,55 @@ def reset_circuit_breaker(
                     f"Cannot reset task '{task_id}': Circuit breaker is not tripped (current phase: '{phase}')."
                 )
 
-            # 3. Unlatch breaker state with monotonic attempt budgeting
-            current_attempt = active_state.get("attempt_index", 3)
+            # 3. Enforce immutable hard cap of 3 attempts (FR-06 / DEC-028)
+            current_attempt = active_state.get("attempt_index", 1)
+            if current_attempt >= MAX_DEFAULT_ATTEMPTS:
+                raise AttemptBudgetExhaustedError(
+                    f"Attempt budget exhausted: task '{task_id}' has reached maximum total attempts "
+                    f"({current_attempt}/{MAX_DEFAULT_ATTEMPTS}). Retries are strictly prohibited."
+                )
+
+            # 4. Unlatch breaker state with monotonic attempt budgeting and schema-compliant audit entry
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+            next_attempt = current_attempt + 1
             active_state["circuit_breaker_tripped"] = False
             active_state["halt_reason"] = None
-            active_state["halt_trigger"] = None
-            active_state["attempt_budget_base"] = current_attempt
+            active_state.pop("halt_trigger", None)
+            active_state.pop("last_reset", None)
+            active_state["attempt_index"] = next_attempt
             active_state["phase"] = "PHASE_1_PLANNING"
-            active_state["last_reset"] = {
+            active_state["turn"] = "AGENT1_PROMPTING"
+            active_state["cleared_gates"] = {}
+            wd = active_state.setdefault("watchdog", {})
+            if isinstance(wd, dict):
+                wd["last_active_timestamp"] = now_dt.isoformat()
+                wd["last_active_monotonic"] = time.monotonic()
+                wd.pop("tripped_at", None)
+                wd.pop("interrupted_phase", None)
+            active_state.setdefault("resets_authorized", []).append({
+                "timestamp": now_dt.isoformat(),
                 "authorized_by": authorized_by,
-                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "prior_attempt_index": current_attempt,
-            }
+                "from_attempt": current_attempt,
+                "to_attempt": next_attempt,
+            })
 
-            with open(state_file, "w", encoding="utf-8") as f:
-                f.write(canonical_json_dumps(active_state) + "\n")
+            # Pre-capture repository baseline snapshot for the new attempt
+            prod_repos_file = controls_dir / "PRODUCT_REPOSITORIES.json"
+            if prod_repos_file.is_file():
+                try:
+                    from stagecheck.core.branch_governance import capture_multi_repo_task_baseline
+                    prod_data = json.loads(prod_repos_file.read_text(encoding="utf-8"))
+                    registered = list((prod_data.get("repositories") or {}).keys())
+                    if registered:
+                        capture_multi_repo_task_baseline(
+                            workspace_root=workspace_root,
+                            task_id=task_id,
+                            attempt=next_attempt,
+                            repo_names=registered,
+                        )
+                except Exception:
+                    pass
+
+            save_active_state(workspace_root, active_state)
 
             return active_state

@@ -19,6 +19,7 @@ from stagecheck.core.commands import (
     capture_git_status_porcelain,
     execute_secure_command,
 )
+from stagecheck.core.topology import managed_topology_worktrees
 
 
 def _extract_command_citations(claims_data: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -38,45 +39,34 @@ def _test_at_base_commit(
     base_commit: str,
     argv: List[str],
     task_id: str,
+    attempt: int = 1,
 ) -> Optional[int]:
-    """Execute command at base_commit using an ephemeral Git worktree."""
+    """Execute command at base_commit using topology-preserving ephemeral Git worktrees."""
     if not base_commit or base_commit.startswith("0" * 20):
         return None
 
-    worktree_parent = workspace_root / ".stagecheck_worktrees"
-    worktree_parent.mkdir(parents=True, exist_ok=True)
     repo_name = repo_path.name
-    worktree_dir = worktree_parent / f"{repo_name}_base_{task_id}"
-
     try:
-        # Create detached worktree
-        add_res = subprocess.run(
-            ["git", "-c", "core.hooksPath=/dev/null", "-C", str(repo_path), "worktree", "add", "--detach", str(worktree_dir), base_commit],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if add_res.returncode != 0:
-            return None
-
-        # Execute command in ephemeral worktree
-        rec = execute_secure_command(
-            argv=argv,
-            working_directory=worktree_dir,
-            timeout_seconds=120,
-            check_tree_integrity=False,
-        )
-        return rec.exit_code
+        with managed_topology_worktrees(
+            workspace_root=workspace_root,
+            task_id=task_id,
+            attempt_index=attempt,
+            enforce_clean_baseline=False,
+            touched_repos={repo_name},
+        ) as layout:
+            wt = layout.worktrees.get(repo_name)
+            if not wt or not wt.worktree_path.exists():
+                return None
+            rec = execute_secure_command(
+                argv=argv,
+                working_directory=wt.worktree_path,
+                timeout_seconds=120,
+                check_tree_integrity=False,
+                workspace_root=workspace_root,
+            )
+            return rec.exit_code
     except Exception:
         return None
-    finally:
-        if worktree_dir.exists():
-            subprocess.run(
-                ["git", "-c", "core.hooksPath=/dev/null", "-C", str(repo_path), "worktree", "remove", "--force", str(worktree_dir)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
 
 
 def run_stage8_rerun(ctx: AuditContext) -> StageResult:
@@ -101,13 +91,44 @@ def run_stage8_rerun(ctx: AuditContext) -> StageResult:
         if not argv:
             continue
 
+        if argv[0] == "git":
+            defects.append(
+                Defect(
+                    defect_id="rerun.invalid_command_citation_type",
+                    message=(
+                        f"Git command citation '{' '.join(argv)}' cannot be cited as an executable test runner (type: 'command'). "
+                        "Repository state witness logs must be cited as type: 'file' pointing to Phase-2B/witnesses/."
+                    ),
+                    stage=stage_id,
+                    severity="CRITICAL",
+                    blocking=True,
+                    citation={"argv": argv, "cwd": rel_cwd},
+                )
+            )
+            continue
+
         work_dir = (ctx.workspace_root / rel_cwd).resolve()
-        # Security: verify work_dir is within workspace_root
-        if not work_dir.is_relative_to(ctx.workspace_root.resolve()):
+        # Security: verify work_dir resides strictly inside a repository under repos/ or authorized qualification root
+        repos_root = (ctx.workspace_root / "repos").resolve()
+        qual_root_rel = "evals"
+        qual_config_path = ctx.workspace_root / "controls" / "QUALIFICATION_ROOT.json"
+        if qual_config_path.is_file():
+            try:
+                with open(qual_config_path, "r", encoding="utf-8") as f:
+                    qual_data = json.load(f)
+                qual_root_rel = qual_data.get("qualification_root", "evals")
+            except Exception:
+                pass
+        qual_root = (ctx.workspace_root / qual_root_rel).resolve()
+
+        is_in_repo = work_dir.is_relative_to(repos_root) and work_dir != repos_root
+        is_in_qual = (work_dir == qual_root or work_dir.is_relative_to(qual_root)) and qual_root.is_dir()
+
+        if not (is_in_repo or is_in_qual):
             defects.append(
                 Defect(
                     defect_id="rerun.working_directory_escaped",
-                    message=f"Cited command working directory '{rel_cwd}' escapes workspace root",
+                    message=f"Cited command working directory '{rel_cwd}' must reside inside a repository under repos/ or qualification root '{qual_root_rel}'",
                     stage=stage_id,
                     severity="CRITICAL",
                     blocking=True,
@@ -122,6 +143,7 @@ def run_stage8_rerun(ctx: AuditContext) -> StageResult:
                 working_directory=work_dir,
                 timeout_seconds=300,
                 check_tree_integrity=True,
+                workspace_root=ctx.workspace_root,
             )
         except Exception as err:
             defects.append(
@@ -170,6 +192,7 @@ def run_stage8_rerun(ctx: AuditContext) -> StageResult:
                     base_commit,
                     argv,
                     ctx.task_id,
+                    getattr(ctx, "attempt", 1),
                 )
 
             if base_exit is not None and base_exit == record.exit_code:

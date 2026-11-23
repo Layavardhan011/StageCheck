@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import datetime
+import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from stagecheck.cli.main import main
+from stagecheck.core.permissions import controlled_write_transaction
 from stagecheck.core.sentinel import (
     SentinelDaemon,
     SentinelError,
     classify_event_path,
     send_desktop_notification,
 )
+from stagecheck.core.state import load_active_state, save_active_state
+from stagecheck.core.supervisor import evaluate_watchdog
 
 
 class TestSentinel(unittest.TestCase):
@@ -63,6 +69,8 @@ class TestSentinel(unittest.TestCase):
             "repos/backend/.pytest_cache/v/cache/nodeids",
             "repos/backend/src/.main.py.swp",
             "repos/backend/tmp.12345.tmp.",
+            "evidence/sentinel.log",
+            ".stagecheck_sentinel.pid",
         ]
         for path_str in tier2_cases:
             with self.subTest(path=path_str):
@@ -113,6 +121,25 @@ class TestSentinel(unittest.TestCase):
         malicious_msg = "Injection <span foreground='red'>test</span>"
         # Must execute without raising exception
         send_desktop_notification(title=malicious_title, message=malicious_msg)
+
+        # Verify option termination ('--'), html escaping, and urgency/icon sanitization
+        from unittest.mock import patch
+        with patch("stagecheck.core.sentinel.subprocess.run") as mock_run:
+            send_desktop_notification(
+                title="-leading-dash <b>title</b>",
+                message="--msg <script>x</script>",
+                urgency="--evil",
+                icon="-bad-icon",
+            )
+            self.assertTrue(mock_run.called)
+            cmd = mock_run.call_args[0][0]
+            self.assertEqual(cmd[0], "notify-send")
+            self.assertIn("--", cmd)
+            dash_idx = cmd.index("--")
+            self.assertEqual(cmd[cmd.index("--urgency") + 1], "normal")
+            self.assertEqual(cmd[cmd.index("--icon") + 1], "dialog-information")
+            self.assertEqual(cmd[dash_idx + 1], "-leading-dash &lt;b&gt;title&lt;/b&gt;")
+            self.assertEqual(cmd[dash_idx + 2], "--msg &lt;script&gt;x&lt;/script&gt;")
 
     def test_pid_lifecycle_and_stale_recovery(self) -> None:
         """Verify PID writing, reading, and automatic recovery of dead/stale PIDs."""
@@ -297,6 +324,208 @@ class TestSentinel(unittest.TestCase):
             pid = sentinel.read_pid()
             self.assertEqual(pid, os.getpid(), "read_pid must never return None or corrupted PID")
         sentinel.pid_file.unlink(missing_ok=True)
+
+    def test_watchdog_restart_and_monotonic_tracking(self) -> None:
+        """Verify DEC-027: Sentinel daemon restores monotonic timing from ACTIVE_STATE.json upon restart."""
+        # 1. Setup ACTIVE_STATE with last_active_timestamp 650s ago
+        old_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=650)
+        state_data = {
+            "schema_version": "2.0",
+            "task_id": "task-wd-01",
+            "attempt_index": 1,
+            "repair_index": 0,
+            "max_total_attempts": 3,
+            "max_repairs": 3,
+            "circuit_breaker_tripped": False,
+            "target_repositories": ["backend"],
+            "phase": "PHASE_2A_CODING",
+            "turn": "AGENT2_CODING",
+            "status": "IN_PROGRESS",
+            "watchdog": {
+                "last_active_timestamp": old_time.isoformat(),
+            },
+        }
+        state_file = self.workspace / "controls" / "ACTIVE_STATE.json"
+        state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+
+        # 2. Instantiate SentinelDaemon and verify restored monotonic offset
+        daemon = SentinelDaemon(self.workspace)
+        elapsed_in_daemon = time.monotonic() - daemon.last_activity_monotonic
+        self.assertGreaterEqual(elapsed_in_daemon, 640.0)
+
+        # 3. Evaluate watchdog -> must trip into AWAITING_HUMAN_DISPOSITION
+        tripped, msg, meta = evaluate_watchdog(self.workspace, timeout_seconds=600.0)
+        self.assertTrue(tripped)
+        self.assertIn("WATCHDOG_INACTIVITY_TIMEOUT", msg)
+
+        state_after = load_active_state(self.workspace)
+        self.assertEqual(state_after["phase"], "AWAITING_HUMAN_DISPOSITION")
+
+    def test_watchdog_resets_on_relevant_repo_inotify_event(self) -> None:
+        """Verify Issue 4: Inotify event under repos/ resets watchdog monotonic timer and ACTIVE_STATE timestamp."""
+        old_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=200)
+        state_data = {
+            "schema_version": "2.0",
+            "task_id": "task-wd-02",
+            "attempt_index": 1,
+            "repair_index": 0,
+            "max_total_attempts": 3,
+            "max_repairs": 3,
+            "circuit_breaker_tripped": False,
+            "target_repositories": ["backend"],
+            "phase": "PHASE_2A_CODING",
+            "turn": "AGENT2_CODING",
+            "status": "IN_PROGRESS",
+            "watchdog": {
+                "last_active_timestamp": old_time.isoformat(),
+            },
+        }
+        state_file = self.workspace / "controls" / "ACTIVE_STATE.json"
+        state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+
+        daemon = SentinelDaemon(self.workspace)
+        start_mono = daemon.last_activity_monotonic
+
+        # Log event for relevant repo path
+        daemon._log_event("repos/backend/service.py", tier=4, label="ALLOWED_SCOPE")
+
+        # Verify monotonic timer refreshed
+        self.assertGreater(daemon.last_activity_monotonic, start_mono)
+
+        # Verify sentinel.log recorded the relevant event
+        from stagecheck.core.supervisor import get_last_relevant_filesystem_timestamp
+        last_fs_ts = get_last_relevant_filesystem_timestamp(self.workspace)
+        self.assertIsNotNone(last_fs_ts)
+
+    def test_watchdog_ignores_unrelated_file_events(self) -> None:
+        """Verify Issue 4: Unrelated file events (.git/logs, /tmp) do NOT reset the watchdog timer."""
+        fixed_ts = "2026-11-06T12:00:00+00:00"
+        state_data = {
+            "schema_version": "2.0",
+            "task_id": "task-wd-03",
+            "attempt_index": 1,
+            "repair_index": 0,
+            "max_total_attempts": 3,
+            "max_repairs": 3,
+            "circuit_breaker_tripped": False,
+            "target_repositories": ["backend"],
+            "phase": "PHASE_2A_CODING",
+            "turn": "AGENT2_CODING",
+            "status": "IN_PROGRESS",
+            "watchdog": {
+                "last_active_timestamp": fixed_ts,
+            },
+        }
+        state_file = self.workspace / "controls" / "ACTIVE_STATE.json"
+        state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+
+        daemon = SentinelDaemon(self.workspace)
+        mono_before = daemon.last_activity_monotonic
+
+        # Log event for unrelated git log file
+        daemon._log_event(".git/logs/HEAD", tier=1, label="GOVERNANCE_BREACH")
+
+        # Monotonic timer and state timestamp must remain UNCHANGED
+        self.assertEqual(daemon.last_activity_monotonic, mono_before)
+        state_after = load_active_state(self.workspace)
+        self.assertEqual(state_after["watchdog"]["last_active_timestamp"], fixed_ts)
+
+    def test_watchdog_suspended_in_audit_and_sealing_phases(self) -> None:
+        """Verify watchdog is automatically suspended in PHASE_3_AUDIT and GATE_4_SEALING."""
+        for suspended_phase in ("PHASE_3_AUDIT", "GATE_4_SEALING", "IDLE", "COMPLETED"):
+            with self.subTest(phase=suspended_phase):
+                state_data = {
+                    "schema_version": "2.0",
+                    "task_id": "task-wd-04",
+                    "attempt_index": 1,
+                    "repair_index": 0,
+                    "max_total_attempts": 3,
+                    "max_repairs": 3,
+                    "circuit_breaker_tripped": False,
+                    "target_repositories": ["backend"],
+                    "phase": suspended_phase,
+                    "turn": "IDLE",
+                    "status": "IN_PROGRESS",
+                    "watchdog": {
+                        "last_active_timestamp": "2020-01-01T00:00:00+00:00",
+                    },
+                }
+                state_file = self.workspace / "controls" / "ACTIVE_STATE.json"
+                state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+
+                tripped, msg, meta = evaluate_watchdog(self.workspace, timeout_seconds=600.0)
+                self.assertFalse(tripped)
+                self.assertFalse(meta.get("active"))
+                self.assertIn("suspended", msg.lower())
+
+    def test_daemon_graceful_degradation_without_libc(self) -> None:
+        """Verify SentinelDaemon degrades cleanly when libc or inotify support is unavailable."""
+        daemon = SentinelDaemon(self.workspace)
+        daemon._libc = None
+        daemon._init_libc = lambda: None
+        # Should exit gracefully without unhandled exception
+        daemon._run_loop(ready_fd=None)
+        self.assertFalse(daemon.is_running()[0])
+
+    def test_daemon_rejects_symlink_daemon_log_and_lock(self) -> None:
+        """SentinelDaemon.start rejects symlinked sentinel_daemon.log and .stagecheck_sentinel.lock."""
+        from stagecheck.core.sentinel import SentinelError
+        daemon = SentinelDaemon(self.workspace)
+        daemon.log_file.parent.mkdir(parents=True, exist_ok=True)
+        daemon_log = self.workspace / "evidence" / "sentinel_daemon.log"
+        target = self.workspace / "evidence" / "victim.txt"
+        target.write_text("do-not-touch", encoding="utf-8")
+        daemon_log.unlink(missing_ok=True)
+        daemon_log.symlink_to(target)
+        with self.assertRaises(SentinelError):
+            daemon.start(daemon=True)
+
+        daemon_log.unlink(missing_ok=True)
+        lock_file = self.workspace / ".stagecheck_sentinel.lock"
+        lock_file.unlink(missing_ok=True)
+        lock_file.symlink_to(target)
+        with self.assertRaises(SentinelError):
+            daemon.start(daemon=True)
+        lock_file.unlink(missing_ok=True)
+
+    def test_sanitize_log_field_escapes_c1_and_unicode_line_separators(self) -> None:
+        """_sanitize_log_field escapes U+0085, U+2028, and U+2029 so forged lines cannot be injected."""
+        from stagecheck.core.sentinel import _sanitize_log_field
+        raw = "repos/backend/a\u0085b\u2028c\u2029d.py"
+        sanitized = _sanitize_log_field(raw)
+        self.assertNotIn("\u0085", sanitized)
+        self.assertNotIn("\u2028", sanitized)
+        self.assertNotIn("\u2029", sanitized)
+        self.assertIn("\\x85", sanitized)
+        self.assertIn("\\u2028", sanitized)
+        self.assertIn("\\u2029", sanitized)
+
+    def test_authorized_runtime_lock_classified_as_authorized_transaction(self) -> None:
+        """Verify SentinelDaemon detects active/recent runtime lock transactions and avoids false GOVERNANCE_BREACH."""
+        from stagecheck.core.locking import acquire_runtime_lock
+        from stagecheck.core.permissions import MODE_DIR_RO, MODE_DIR_RW
+
+        controls_dir = self.workspace / "controls"
+        daemon = SentinelDaemon(self.workspace)
+
+        # Without lock or recent transaction -> False -> GOVERNANCE_BREACH
+        self.assertFalse(daemon._is_active_transaction())
+        tier, label = classify_event_path(self.workspace, "controls/ACTIVE_STATE.json", active_transaction=daemon._is_active_transaction())
+        self.assertEqual((tier, label), (1, "GOVERNANCE_BREACH"))
+
+        # During/immediately after acquire_runtime_lock with at-rest 0555 controls/ -> AUTHORIZED_TRANSACTION
+        os.chmod(controls_dir, MODE_DIR_RO)
+        try:
+            with acquire_runtime_lock(self.workspace):
+                self.assertTrue(daemon._is_active_transaction())
+                tier_tx, label_tx = classify_event_path(
+                    self.workspace, "controls/ACTIVE_STATE.json", active_transaction=daemon._is_active_transaction()
+                )
+                self.assertEqual((tier_tx, label_tx), (1, "AUTHORIZED_TRANSACTION"))
+            # Right after release (within 1.0s epoll delivery window) with 0555 controls/ -> still True
+            self.assertTrue(daemon._is_active_transaction())
+        finally:
+            os.chmod(controls_dir, MODE_DIR_RW)
 
 
 if __name__ == "__main__":

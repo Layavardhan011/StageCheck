@@ -1,19 +1,24 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "StageCheck Task Plan Roadmap Schema (GAP-05)",
+  "title": "StageCheck Task Plan Roadmap Schema v2.0 (GAP-05 / Sprint Governance)",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
-    "project_name",
-    "created_at",
-    "updated_at",
     "tasks"
   ],
   "properties": {
     "schema_version": {
-      "type": "integer",
-      "minimum": 1
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)*$"
+        }
+      ]
     },
     "project_name": {
       "type": "string",
@@ -25,17 +30,39 @@
     "updated_at": {
       "type": "string"
     },
+    "sprints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "tasks": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "task_id",
-          "title",
-          "status",
-          "priority",
-          "dependencies",
           "target_repositories"
         ],
         "properties": {
@@ -43,7 +70,19 @@
             "type": "string",
             "pattern": "^[A-Za-z0-9_-]+$"
           },
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "sprint": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
           "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
             "type": "string",
             "minLength": 1
           },

@@ -66,6 +66,32 @@ if [[ -z "${WHEEL_FILE}" || ! -f "${WHEEL_FILE}" ]]; then
     echo "[FAIL] No wheel file found in dist/"
     exit 1
 fi
+"${PYTHON_BIN}" - <<'PYEOF'
+import tempfile
+from pathlib import Path
+from stagecheck.core.portability import (
+    EXECUTABLE_REPO_PATHS,
+    create_source_zip_preserving_modes,
+    extract_zip_preserving_modes,
+    verify_executable_permissions,
+)
+
+repo_root = Path.cwd()
+perm_res = verify_executable_permissions(repo_root)
+if not perm_res["ok"]:
+    raise SystemExit(f"Executable permission verification failed: {perm_res}")
+
+with tempfile.TemporaryDirectory() as tmp:
+    tmp_path = Path(tmp)
+    zip_out = tmp_path / "stagecheck_pkg.zip"
+    create_source_zip_preserving_modes(repo_root, zip_out, rel_files=list(EXECUTABLE_REPO_PATHS))
+    extract_dir = tmp_path / "unpacked"
+    extract_zip_preserving_modes(zip_out, extract_dir)
+    unpacked_res = verify_executable_permissions(extract_dir)
+    if not unpacked_res["ok"]:
+        raise SystemExit(f"ZIP archive permission preservation failed: {unpacked_res}")
+print("  [OK] Executable script/binary modes and ZIP external_attr preservation verified.")
+PYEOF
 echo "[PASS] Gate 3: Successfully built $(basename "${WHEEL_FILE}")."
 echo ""
 
@@ -87,6 +113,7 @@ VERBS=(
     "init"
     "start"
     "verify-prompt"
+    "gate"
     "review-precommit"
     "approve-review"
     "audit"
@@ -94,10 +121,15 @@ VERBS=(
     "reset-attempts"
     "disposition"
     "sentinel"
+    "supervisor"
+    "turn"
+    "check-rubric"
     "plan"
     "unlock"
     "seal"
     "log-quality"
+    "verify-manifest"
+    "update-manifest"
 )
 
 for verb in "${VERBS[@]}"; do
@@ -120,7 +152,7 @@ git -C "${TEMP_WS}/repos/core-svc" add .
 git -C "${TEMP_WS}/repos/core-svc" commit -q -m "Initial commit"
 
 # Init workspace
-"${TEMP_VENV}/bin/stagecheck" init --workspace "${TEMP_WS}" >/dev/null
+"${TEMP_VENV}/bin/stagecheck" init --workspace "${TEMP_WS}" --agent1 "agent1" --agent2 "agent2" >/dev/null
 
 # Start daemon
 "${TEMP_VENV}/bin/stagecheck" sentinel start --workspace "${TEMP_WS}"

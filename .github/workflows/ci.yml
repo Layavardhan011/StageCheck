@@ -10,7 +10,7 @@ jobs:
   release-gates:
     name: Production Release Gates & Verification
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Check out repository

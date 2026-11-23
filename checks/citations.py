@@ -31,10 +31,10 @@ def validate_citation(ctx, cite):
         path = checkout / cite['path']
         if not below(path.resolve(), checkout) or symlink_component(path):
             return 'citation.upstream_identity'
-        execution = ctx.run_command(['git','-C',str(checkout),'rev-parse','HEAD'], checkout)
+        execution = ctx.run_safe_git(['rev-parse','HEAD'], checkout)
         if execution['exit_status'] or execution['stdout'].strip() != cite['commit']:
             return 'citation.upstream_identity'
-        committed = ctx.run_command(['git','-C',str(checkout),'show',cite['commit'] + ':' + cite['path']], checkout)
+        committed = ctx.run_safe_git(['show','--no-textconv',cite['commit'] + ':' + cite['path']], checkout)
         if committed['exit_status'] or committed['stdout_sha256'] != cite['sha256']:
             return 'citation.upstream_identity'
     else:

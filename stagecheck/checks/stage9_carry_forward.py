@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from stagecheck.checks.base import AuditContext, Defect, StageResult
+from stagecheck.core.agents import resolve_task_attempt_dir
+from stagecheck.core.evidence import verify_evidence_manifest, verify_seal_chain
+from stagecheck.core.paths import resolve_task_dir
+from stagecheck.core.sealing import verify_attempt_merkle_seal
+from stagecheck.core.utils import canonical_json_dumps, sha256_digest, sha256_file
 
 
 def run_stage9_carry_forward(ctx: AuditContext) -> StageResult:
@@ -35,7 +40,7 @@ def run_stage9_carry_forward(ctx: AuditContext) -> StageResult:
 
     # 2. For attempt > 1, verify prior attempt seal and ledger existence
     prior_attempt = ctx.attempt - 1
-    prior_dir = ctx.workspace_root / "evidence" / "tasks" / ctx.task_id / f"attempt_{prior_attempt}"
+    prior_dir = resolve_task_attempt_dir(ctx.workspace_root, ctx.task_id, prior_attempt)
     prior_seal_path = prior_dir / "seal.json"
 
     if not prior_dir.exists() or not prior_dir.is_dir():
@@ -50,57 +55,115 @@ def run_stage9_carry_forward(ctx: AuditContext) -> StageResult:
         )
         return StageResult(stage_id=stage_id, status="FAIL", defects=defects, errors=errors)
 
-    if not prior_seal_path.is_file():
+    if prior_seal_path.is_symlink():
         defects.append(
             Defect(
                 defect_id="carry_forward.missing_prior_seal",
-                message=f"Prior attempt seal 'seal.json' is missing from {prior_dir.relative_to(ctx.workspace_root)}",
+                message=f"Prior attempt seal 'seal.json' is a forbidden symlink at {prior_dir.relative_to(ctx.workspace_root)}",
                 stage=stage_id,
                 severity="CRITICAL",
                 blocking=True,
             )
         )
-    else:
-        # Validate seal json content
+    elif prior_seal_path.is_file():
+        # Always verify the complete cryptographic seal chain (1 .. prior_attempt) regardless of seal format
         try:
-            with open(prior_seal_path, "r", encoding="utf-8") as f:
-                seal_data = json.load(f)
-            if not seal_data.get("payload_sha256") and not seal_data.get("manifest_sha256"):
+            ok, violations = verify_seal_chain(ctx.workspace_root, ctx.task_id, prior_attempt)
+            if not ok:
                 defects.append(
                     Defect(
                         defect_id="carry_forward.broken_chain",
-                        message=f"Prior attempt seal 'seal.json' is malformed or missing cryptographic digests",
+                        message=f"Prior seal chain verification failed: {'; '.join(violations)}",
                         stage=stage_id,
                         severity="CRITICAL",
                         blocking=True,
                     )
                 )
+
+            # Also verify EVIDENCE_MANIFEST.json if present
+            manifest_path = ctx.workspace_root / "evidence" / "EVIDENCE_MANIFEST.json"
+            if manifest_path.is_file():
+                # Reconcile active issue history ledger in manifest before verification
+                issue_hist_p = resolve_task_dir(ctx.workspace_root, ctx.task_id) / f"TASK_{ctx.task_id}_ISSUE_HISTORY.md"
+                alt_hist_p = ctx.workspace_root / f"TASK_{ctx.task_id}_ISSUE_HISTORY.md"
+                cur_hist = issue_hist_p if issue_hist_p.is_file() else (alt_hist_p if alt_hist_p.is_file() else None)
+                if cur_hist:
+                    from stagecheck.core.evidence import update_evidence_manifest
+                    update_evidence_manifest(ctx.workspace_root, [cur_hist])
+
+                m_ok, m_viol = verify_evidence_manifest(ctx.workspace_root)
+                if not m_ok:
+                    defects.append(
+                        Defect(
+                            defect_id="carry_forward.broken_chain",
+                            message=f"Evidence manifest verification failed: {'; '.join(m_viol)}",
+                            stage=stage_id,
+                            severity="CRITICAL",
+                            blocking=True,
+                        )
+                    )
         except Exception as err:
             defects.append(
                 Defect(
                     defect_id="carry_forward.unreadable_prior_seal",
-                    message=f"Failed to read prior attempt seal: {err}",
+                    message=f"Failed to read or verify prior attempt seal: {err}",
                     stage=stage_id,
                     severity="CRITICAL",
                     blocking=True,
                 )
             )
+    else:
+        # prior_seal_path does not exist on disk
+        # Check if prior attempt passed audit (in which case Gate 4 seal was strictly required)
+        # or was an unsealed failed/retried attempt (which does not have a Gate 4 seal).
+        prior_verdict_file = prior_dir / "Phase-3" / "verdict.json"
+        prior_verdict_passed = False
+        if prior_verdict_file.is_file() and not prior_verdict_file.is_symlink():
+            try:
+                prior_vdata = json.loads(prior_verdict_file.read_text(encoding="utf-8"))
+                if prior_vdata.get("result") in ("PASSED", "CLEAR") and not any(
+                    d.get("blocking", True) for d in prior_vdata.get("defects", [])
+                ):
+                    prior_verdict_passed = True
+            except Exception:
+                pass
 
-    # 3. Check cumulative issue history ledger if present
-    issue_history_path = ctx.workspace_root / "evidence" / "tasks" / ctx.task_id / f"TASK_{ctx.task_id}_ISSUE_HISTORY.md"
-    if not issue_history_path.is_file():
-        # Check root or controls
-        alt_history = ctx.workspace_root / f"TASK_{ctx.task_id}_ISSUE_HISTORY.md"
-        if not alt_history.is_file():
+        if prior_verdict_passed:
             defects.append(
                 Defect(
-                    defect_id="carry_forward.missing_issue_history",
-                    message=f"Cumulative issue history ledger 'TASK_{ctx.task_id}_ISSUE_HISTORY.md' is missing for attempt {ctx.attempt}",
+                    defect_id="carry_forward.missing_prior_seal",
+                    message=f"Prior attempt 'attempt_{prior_attempt}' passed audit but seal 'seal.json' is missing at {prior_dir.relative_to(ctx.workspace_root)}",
                     stage=stage_id,
-                    severity="WARNING",
-                    blocking=False,  # Warn if not yet created
+                    severity="CRITICAL",
+                    blocking=True,
                 )
             )
+        else:
+            # Unsealed failed or retried prior attempt: expected during multi-attempt retries of failed attempts
+            defects.append(
+                Defect(
+                    defect_id="carry_forward.unsealed_prior_retry",
+                    message=f"Prior attempt 'attempt_{prior_attempt}' is an unsealed retry (prior audit did not clear Gate 4); carry-forward continues with cumulative issue history ledger.",
+                    stage=stage_id,
+                    severity="INFO",
+                    blocking=False,
+                )
+            )
+
+    # 3. Require non-empty cumulative issue history ledger for attempt > 1
+    issue_history_path = resolve_task_dir(ctx.workspace_root, ctx.task_id) / f"TASK_{ctx.task_id}_ISSUE_HISTORY.md"
+    alt_history = ctx.workspace_root / f"TASK_{ctx.task_id}_ISSUE_HISTORY.md"
+    active_history = issue_history_path if issue_history_path.is_file() else (alt_history if alt_history.is_file() else None)
+    if not active_history or not active_history.read_text(encoding="utf-8", errors="ignore").strip():
+        defects.append(
+            Defect(
+                defect_id="carry_forward.missing_issue_history",
+                message=f"Cumulative issue history ledger 'TASK_{ctx.task_id}_ISSUE_HISTORY.md' is missing or empty for attempt {ctx.attempt}.",
+                stage=stage_id,
+                severity="CRITICAL",
+                blocking=True,
+            )
+        )
 
     has_blocking = any(d.blocking for d in defects)
     return StageResult(

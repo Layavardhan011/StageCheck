@@ -7,6 +7,7 @@ verdict with strict zero partial pass semantics (GAP-04, GAP-AE1).
 
 from __future__ import annotations
 
+import datetime
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -25,14 +26,17 @@ from stagecheck.checks import (
     run_stage8_rerun,
     run_stage9_carry_forward,
 )
+from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.evidence import (
     append_issue_history,
-    create_task_seal,
     update_evidence_manifest,
 )
-from stagecheck.core.paths import find_workspace_root
+from stagecheck.core.git import run_safe_git
+from stagecheck.core.paths import find_workspace_root, resolve_task_dir, safe_resolve, write_text_nofollow
+from stagecheck.core.permissions import controlled_write_transaction
 from stagecheck.core.utils import (
     canonical_json_dumps,
+    pretty_json_dumps,
     sha256_file,
     validate_schema,
 )
@@ -49,14 +53,33 @@ def _load_optional_json(path: Path) -> Dict[str, Any]:
         return {}
 
 
-def _match_disposition(defect: Defect, dispositions: List[Dict[str, Any]]) -> bool:
-    """Check if a defect is waived by an approved human disposition."""
+def _match_disposition(
+    defect: Defect,
+    dispositions: List[Dict[str, Any]],
+    task_id: str,
+    workspace_root: Optional[Path] = None,
+    attempt: Optional[int] = None,
+) -> bool:
+    """Check if a defect is waived by a provenance-verified human disposition for (task_id, attempt)."""
+    if workspace_root is None or attempt is None:
+        return False
+    from stagecheck.core.dispositions import validate_waiver_provenance
+
     for disp in dispositions:
-        if disp.get("defect_id") == defect.defect_id:
-            # If disposition specifies repo, it must match
-            disp_repo = disp.get("repo")
-            if disp_repo and defect.repo and disp_repo != defect.repo:
-                continue
+        if not isinstance(disp, dict):
+            continue
+        disp_repo = disp.get("repo")
+        if disp_repo and defect.repo and disp_repo != defect.repo:
+            continue
+        ok, _ = validate_waiver_provenance(
+            workspace_root=workspace_root,
+            entry=disp,
+            task_id=task_id,
+            attempt=attempt,
+            required_rule_id=defect.defect_id,
+            all_entries=dispositions,
+        )
+        if ok:
             return True
     return False
 
@@ -78,7 +101,20 @@ class AuditOrchestrator:
         resolved_task_id = task_id or active_state.get("task_id", "task-default")
         resolved_attempt = attempt or active_state.get("attempt_index", 1)
 
-        # 2. Product Repositories
+        # 2. Resolve Attempt Directory & Pre-Commit Status for dynamic baseline resolution
+        attempt_dir = resolve_task_attempt_dir(self.workspace_root, resolved_task_id, resolved_attempt)
+        p2a_status_path = attempt_dir / "Phase-2A" / "pre_commit_status.json"
+        p2a_status = _load_optional_json(p2a_status_path)
+        has_declared_touched = (
+            "touched_repositories" in p2a_status
+            and isinstance(p2a_status["touched_repositories"], list)
+        )
+
+        baseline_file = attempt_dir / "repo_baseline.json"
+        repo_baseline_data = _load_optional_json(baseline_file) if baseline_file.is_file() else {}
+        p2a_base_commits = p2a_status.get("base_commits", {}) if isinstance(p2a_status, dict) else {}
+
+        # 3. Product Repositories
         prod_repos = _load_optional_json(self.workspace_root / "controls" / "PRODUCT_REPOSITORIES.json")
         repo_dict = prod_repos.get("repositories", {})
         all_registered = list(repo_dict.keys())
@@ -86,19 +122,21 @@ class AuditOrchestrator:
         target_commits: Dict[str, str] = {}
 
         for name, meta in repo_dict.items():
-            base_commits[name] = meta.get("baseline_head", "0" * 40)
+            # Priority: attempt repo_baseline.json > pre_commit_status.json > PRODUCT_REPOSITORIES.json
+            auth_b = None
+            if isinstance(repo_baseline_data, dict) and isinstance(repo_baseline_data.get(name), dict):
+                auth_b = repo_baseline_data[name].get("head_commit")
+            if not auth_b and isinstance(p2a_base_commits, dict) and p2a_base_commits.get(name):
+                auth_b = p2a_base_commits[name]
+            if not auth_b:
+                auth_b = meta.get("baseline_head", "0" * 40)
+            base_commits[name] = auth_b
+
             rel_p = meta.get("path", f"repos/{name}")
             repo_path = self.workspace_root / rel_p
             if (repo_path / ".git").exists():
                 try:
-                    import subprocess
-                    head_res = subprocess.run(
-                        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        check=False,
-                    )
+                    head_res = run_safe_git(repo_path, ["rev-parse", "HEAD"])
                     if head_res.returncode == 0:
                         target_commits[name] = head_res.stdout.strip()
                 except Exception:
@@ -108,14 +146,7 @@ class AuditOrchestrator:
         if not all_registered and (self.workspace_root / ".git").exists():
             all_registered = ["root"]
             try:
-                import subprocess
-                head_res = subprocess.run(
-                    ["git", "-C", str(self.workspace_root), "rev-parse", "HEAD"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    check=False,
-                )
+                head_res = run_safe_git(self.workspace_root, ["rev-parse", "HEAD"])
                 if head_res.returncode == 0:
                     target_commits["root"] = head_res.stdout.strip()
                     base_commits["root"] = target_commits["root"]
@@ -124,6 +155,13 @@ class AuditOrchestrator:
 
         # Detect touched repos
         touched: List[str] = []
+        if has_declared_touched:
+            declared = [
+                r.removeprefix("repos/") if isinstance(r, str) and r.startswith("repos/") else r
+                for r in p2a_status["touched_repositories"]
+            ]
+            touched = [r for r in declared if r in all_registered or r == "root"]
+
         for name in all_registered:
             rel_p = repo_dict.get(name, {}).get("path", f"repos/{name}" if name != "root" else ".")
             repo_path = self.workspace_root / rel_p
@@ -131,53 +169,34 @@ class AuditOrchestrator:
                 continue
             # If target HEAD differs from base commit, repo was touched
             if target_commits.get(name) and base_commits.get(name) and target_commits[name] != base_commits[name]:
-                touched.append(name)
+                if name not in touched:
+                    touched.append(name)
             else:
                 # Also check working tree changes
                 try:
-                    import subprocess
-                    diff_res = subprocess.run(
-                        ["git", "-C", str(repo_path), "status", "--porcelain=v1"],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        check=False,
-                    )
-                    if diff_res.stdout.strip():
+                    diff_res = run_safe_git(repo_path, ["status", "--porcelain=v1"])
+                    if diff_res.stdout.strip() and name not in touched:
                         touched.append(name)
                 except Exception:
                     pass
-        if not touched and all_registered:
+
+        # Only fallback to all registered repos if the task did not explicitly declare touched_repositories.
+        # This preserves empty touched_repos for verified read-only / evidence-only tasks.
+        if not touched and all_registered and not has_declared_touched:
             touched = list(all_registered)
 
-        # 3. Claims
-        claims_path = (
-            self.workspace_root
-            / "evidence"
-            / "tasks"
-            / resolved_task_id
-            / f"attempt_{resolved_attempt}"
-            / "Phase-2B"
-            / "claims.json"
-        )
+        # 4. Claims
+        claims_path = attempt_dir / "Phase-2B" / "claims.json"
         if not claims_path.is_file():
             claims_path = self.workspace_root / "claims.json"
         claims = _load_optional_json(claims_path)
 
-        # 4. Dispositions
+        # 5. Dispositions
         disp_doc = _load_optional_json(self.workspace_root / "controls" / "DISPOSITIONS.json")
         dispositions = disp_doc.get("dispositions", [])
 
-        # 5. Declared Scope
-        scope_path = (
-            self.workspace_root
-            / "evidence"
-            / "tasks"
-            / resolved_task_id
-            / f"attempt_{resolved_attempt}"
-            / "Phase-1"
-            / "declared_scope.json"
-        )
+        # 6. Declared Scope
+        scope_path = attempt_dir / "Phase-1" / "declared_scope.json"
         if not scope_path.is_file():
             scope_path = self.workspace_root / "controls" / "declared_scope.json"
         if not scope_path.is_file():
@@ -199,6 +218,11 @@ class AuditOrchestrator:
 
     def run_all_stages(self, ctx: AuditContext) -> Tuple[bool, Dict[str, Any]]:
         """Run all nine stages in sequence, evaluate dispositions, and format verdict."""
+        from stagecheck.core.isolation import run_bwrap_deployment_preflight
+
+        # Fail closed before running any audit stage or rerun if OS isolation preflight fails (GAP-03)
+        run_bwrap_deployment_preflight(workspace_root=ctx.workspace_root, raise_on_failure=True)
+
         stage_runners = [
             ("preflight", run_stage1_preflight),
             ("scope_paths", run_stage2_scope_paths),
@@ -236,10 +260,119 @@ class AuditOrchestrator:
             stage_results.append(res)
             all_defects.extend(res.defects)
             all_errors.extend(res.errors)
+            if res.errors and not any(d.blocking for d in res.defects):
+                err_defect = Defect(
+                    defect_id=f"{res.stage_id}.stage_error",
+                    message=f"Stage '{res.stage_id}' reported errors: {'; '.join(res.errors)}",
+                    stage=res.stage_id,
+                    severity="HIGH",
+                    blocking=True,
+                )
+                res.defects.append(err_defect)
+                all_defects.append(err_defect)
 
-        # Evaluate human dispositions / waivers
+        # Check multi-repository availability (zero partial pass)
+        for repo_name in ctx.all_registered_repos:
+            repo_p = self.workspace_root / "repos" / repo_name if repo_name != "root" else self.workspace_root
+            if not repo_p.is_dir():
+                all_defects.append(
+                    Defect(
+                        defect_id="multi_repo.repository_unavailable",
+                        message=f"Registered repository '{repo_name}' is unavailable or missing at '{repo_p}'.",
+                        stage="preflight",
+                        severity="CRITICAL",
+                        blocking=True,
+                        repo=repo_name,
+                    )
+                )
+
+        # 10. Run 270-Rule Rubric Evaluation (FR-03 / DEC-003 / DEC-026)
+        rubric_payload: Dict[str, Any] = {}
+        try:
+            from stagecheck.core.rubric_engine import run_rubric_evaluation
+
+            rerun_stage = next((r for r in stage_results if r.stage_id == "rerun"), None)
+            sec_stage = next((r for r in stage_results if r.stage_id == "secrets"), None)
+            stage_summaries = [r.to_dict() for r in stage_results]
+            audit_rubric_ctx: Dict[str, Any] = {
+                "stage_results": stage_summaries,
+                "claims": ctx.claims,
+                "rerun_results": {
+                    "status": rerun_stage.status if rerun_stage else "UNKNOWN",
+                    "errors": rerun_stage.errors if rerun_stage else ["rerun_stage_missing"],
+                    "defects": [d.defect_id for d in rerun_stage.defects] if rerun_stage else [],
+                },
+            }
+            if sec_stage and sec_stage.status == "PASS" and not any(d.blocking for d in sec_stage.defects):
+                audit_rubric_ctx["scanner_report_doc"] = {"status": "PASSED", "defects": []}
+
+            rubric_payload, _ = run_rubric_evaluation(
+                workspace_root=self.workspace_root,
+                task_id=ctx.task_id,
+                attempt=ctx.attempt,
+                context=audit_rubric_ctx,
+            )
+            if rubric_payload.get("evaluation_completeness") != "COMPLETE" or rubric_payload.get("evaluated_rule_count") != 270:
+                all_defects.append(
+                    Defect(
+                        defect_id="rubric.incomplete_evaluation",
+                        message=(
+                            f"Phase 3 audit rubric is '{rubric_payload.get('evaluation_completeness')}' "
+                            f"({rubric_payload.get('evaluated_rule_count')}/{rubric_payload.get('expected_rule_count', 270)})."
+                        ),
+                        stage="rubric",
+                        severity="CRITICAL",
+                        blocking=True,
+                    )
+                )
+            if rubric_payload.get("overall_verdict") != "PASS":
+                added_rubric_defect = False
+                for eval_item in rubric_payload.get("evaluations", []):
+                    st = eval_item.get("status")
+                    if st in ("FAIL", "BLOCKED", "NOT_EVALUATED"):
+                        added_rubric_defect = True
+                        all_defects.append(
+                            Defect(
+                                defect_id=eval_item.get("rule_id", "RUBRIC_DEFECT"),
+                                message=eval_item.get("message")
+                                or eval_item.get("rationale")
+                                or f"Rubric rule {eval_item.get('rule_id')} returned status {st}.",
+                                stage="rubric",
+                                severity="CRITICAL",
+                                blocking=True,
+                                repo=eval_item.get("repository"),
+                            )
+                        )
+                if not added_rubric_defect:
+                    all_defects.append(
+                        Defect(
+                            defect_id="rubric.incomplete_or_failed",
+                            message=f"Rubric overall_verdict is '{rubric_payload.get('overall_verdict')}'.",
+                            stage="rubric",
+                            severity="CRITICAL",
+                            blocking=True,
+                        )
+                    )
+        except Exception as r_err:
+            all_defects.append(
+                Defect(
+                    defect_id="rubric.evaluation_error",
+                    message=f"Rubric evaluation failed: {r_err}",
+                    stage="rubric",
+                    severity="CRITICAL",
+                    blocking=True,
+                )
+            )
+
+        # Evaluate human dispositions / waivers (strictly validated for GAP-03 provenance)
         for defect in all_defects:
-            if defect.blocking and _match_disposition(defect, ctx.dispositions):
+            if defect.blocking and _match_disposition(
+                defect,
+                ctx.dispositions,
+                ctx.task_id,
+                workspace_root=self.workspace_root,
+                attempt=ctx.attempt,
+            ):
                 defect.blocking = False
                 defect.severity = "WAIVED"
 
@@ -247,8 +380,9 @@ class AuditOrchestrator:
         blocking_count = sum(1 for d in all_defects if d.blocking)
         report_only_count = len(all_defects) - blocking_count
 
-        overall_passed = (blocking_count == 0)
+        overall_passed = (blocking_count == 0 and len(all_errors) == 0)
         overall_result = "CLEAR" if overall_passed else "BLOCKED"
+        overall_status = "PASSED" if overall_passed else "FAILED"
 
         # Format checks for verdict.schema.json
         checks_payload = []
@@ -323,6 +457,7 @@ class AuditOrchestrator:
             "not_run": [],
             "errors": all_errors,
             "result": overall_result,
+            "status": overall_status,
             "questions": [],
             "counts": {
                 "blocking": blocking_count,
@@ -331,40 +466,80 @@ class AuditOrchestrator:
             },
         }
 
-        # Write verdict.json
-        phase3_dir = (
-            self.workspace_root
-            / "evidence"
-            / "tasks"
-            / ctx.task_id
-            / f"attempt_{ctx.attempt}"
-            / "Phase-3"
+        # Resolve target directories
+        rel_phase3 = f"evidence/tasks/{ctx.task_id}/attempt_{ctx.attempt}/Phase-3"
+        phase3_dir = safe_resolve(rel_phase3, self.workspace_root, allow_symlinks=False)
+        attempt_dir = safe_resolve(f"evidence/tasks/{ctx.task_id}/attempt_{ctx.attempt}", self.workspace_root, allow_symlinks=False)
+        task_root_dir = safe_resolve(f"evidence/tasks/{ctx.task_id}", self.workspace_root, allow_symlinks=False)
+
+        verdict_path = safe_resolve(f"{rel_phase3}/verdict.json", self.workspace_root, allow_symlinks=False)
+
+        # 2. test_execution.json
+        rerun_res = next((r.to_dict() for r in stage_results if r.stage_id == "rerun"), {})
+        test_exec_data = {
+            "schema_version": "2.0.0",
+            "task_id": ctx.task_id,
+            "attempt_index": ctx.attempt,
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "status": "PASSED" if not any(d.stage == "rerun" and d.blocking for d in all_defects) else "FAILED",
+            "repositories": ctx.all_registered_repos,
+            "stage_summary": rerun_res,
+        }
+        test_exec_path = safe_resolve(f"{rel_phase3}/test_execution.json", self.workspace_root, allow_symlinks=False)
+
+        # 3. scanner_report.json
+        sec_res = next((r.to_dict() for r in stage_results if r.stage_id == "secrets"), {})
+        scanner_data = {
+            "schema_version": "2.0.0",
+            "task_id": ctx.task_id,
+            "attempt_index": ctx.attempt,
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "scanner": "gitleaks",
+            "pinned_config": "config/.gitleaks.toml",
+            "status": "PASSED" if not any(d.stage == "secrets" and d.blocking for d in all_defects) else "FAILED",
+            "repositories": ctx.all_registered_repos,
+            "stage_summary": sec_res,
+        }
+        scanner_path = safe_resolve(f"{rel_phase3}/scanner_report.json", self.workspace_root, allow_symlinks=False)
+
+        # 4. rubric_evaluation.json
+        rubric_path = safe_resolve(f"{rel_phase3}/rubric_evaluation.json", self.workspace_root, allow_symlinks=False)
+
+        # Target path for task root verdict.json
+        task_verdict_path = safe_resolve(f"evidence/tasks/{ctx.task_id}/verdict.json", self.workspace_root, allow_symlinks=False)
+
+        # Write Phase-3 directory artifacts safely under controlled write transaction
+        with controlled_write_transaction(attempt_dir):
+            phase3_dir.mkdir(parents=True, exist_ok=True)
+            with controlled_write_transaction(phase3_dir):
+                # 1. verdict.json
+                write_text_nofollow(verdict_path, pretty_json_dumps(verdict_data), append=False, mode=0o644)
+                # 2. test_execution.json
+                write_text_nofollow(test_exec_path, pretty_json_dumps(test_exec_data), append=False, mode=0o644)
+                # 3. scanner_report.json
+                write_text_nofollow(scanner_path, pretty_json_dumps(scanner_data), append=False, mode=0o644)
+                # 4. rubric_evaluation.json
+                write_text_nofollow(rubric_path, pretty_json_dumps(rubric_payload), append=False, mode=0o644)
+
+        # Also write task root verdict.json for high-level tools under controlled write transaction
+        with controlled_write_transaction(task_root_dir):
+            task_root_dir.mkdir(parents=True, exist_ok=True)
+            write_text_nofollow(task_verdict_path, pretty_json_dumps(verdict_data), append=False, mode=0o644)
+
+        # Update evidence manifest with all Phase-3 audit deliverables
+        update_evidence_manifest(
+            self.workspace_root,
+            [
+                verdict_path,
+                test_exec_path,
+                scanner_path,
+                rubric_path,
+                task_root_dir / "verdict.json",
+            ],
         )
-        phase3_dir.mkdir(parents=True, exist_ok=True)
-        verdict_path = phase3_dir / "verdict.json"
-        with open(verdict_path, "w", encoding="utf-8") as f:
-            f.write(canonical_json_dumps(verdict_data) + "\n")
 
-        # Also write task root verdict.json for high-level tools
-        task_root_dir = self.workspace_root / "evidence" / "tasks" / ctx.task_id
-        task_root_dir.mkdir(parents=True, exist_ok=True)
-        with open(task_root_dir / "verdict.json", "w", encoding="utf-8") as f:
-            f.write(canonical_json_dumps(verdict_data) + "\n")
-
-        # Update evidence manifest with verdicts
-        update_evidence_manifest(self.workspace_root, [verdict_path, task_root_dir / "verdict.json"])
-
-        # Create task seal or append issue history
-        if overall_passed:
-            create_task_seal(
-                workspace_root=self.workspace_root,
-                task_id=ctx.task_id,
-                attempt=ctx.attempt,
-                verdict_data=verdict_data,
-                checked_heads=ctx.target_commits,
-                outcome="PASSED",
-            )
-        else:
+        # Handle failure history and circuit breaker (sealing is deferred strictly to Gate 4)
+        if not overall_passed:
             append_issue_history(
                 workspace_root=self.workspace_root,
                 task_id=ctx.task_id,
@@ -389,6 +564,14 @@ class AuditOrchestrator:
                     attempt=ctx.attempt,
                     evaluation=cb_eval,
                     current_defects=formatted_defects,
+                )
+            else:
+                from stagecheck.core.gate_engine import handle_audit_verdict
+                handle_audit_verdict(
+                    workspace_root=self.workspace_root,
+                    task_id=ctx.task_id,
+                    attempt=ctx.attempt,
+                    verdict_data=verdict_data,
                 )
 
         return overall_passed, verdict_data

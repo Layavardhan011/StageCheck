@@ -6,6 +6,7 @@ and committed atomically with automatic rollback upon any failure.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -13,12 +14,18 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from stagecheck.core.git import RepoBaseline
+from stagecheck.core.start_manifest import generate_start_manifest
 from stagecheck.core.utils import (
     canonical_json_dumps,
+    pretty_json_dumps,
     sha256_canonical,
     sha256_digest,
+    sha256_file,
+    validate_agent_slug,
 )
 from stagecheck.schemas.validator import validate_control_descriptor
+
+deterministic_json_dumps = pretty_json_dumps
 
 
 class ScaffoldingError(Exception):
@@ -40,7 +47,7 @@ and security waivers. AI agents have strictly zero authority to modify this file
 * Direct remote push commands (git push) are strictly forbidden for AI agents.
 
 ## Privileged Operator Identities
-* Authorized owner: `owner@stagecheck.local`
+* Authorized owner: `owner@stagecheck.local` (roles: OWNER; permissions: WAIVER_APPROVE, WAIVER_REVOKE, GATE_OVERRIDE, CIRCUIT_BREAKER_RESET)
 """
 
 DEFAULT_FAILURE_PREVENTION_MD = """# Failure Prevention, Historical Defect Patterns & Anti-Regressions
@@ -60,7 +67,7 @@ DEFAULT_AGENT1_INSTRUCTIONS_MD = """# Agent 1 Instructions: Prompt Architecture 
 Role: `prompt_and_audit`.
 
 ## Purpose
-Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define declared scope (`declared_scope.json`), perform Phase 2A pre-commit cooperative differential reviews, and conduct Phase 3 independent audit reviews.
+Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define declared scope (`declared_scope.json`), perform Phase 2A pre-commit cooperative differential reviews, conduct Phase 3 independent audit reviews, and monitor attempt/task completion progression.
 
 ## Inputs
 - `specs/TASK_PLAN.json`
@@ -71,11 +78,46 @@ Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define d
 ## Checks
 - Verify task decomposition against architectural contracts.
 - Review uncommitted diffs for scope compliance and secret exposure.
-- Record defect history in `TASK_<ID>_ISSUE_HISTORY.md`.
+- Enforce strict scope containment against `declared_scope.json`. Never direct or allow Agent 2 to modify pre-existing repository files outside declared scope.
+- Track defect history and failure diagnostics. Note: StageCheck automatically appends defect findings to `TASK_<ID>_ISSUE_HISTORY.md` and indexes them in `EVIDENCE_MANIFEST.json`; do not manually edit the history file.
+
+## Phase-2 Cooperative Review Protocol (JSON Status Loop)
+- **Do not stop** after authoring `Phase-1/prompt.md` and `Phase-1/declared_scope.json` — continuously poll `stagecheck turn --task <task_id> --json` (e.g., `sleep 5`, respecting max 3 calls per 5s window) until `Phase-2A` / `Phase-3` / task completion.
+- During `PHASE_2A_CODING`, StageCheck does not interfere while Agent 1 and Agent 2 iterate via Phase-2A JSON status files. Agent 1 MUST wait for Agent 2 to implement changes and submit `Phase-2A/pre_commit_status.json`. Agent 1 MUST NEVER bypass Agent 2 or usurp Agent 2's implementation role.
+- Poll until `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` has `"status": "AWAITING_REVIEW"` (or `active_turn == "AGENT_1"`).
+- Review the uncommitted diff (`git status`, `git diff`), tests, and scope compliance, then record `Phase-2A/agent_reviews.json` and run `stagecheck review-precommit --task <task_id> --attempt <N>`:
+  - **Phase-2A Review Boundaries (Strict Phase Separation):** Review ONLY uncommitted diffs, scope compliance, tests, and secrets in `repos/*`. DO NOT demand, require, or flag missing Phase-2B deliverables (`Phase-2B/report.md`, `Phase-2B/claims.json`, or any Phase-2B files) during Phase 2A review. Phase-2B deliverables CANNOT exist during Phase 2A because Phase 2B is only unlocked AFTER Gate 2A is approved. Demanding Phase-2B deliverables in Phase 2A creates an impossible deadlock.
+  - If defects remain in the code/tests/scope, write `"status": "REVISION_REQUIRED"` in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json` so `active_turn` returns to `AGENT_2`, and continue polling until Agent 2 resubmits with an incremented cycle.
+  - Once all defects are resolved, approve via `stagecheck approve-review` (`"status": "APPROVED"`) so StageCheck can commit and advance Gate-2A / Gate-2B.
+- **MultiversX Architectural Security Review (5 Invariant Pillars):** During Phase 2A review, audit uncommitted code against core blockchain invariants:
+  1. *Consensus Invariants:* Zero alteration to consensus-critical hash outputs, block headers, round pacing, or leader execution rules.
+  2. *Sharding Invariants:* State isolation, cross-shard miniblock routing, and storage trie integrity remain intact.
+  3. *Serialization & Endianness:* Deterministic big-endian byte layouts; reject un-ordered map iterations and wire format shifts.
+  4. *ZK Boundary Discipline:* Reject unapproved proof-system dependencies, circuits, or fake prover/verifier claims.
+  5. *Caller-Side Non-Disclosure:* Private witness bytes, secret scalars, and proof payloads are never passed to logger arguments.
+  Record passing invariants in `architectural_intents_approved` and any violation in `new_issues_found` with status `"REVISION_REQUIRED"`.
+- **Qualification Suite Mapping (`evals/`):** In Phase 1, inspect `evals/README.md`. If the task impacts qualification-covered contracts, declare `"evals"` in `declared_scope.json["read_only_paths"]`, and explicitly mandate the qualification test runner command (e.g. `cd evals && go test -v <qual_test>.go`) under Section 4 of `Phase-1/prompt.md`.
+- **JSON Formatting Standard:** All JSON artifacts authored by Agent 1 (`Phase-2A/agent_reviews.json`, `Phase-2A/pre_commit_review.json`, etc.) MUST be formatted multi-line with 2-space indentation (`indent=2`) and a single trailing newline (`\n`). NEVER write minified or single-line JSON files.
+
+## Continuous Roadmap Waiting & Processing Loop (Multi-Task Lifecycle)
+- **Do not stop or exit until all roadmap tasks are complete:** Agent 1 must remain active in a persistent polling and waiting loop across all roadmap tasks until the entire project is completed and sealed.
+- **Phase-Specific Waiting States:**
+  1. *Phase 1 -> 2A Waiting:* After executing `stagecheck verify-prompt` and freezing Phase 1, enter WAITING state (`sleep 5`, respecting max 3 calls per 5s window on `stagecheck turn --json`). Wait while Agent 2 implements code until `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` has `"status": "AWAITING_REVIEW"` (and `active_turn == "AGENT_1"`).
+  2. *Phase 2A Revision Waiting:* If review findings report `"status": "REVISION_REQUIRED"`, return to WAITING state until Agent 2 addresses review defects, increments `cycle`, and resubmits `pre_commit_status.json`.
+  3. *Phase 2B & Phase 3 Waiting:* Once review is approved (`"status": "APPROVED"`), enter WAITING state while Agent 2 commits locally on task branch, authors Phase-2B deliverables, and StageCheck runs Phase-3 audit and seals Gate-4.
+- **Roadmap Progression & Termination Condition:**
+  - Continuously monitor `controls/ACTIVE_STATE.json` (`phase`, `status`, `attempt_index`, `circuit_breaker_tripped`, `completed_tasks`) and `evidence/tasks/<task_id>/attempt_<N>/Phase-3/verdict.json` (`result`: `PASSED` vs `BLOCKED`).
+  - If an attempt fails Phase-3 audit, track remaining attempt budget (`attempt_index <= 3`); if `phase == "AWAITING_HUMAN_DISPOSITION"` or `circuit_breaker_tripped == true`, pause for human disposition/reset.
+  - When the active task reaches `SEALED_PASSED` / `COMPLETED`, check roadmap progression by running `stagecheck plan next --activate` (or `stagecheck plan next` followed by `stagecheck start --task <next_task_id>`).
+  - If a next eligible task is available, proceed immediately to begin Phase 1 of the next task.
+  - Terminate ONLY when `stagecheck plan next` outputs `"Notice: No pending eligible tasks found in roadmap. All tasks completed or blocked."`
 
 ## Must Not
 - MUST NOT execute mutating Git commands (`git commit`, `git push`, `git merge`, `git rebase`).
 - MUST NOT write product code in `repos/*`.
+- MUST NOT author Agent 2 deliverables: `pre_commit_status.json`, `Phase-2B/report.md`, or `Phase-2B/claims.json`. These deliverables are strictly the sole responsibility of Agent 2. Usurping Agent 2's role destroys dual-agent governance separation.
+- MUST NOT demand, require, or flag missing Phase-2B deliverables (`Phase-2B/report.md`, `Phase-2B/claims.json`, or any `Phase-2B/*` files) during Phase-2A pre-commit review. Phase-2B deliverables belong strictly to Phase 2B.
+- MUST NOT include `controls/` or any file within `controls/` in `Phase-1/declared_scope.json` (neither under `read_write_paths` nor under `read_only_paths`). `controls/` is strictly governed by the human owner and StageCheck runtime; declaring it in scope triggers a blocking ScopeValidationError.
 - MUST NOT alter control descriptors in `controls/*` or edit `.stagecheck.lock`.
 - Permitted Git commands are strictly read-only: `git status`, `git log`, `git diff`, `git show`, `git blame`, `git branch`.
 """
@@ -85,7 +127,20 @@ DEFAULT_AGENT2_INSTRUCTIONS_MD = """# Agent 2 Instructions: Code Implementation 
 Role: `code_implementation`.
 
 ## Purpose
-Implement source code, unit tests, and regression coverage for approved tasks on permitted sprint branches.
+Implement source code, unit tests, and regression coverage for approved tasks on permitted sprint branches, and author Phase-2 deliverables (`pre_commit_status.json`, `report.md`, `claims.json`).
+
+## Workspace Authority & Scope Boundaries
+- **Product Repositories (`repos/*`):** `repos/<repo_name>/` is YOUR PRIMARY WORKSPACE and is **NOT** prohibited. You are the Code Implementer; your primary duty is to implement and fix source code and tests in `repos/*` strictly within `Phase-1/declared_scope.json`.
+- **Strict Scope Confinement & Pre-existing Files Invariant:** You MUST strictly confine all modifications to files explicitly permitted in `evidence/tasks/<task_id>/attempt_<N>/Phase-1/declared_scope.json`. You MUST NEVER modify pre-existing upstream repository files that are outside the declared scope. Even if an automated tool or unexpected error message flags pre-existing files, do NOT touch or modify out-of-scope files; escalate to Agent 1 or the human operator.
+- **Zero Test Relaxation:** Never relax assertions, skip existing unit tests, or delete pre-existing tests to bypass checks. All existing test suites must remain intact and passing.
+- **Dedicated Sprint Branches:** Always work and commit on the dedicated sprint branch (`sprint/<sprint-id>-<sprint-name>` e.g. `sprint/sprint-01-zk-readiness` as defined in `specs/TASK_PLAN.json`, or fallback `sprint/sprint-00-UNKNOWN`). All tasks in a sprint chain sequentially on this single dedicated branch. Committing directly to `main`, `master`, or `Development` is strictly prohibited.
+- **Evidence Tree (`evidence/tasks/<task_id>/attempt_<N>/`):** The evidence directory is **NOT** an unrestricted workspace. You are ONLY authorized to author and modify your designated deliverables:
+  - `Phase-2A/pre_commit_status.json`
+  - `Phase-2B/report.md`
+  - `Phase-2B/claims.json`
+  - `Phase-2B/witnesses/*`
+  You MUST NOT edit, create, or alter ANY other evidence files (e.g., `Phase-1/*`, `Phase-2A/pre_commit_review.json`, `Phase-2A/agent_reviews.json`, `Phase-2A/rubric_evaluation.json`, `Phase-2B/gate2b_receipt.json`, or any `Phase-3/*` files).
+- **Prohibited Trees:** `controls/*` and `specs/*` are strictly prohibited from being modified.
 
 ## Inputs
 - `evidence/tasks/<task_id>/attempt_<N>/Phase-1/prompt.md`
@@ -97,9 +152,150 @@ Implement source code, unit tests, and regression coverage for approved tasks on
 - Ensure all unit tests pass locally before submitting for Phase 2A review.
 - Run local Gitleaks secret check (`gitleaks protect --staged`) prior to commit.
 
+## Phase-2A Pre-Commit Status Schema (`pre_commit_status.json`)
+- Author `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` strictly conforming to `pre_commit_status.schema.json`:
+  ```json
+  {
+    "schema_version": "2.0.0",
+    "task_id": "<task_id>",
+    "attempt": <N>,
+    "cycle": 1,
+    "status": "AWAITING_REVIEW",
+    "touched_repositories": ["<repo_name>"],
+    "base_commits": {
+      "<repo_name>": "<base_commit_hash>"
+    },
+    "summary": "Implementation summary and changes"
+  }
+  ```
+  Note:
+  - `schema_version` must be string `"2.0.0"`. `status` must be `"AWAITING_REVIEW"` (or `"IN_REVISION"`).
+  - **Repository Identifier Formatting:** `touched_repositories` and `base_commits` keys MUST be bare repository names matching `controls/PRODUCT_REPOSITORIES.json` (e.g. `"mx-chain-core-go"`). DO NOT prefix them with `"repos/"` (e.g., do NOT write `"repos/mx-chain-core-go"`).
+
+## Continuous Lifecycle & Mandatory Waiting States
+- **Mandatory Lifecycle Invariant (Agent 2):** "don't stop until 2A and 2B is complete be in the waiting state"
+  You must never prematurely exit or stop running. Throughout the entire task lifecycle, you must remain in the waiting state polling `stagecheck turn --task <task_id> --json` (e.g., `sleep 5`, max 3 calls per 5s window) whenever it is not your active turn.
+- **Persistent Multi-Task Lifecycle (Do NOT terminate after Phase 2B):** Agent 2 must NOT exit or terminate after delivering `Phase-2B/report.md` and `Phase-2B/claims.json`. Agent 2 must remain running in a continuous polling and waiting state across all roadmap tasks and attempt retries. Remember: "don't stop until 2A and 2B is complete be in the waiting state".
+- **Phase-Specific Waiting States:**
+  1. *Phase 1 Planning Wait:* While the workspace is in `PHASE_1_PLANNING`, remain in WAITING state (`sleep 5`, max 3 calls per 5s window on `stagecheck turn --task <task_id> --json`). Do NOT modify files in `repos/*` or touch evidence files until StageCheck advances Gate 1 and `controls/ACTIVE_STATE.json` reports `phase == "PHASE_2A_CODING"` with `active_turn == "AGENT_2"`.
+  2. *Phase 2A Implementation:* Implement changes strictly within `Phase-1/declared_scope.json`, run local tests and `gitleaks protect --staged`, and write `evidence/tasks/<task_id>/attempt_<N>/Phase-2A/pre_commit_status.json` with `"status": "AWAITING_REVIEW"`, `cycle`, `touched_repositories`, and `base_commits`.
+  3. *Phase 2A Review Wait:* After authoring `pre_commit_status.json`, enter WAITING state ("don't stop until 2A and 2B is complete be in the waiting state"). Continuously poll `Phase-2A/pre_commit_review.json` (and `stagecheck turn --task <task_id> --json`, max 3 calls per 5s window). Do NOT start generating Phase-2B deliverables.
+  4. *Phase 2A Revision Loop:* If `"status": "REVISION_REQUIRED"`, wake from waiting, inspect defects in `Phase-2A/pre_commit_review.json` / `Phase-2A/response.json`.
+     - **CRITICAL REVISION INVARIANT:** You MUST modify and fix the underlying source code and test files in `repos/*` to resolve review defects. Merely editing, updating schema fields, or re-saving `pre_commit_status.json` DOES NOT resolve defects and will cause review rejection.
+     - **MANDATORY CYCLE INCREMENT (Turn Engine Invariant):** You MUST increment `cycle` so that it is strictly greater than the review cycle (`cycle = rev_cycle + 1`, e.g. if review `cycle` is 2, set `"cycle": 3`). If `cycle` is not strictly greater than `rev_cycle`, the turn engine will consider the revision incomplete and keep the turn on Agent 2 (`waiting_for: Phase-2A/pre_commit_status.json`), preventing Agent 1 from ever reviewing!
+     - After fixing the code/tests in `repos/*`, verifying tests pass locally, and incrementing `cycle` in `Phase-2A/pre_commit_status.json`, set `"status": "AWAITING_REVIEW"` and resubmit.
+     - Repeat until `Phase-2A/pre_commit_review.json` reports `"status": "APPROVED"`.
+  5. *Strict Phase 2A Completion Requirement:* DO NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first. Phase 2A is completed ONLY when `Phase-2A/pre_commit_review.json` reports `"status": "APPROVED"` and StageCheck advances the active phase to `PHASE_2B_COMMITTING`. Generating Phase-2B deliverables before Phase 2A approval is strictly prohibited and violates governance lifecycle ordering.
+  6. *Phase 2B Delivery & Structured Commit Protocol:* Once `phase == "PHASE_2B_COMMITTING"`, commit locally on the dedicated sprint branch and deliver BOTH `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/report.md` AND `evidence/tasks/<task_id>/attempt_<N>/Phase-2B/claims.json` so StageCheck can advance Gate-2B to Phase 3.
+     - **Commit Timing:** Commits occur strictly in Phase 2B after Phase 2A review approval.
+     - **Forward-Only Attempt Repair Model:** History rewriting (`git commit --amend`, `git reset`, `git rebase`) is strictly prohibited. If an attempt fails Phase-3 audit and a repair attempt begins (Attempt 2+), produce forward-only fix commits building directly upon prior attempts.
+     - **Structured Commit Message Format:**
+       - Initial Attempt (Attempt 1):
+         `[sp-<sprint_index>] T-<task_index>: <summary>`
+         Format: `[sp-XX] T-YY: <brief summary>`
+         Example: `[sp-01] T-02: Implement canonical ZK public input encoder`
+       - Repair Attempt (Attempt 2+):
+         `[sp-<sprint_index>] T-<task_index> AT-<attempt_index> SEC-<section_refs>: <summary>`
+         Format: `[sp-XX] T-YY AT-ZZ SEC-WW: <brief summary>`
+         Example: `[sp-01] T-02 AT-02 SEC-03: Resolve missing error check`
+         Or multi-section: `[sp-01] T-04 AT-02 SEC-01-SEC-03: Resolve claims schema and witness citations`
+         Link section references directly to issue sections in `TASK_<ID>_ISSUE_HISTORY.md`.
+  7. *Phase 3 Audit & Inter-Task Waiting:* After delivering `Phase-2B/report.md` and `Phase-2B/claims.json`, enter WAITING state while StageCheck executes Phase 3 audit and Gate 4 sealing. Remain in WAITING state ("don't stop until 2A and 2B is complete be in the waiting state") polling `controls/ACTIVE_STATE.json` and `stagecheck turn --json` until the next attempt or next roadmap task advances to `PHASE_2A_CODING` with `active_turn == "AGENT_2"`.
+  8. *Termination Condition:* Terminate ONLY when `controls/ACTIVE_STATE.json` reaches `COMPLETED` and `stagecheck plan next` confirms that all roadmap tasks have completed and sealed.
+
+## Phase-2B Deliverable Contracts & Citation Standards
+- **`Phase-2B/report.md`:** Must document the implementation summary, blast radius analysis, tests executed, and commit hashes.
+- **`Phase-2B/claims.json`:** Must strictly conform to `claims.schema.json` with exact property names:
+  ```json
+  {
+    "task_id": "<task_id>",
+    "iteration": 1,
+    "contract_sha256": "<64_hex_sha256_of_AGENTS.md>",
+    "record": "Phase-2B/report.md",
+    "record_sha256": "<64_hex_sha256_of_report.md>",
+    "claims": [
+      {
+        "id": "CLAIM-001",
+        "kind": "observation",
+        "text": "Repository core checked out cleanly on task branch.",
+        "scope": "repos/core",
+        "label": "SOURCE_PROVEN",
+        "citations": [
+          {
+            "type": "file",
+            "path": "evidence/tasks/<task_id>/attempt_1/Phase-2B/witnesses/git_branch.txt",
+            "sha256": "<64_hex_sha256_of_file>",
+            "lines": [1, 1],
+            "quote": "task-01-baseline-verification"
+          }
+        ],
+        "blast_radius": [
+          {
+            "group": 1,
+            "label": "not_applicable",
+            "reason": "Baseline check",
+            "items": []
+          }
+        ]
+      },
+      {
+        "id": "CLAIM-002",
+        "kind": "completion",
+        "text": "Unit tests pass cleanly",
+        "scope": "repos/core",
+        "label": "TEST_PROVEN",
+        "citations": [
+          {
+            "type": "command",
+            "record": "Phase-2B/witnesses/test_output.txt",
+            "record_sha256": "<64_hex_sha256_of_record_file>",
+            "argv": ["go", "test", "./..."],
+            "cwd": "repos/mx-chain-core-go",
+            "exit_status": 0,
+            "stdout_sha256": "<64_hex_sha256_of_stdout>",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        ],
+        "blast_radius": [
+          {
+            "group": 1,
+            "label": "checked",
+            "reason": "Core package test execution",
+            "items": ["core"]
+          }
+        ]
+      }
+    ]
+  }
+  ```
+- **Strict Schema & Citation Verification Rules:**
+  - Root fields `task_id`, `iteration` (integer attempt), `contract_sha256`, `record`, `record_sha256`, and `claims` are mandatory.
+  - In each claim, `id` (e.g. `"CLAIM-001"`), `kind` (`"observation"`, `"completion"`, `"decision"`, `"requirement"`, `"test_expectation"`), `text`, `scope` (`"repos/<repo_name>"`), `label` (`"SOURCE_PROVEN"`, `"TEST_PROVEN"`, etc.), `citations`, and `blast_radius` are mandatory.
+  - File citations (`type: "file"`) require `path`, `sha256` of file, line_range bracket `lines: [start_line, end_line]`, and verbatim_quote in `quote`.
+  - `path` must exist on disk and resolve inside the permitted repository.
+  - `lines: [start_line, end_line]` must accurately bracket the cited code line_range (1-based line numbers).
+  - `quote` MUST match the verbatim_quote from disk contents within `lines` character-for-character. NEVER use `#L1-L1` or dummy line numbers.
+  - Command citations (`type: "command"`) are strictly reserved for test runners (e.g. `go test`, `pytest`) and MUST include `stdout_sha256` and `stderr_sha256` (use `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` if empty).
+  - Git branch, commit HEAD, and status witness records must be cited as **`type: "file"`** pointing to `Phase-2B/witnesses/git_*.txt`. DO NOT cite git metadata commands as executable `type: "command"` citations.
+  - Qualification test runners (e.g. `cd evals && go test -v <qual_test>.go`) must be cited as `type: "command"` citations with `"cwd": "evals"` (or under target repo), with test outputs saved under `Phase-2B/witnesses/`. StageCheck Stage 8 independently re-executes and certifies them inside the sandbox.
+
+## Phase-2B Directory Layout & Witness Storage (Spec 01 / Spec 06)
+- The root of `Phase-2B/` is strictly reserved for primary governance deliverables: `report.md`, `claims.json`, and StageCheck-generated `gate2b_receipt.json`.
+- **DO NOT** place loose execution logs, terminal outputs, or git witness text files (e.g., `git_branch.txt`, `git_head.txt`, `git_status.txt`, `test_output.txt`, `test_stderr.txt`) directly in the root of `Phase-2B/`.
+- All command outputs, stdout/stderr logs, and test witness records MUST be grouped inside a dedicated subfolder: `Phase-2B/witnesses/` or `Phase-2B/rerun_outputs/` (e.g., `Phase-2B/witnesses/test_output.txt`).
+
 ## Must Not
+- MUST NOT assume repository source trees (`repos/*`) are prohibited. `repos/*` is your primary implementation workspace. You are authorized and required to write code and tests in `repos/*` within `Phase-1/declared_scope.json`.
+- MUST NOT modify unauthorized files in the evidence tree (NEVER touch `Phase-1/*`, `Phase-2A/pre_commit_review.json`, `Phase-2A/agent_reviews.json`, `Phase-2A/rubric_evaluation.json`, `Phase-2B/gate2b_receipt.json`, or any `Phase-3/*` files).
+- MUST NOT attempt to resolve `REVISION_REQUIRED` by merely editing, updating, or re-saving `pre_commit_status.json` without fixing the underlying code and tests in `repos/*`.
+- MUST NOT resubmit `pre_commit_status.json` with the same `cycle` number following a `REVISION_REQUIRED` review. You MUST increment `cycle` (`cycle > rev_cycle`).
+- MUST NOT use repository path prefixes (such as `"repos/<repo_name>"`) in `pre_commit_status.json`; use bare repository names matching `controls/PRODUCT_REPOSITORIES.json`.
+- MUST NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first (`Phase-2A/pre_commit_review.json` status must be `"APPROVED"` and active phase advanced to `PHASE_2B_COMMITTING`).
+- MUST NOT cite non-test commands (such as `git rev-parse`, `git status`, `git branch`) as executable `type: "command"` citations in `Phase-2B/claims.json`. Repository metadata witness records must be cited as `type: "file"`.
+- MUST NOT omit required fields (`stdout_sha256`, `stderr_sha256`, `record_sha256`, `exit_status`, `argv`, `cwd`) in `type: "command"` citations in `Phase-2B/claims.json`.
 - MUST NOT execute remote push operations (`git push` is strictly forbidden).
-- MUST NOT commit directly to `main` or `master` branch.
+- MUST NOT commit directly to `main`, `master`, or `Development` branch.
+- MUST NOT use `git commit --amend`, `git reset`, or `git rebase` (history rewriting is strictly prohibited; all repairs must be forward-only commits).
 - MUST NOT modify control descriptors in `controls/*`.
 - MUST NOT alter Gitleaks configuration or create `.gitleaksignore` override files.
 """
@@ -109,30 +305,119 @@ def scaffold_agent_instructions(
     workspace_root: Path,
     agent1_name: str = "agent1",
     agent2_name: str = "agent2",
+    refresh: bool = False,
 ) -> Dict[str, Path]:
     """Scaffold instructions/ directory and role instruction markdown files (Specs 03, 08)."""
     root = Path(workspace_root).resolve()
     instructions_dir = root / "instructions"
     instructions_dir.mkdir(parents=True, exist_ok=True)
 
+    norm_a1 = validate_agent_slug(agent1_name.strip().lower())
+    norm_a2 = validate_agent_slug(agent2_name.strip().lower())
+
     paths: Dict[str, Path] = {}
-    if agent1_name == agent2_name:
+    if norm_a1 == norm_a2:
         # Single-agent unified dual role
-        single_path = instructions_dir / f"{agent1_name}_dual_role.md"
-        if not single_path.exists():
-            single_content = f"# {agent1_name.capitalize()} Dual-Role Instructions\n\nRole: `dual_role`.\n\n" + DEFAULT_AGENT1_INSTRUCTIONS_MD + "\n---\n" + DEFAULT_AGENT2_INSTRUCTIONS_MD
+        single_path = instructions_dir / f"{norm_a1}_dual_role.md"
+        if refresh or not single_path.exists():
+            single_content = (
+                f"# {agent1_name.strip()} Unified Instructions: Dual-Role Operating Protocol\n\n"
+                f"Role: `dual_role`.\n\n"
+                f"This workspace operates in **Single-Agent Mode** where `{agent1_name.strip()}` executes both "
+                f"prompt architecture/auditing and code implementation.\n"
+                f"To preserve governance separation of concerns, the agent must strictly alternate between "
+                f"planning/auditing and implementation phases.\n\n"
+                f"---\n\n"
+                f"## Part 1: Planning & Auditing Responsibilities (Phase 1, Phase 2A Review, Phase 3 Audit)\n\n"
+                f"### Purpose\n"
+                f"Decompose product requirements, generate Phase 1 prompts (`prompt.md`), define declared scope (`declared_scope.json`), "
+                f"perform Phase 2A pre-commit cooperative differential reviews, and inspect Phase 3 independent audit verifications.\n\n"
+                f"### Inputs\n"
+                f"- `specs/TASK_PLAN.json`\n"
+                f"- `specs/ARCHITECTURE.md`\n"
+                f"- `controls/ACTIVE_STATE.json`\n"
+                f"- `evidence/tasks/<task_id>/attempt_<N>/`\n\n"
+                f"### Checks & Invariants\n"
+                f"- Verify task decomposition against architectural contracts.\n"
+                f"- Review uncommitted diffs for scope compliance and secret exposure.\n"
+                f"- Record defect history in `TASK_<ID>_ISSUE_HISTORY.md`.\n\n"
+                f"### Phase Restrictions\n"
+                f"- In planning/review phases, DO NOT write implementation code in `repos/*`.\n"
+                f"- NEVER execute remote push commands (`git push`).\n"
+                f"- Permitted Git commands during review are read-only: `git status`, `git log`, `git diff`, `git show`, `git blame`, `git branch`.\n"
+                f"- MUST NOT demand or check for Phase-2B deliverables (`report.md`, `claims.json`) during Phase 2A pre-commit review. Phase 2B deliverables belong strictly to Phase 2B.\n"
+                f"- MUST NOT include `controls/` or any file within `controls/` in `Phase-1/declared_scope.json` (neither under `read_write_paths` nor under `read_only_paths`).\n\n"
+                f"### Phase-2 Review & Continuous Roadmap Waiting Loop\n"
+                f"- **Do not stop or exit until all roadmap tasks are complete:** Continuously poll `stagecheck turn --task <task_id> --json` (e.g., `sleep 5`, max 3 calls per 5s window) across all phases and roadmap tasks.\n"
+                f"- In planning phase, wait until prompt and scope are drafted and frozen; enter waiting state while code is being implemented until `pre_commit_status.json` has `status: \"AWAITING_REVIEW\"`.\n"
+                f"- After submitting `Phase-2A/pre_commit_status.json`, switch to auditor role, audit against the 5 MultiversX Invariant Pillars (consensus, sharding, big-endian serialization, ZK discipline, caller non-disclosure), author `Phase-2A/agent_reviews.json` (formatting with `indent=2`), and run `stagecheck review-precommit`; iterate via `REVISION_REQUIRED` until `APPROVED`.\n"
+                f"- Continuously monitor `controls/ACTIVE_STATE.json` (`phase`, `status`, `attempt_index`, `circuit_breaker_tripped`) and `Phase-3/verdict.json`; once `SEALED_PASSED` / `COMPLETED`, run `stagecheck plan next --activate` to proceed to the next eligible task until all roadmap tasks are sealed.\n\n"
+                f"---\n\n"
+                f"## Part 2: Code Implementation Responsibilities (Phase 2A Implementation & Delivery)\n\n"
+                f"### Purpose\n"
+                f"Implement source code, unit tests, and regression coverage for approved tasks on permitted task branches, and author Phase-2 deliverables (`pre_commit_status.json`, `report.md`, `claims.json`).\n\n"
+                f"### Workspace Authority & Scope Boundaries\n"
+                f"- Product Repositories (`repos/*`): `repos/<repo_name>/` is YOUR PRIMARY WORKSPACE and is NOT prohibited. Modifying and fixing code and tests in `repos/*` within `Phase-1/declared_scope.json` is your primary duty.\n"
+                f"- Evidence Tree (`evidence/tasks/<task_id>/attempt_<N>/`): You are ONLY authorized to author `Phase-2A/pre_commit_status.json`, `Phase-2B/report.md`, `Phase-2B/claims.json`, and `Phase-2B/witnesses/*`. You MUST NOT modify any other evidence files (`Phase-1/*`, `Phase-2A/pre_commit_review.json`, `Phase-2A/agent_reviews.json`, `Phase-2A/rubric_evaluation.json`, `Phase-2B/gate2b_receipt.json`, `Phase-3/*`).\n"
+                f"- Prohibited Trees: `controls/*` and `specs/*` are strictly prohibited from being modified.\n\n"
+                f"### Inputs\n"
+                f"- `evidence/tasks/<task_id>/attempt_<N>/Phase-1/prompt.md`\n"
+                f"- `evidence/tasks/<task_id>/attempt_<N>/Phase-1/declared_scope.json`\n"
+                f"- `controls/ACTIVE_STATE.json`\n\n"
+                f"### Checks & Invariants\n"
+                f"- Ensure code satisfies declared scope without modifying forbidden paths.\n"
+                f"- Ensure all unit tests pass locally before submitting for Phase 2A review.\n"
+                f"- Run local secret check (`gitleaks protect --staged`) prior to local commit.\n"
+                f"- In Phase 2A, submit `Phase-2A/pre_commit_status.json` adhering to `pre_commit_status.schema.json` (`schema_version`: \"2.0.0\", `status`: \"AWAITING_REVIEW\"). Use bare repository names matching `controls/PRODUCT_REPOSITORIES.json` without `repos/` prefix.\n"
+                f"- When Phase-2A review reports `REVISION_REQUIRED`, you MUST fix the defects in your source code and tests in `repos/*` and increment `cycle` (`cycle = rev_cycle + 1`) before resubmitting. DO NOT resubmit with the same cycle number or merely re-save `pre_commit_status.json`.\n"
+                f"- Strict Phase 2A Completion Requirement: DO NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first (`Phase-2A/pre_commit_review.json` status must be `\"APPROVED\"` and active phase advanced to `PHASE_2B_COMMITTING`).\n"
+                f"- Do NOT terminate after Phase 2B: Enter waiting state while StageCheck runs Phase 3 audit and Gate 4 sealing, and wait for the next roadmap task to reach Phase 2A.\n\n"
+                f"### Phase-2B Deliverable Contracts & Citation Standards\n"
+                f"- Deliver both `Phase-2B/report.md` and `Phase-2B/claims.json` strictly conforming to `claims.schema.json`.\n"
+                f"- Root fields `task_id`, `iteration`, `contract_sha256`, `record`, `record_sha256`, and `claims` are mandatory.\n"
+                f"- In each claim, `id`, `kind`, `text`, `scope`, `label`, `citations`, and `blast_radius` are mandatory.\n"
+                f"- File citations (`type: \"file\"`) require `path`, `sha256`, line_range brackets in `lines: [start_line, end_line]`, and verbatim_quote in `quote`.\n"
+                f"- Command citations (`type: \"command\"`) are strictly for approved test runners and MUST include `stdout_sha256` and `stderr_sha256` (use `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` if empty).\n"
+                f"- Qualification test runners (e.g. `cd evals && go test -v <qual_test>.go`) must be cited as `type: \"command\"` citations with `\"cwd\": \"evals\"` (or under target repo), with outputs under `Phase-2B/witnesses/`.\n"
+                f"- Never use `#L1-L1` or placeholder line numbers.\n"
+                f"- Group all raw test outputs, command records, and git witness logs in `Phase-2B/witnesses/` or `Phase-2B/rerun_outputs/`; do not place loose text files directly in `Phase-2B/` root.\n\n"
+                f"### Security Invariants & Negative Prohibitions\n"
+                f"- MUST NOT assume repository source trees (`repos/*`) are prohibited. `repos/*` is your primary implementation workspace.\n"
+                f"- MUST NOT modify unauthorized files in the evidence tree (`Phase-1/*`, `Phase-2A/pre_commit_review.json`, `Phase-2A/agent_reviews.json`, `Phase-2A/rubric_evaluation.json`, `Phase-2B/gate2b_receipt.json`, `Phase-3/*`).\n"
+                f"- MUST NOT attempt to resolve `REVISION_REQUIRED` by merely editing or re-saving `pre_commit_status.json` without fixing the underlying code and tests in `repos/*`.\n"
+                f"- MUST NOT resubmit `pre_commit_status.json` with the same cycle number following `REVISION_REQUIRED` (`cycle > rev_cycle` is mandatory for turn advancement).\n"
+                f"- MUST NOT use repository path prefixes (such as `repos/<repo_name>`) in `pre_commit_status.json`; use bare repository names matching `controls/PRODUCT_REPOSITORIES.json`.\n"
+                f"- MUST NOT generate `Phase-2B/claims.json`, `Phase-2B/report.md`, or any other files in `Phase-2B/` without completing Phase 2A first.\n"
+                f"- MUST NOT cite non-test commands (such as `git rev-parse`, `git status`) as executable `type: \"command\"` citations in `Phase-2B/claims.json`. Repository witness records must be cited as `type: \"file\"`.\n"
+                f"- MUST NOT omit required fields (`stdout_sha256`, `stderr_sha256`, `record_sha256`, `exit_status`, `argv`, `cwd`) in `type: \"command\"` citations.\n"
+                f"- MUST NOT execute remote push operations (`git push` is strictly forbidden).\n"
+                f"- MUST NOT commit directly to `main` or `master` branch (or `Development` under sprint governance). Always work on designated sprint branch (`sprint/<sprint-id>-<sprint-name>` e.g. `sprint/sprint-01-zk-readiness` or fallback `sprint/sprint-00-UNKNOWN`).\n"
+                f"- MUST NOT use `git commit --amend`, `git reset`, or `git rebase` (history rewriting is strictly prohibited; all repairs must be forward-only commits).\n"
+                f"- MUST NOT modify control descriptors in `controls/*` or edit `.stagecheck.lock`.\n"
+                f"- MUST NOT alter Gitleaks configuration or create `.gitleaksignore` override files.\n"
+            )
             single_path.write_text(single_content, encoding="utf-8")
         paths[single_path.name] = single_path
     else:
         # Dual-agent separate instructions
-        a1_path = instructions_dir / f"{agent1_name}_prompt_and_audit.md"
-        if not a1_path.exists():
-            a1_path.write_text(DEFAULT_AGENT1_INSTRUCTIONS_MD, encoding="utf-8")
+        a1_path = instructions_dir / f"{norm_a1}_prompt_and_audit.md"
+        if refresh or not a1_path.exists():
+            a1_content = (
+                f"# {agent1_name.strip()} Instructions: Prompt Architecture & Governance Auditor\n\n"
+                f"Role: `prompt_and_audit`.\n\n"
+                + DEFAULT_AGENT1_INSTRUCTIONS_MD[DEFAULT_AGENT1_INSTRUCTIONS_MD.find("## Purpose"):]
+            )
+            a1_path.write_text(a1_content, encoding="utf-8")
         paths[a1_path.name] = a1_path
 
-        a2_path = instructions_dir / f"{agent2_name}_code_implementation.md"
-        if not a2_path.exists():
-            a2_path.write_text(DEFAULT_AGENT2_INSTRUCTIONS_MD, encoding="utf-8")
+        a2_path = instructions_dir / f"{norm_a2}_code_implementation.md"
+        if refresh or not a2_path.exists():
+            a2_content = (
+                f"# {agent2_name.strip()} Instructions: Code Implementation & Test Authoring\n\n"
+                f"Role: `code_implementation`.\n\n"
+                + DEFAULT_AGENT2_INSTRUCTIONS_MD[DEFAULT_AGENT2_INSTRUCTIONS_MD.find("## Purpose"):]
+            )
+            a2_path.write_text(a2_content, encoding="utf-8")
         paths[a2_path.name] = a2_path
 
     return paths
@@ -156,9 +441,18 @@ def scaffold_task_plan(
             "project_name": project_name,
             "created_at": "2026-11-04T00:00:00Z",
             "updated_at": "2026-11-04T00:00:00Z",
+            "sprints": [
+                {
+                    "id": "sprint-01",
+                    "name": "bootstrap",
+                    "title": "Initial workspace bootstrap and baseline verification",
+                    "description": "Establish baseline repository structure and execute initial preflight validation.",
+                }
+            ],
             "tasks": [
                 {
                     "task_id": "TASK-01",
+                    "sprint": "sprint-01",
                     "title": "Initial workspace bootstrap and baseline verification",
                     "description": "Establish baseline repository structure and execute initial preflight validation.",
                     "status": "planned",
@@ -168,9 +462,77 @@ def scaffold_task_plan(
                 }
             ],
         }
-        plan_file.write_text(canonical_json_dumps(initial_plan), encoding="utf-8")
+        tmp_plan = specs_dir / ".TASK_PLAN.json.tmp"
+        tmp_plan.write_text(deterministic_json_dumps(initial_plan), encoding="utf-8")
+        os.replace(str(tmp_plan), str(plan_file))
 
     return plan_file
+
+
+def reconcile_specs_directory(
+    workspace_root: Path,
+    target_repos: Optional[List[str]] = None,
+    project_name: str = "stagecheck-workspace",
+    strict_integrity: bool = True,
+) -> Dict[str, Path]:
+    """Ensure all required files exist in specs/ without destroying existing files (Spec 05 / FR-08 / Gap D).
+
+    1. Checks specs/TASK_PLAN.json -> creates default if missing, preserves if present.
+    2. Checks specs/ARCHITECTURE.md -> creates default template if missing, preserves if present.
+    3. Checks specs/START_MANIFEST.md:
+       - If missing: generates START_MANIFEST.md atomically.
+       - If present: verifies integrity. If tampered or missing baseline files detected, raises
+         SpecManifestVerificationError so reconciliation never hides an integrity violation.
+    """
+    root = Path(workspace_root).resolve()
+    specs_dir = root / "specs"
+    specs_dir.mkdir(parents=True, exist_ok=True)
+
+    reconciled_paths: Dict[str, Path] = {}
+    manifest_file = specs_dir / "START_MANIFEST.md"
+    manifest_existed_initially = manifest_file.is_file()
+
+    # 1. Ensure TASK_PLAN.json
+    plan_file = specs_dir / "TASK_PLAN.json"
+    if not plan_file.exists():
+        scaffold_task_plan(root, target_repos=target_repos, project_name=project_name)
+    reconciled_paths["TASK_PLAN.json"] = plan_file
+
+    # 2. Ensure ARCHITECTURE.md
+    arch_file = specs_dir / "ARCHITECTURE.md"
+    if not arch_file.exists():
+        arch_content = (
+            f"# {project_name} Architectural Specifications\n\n"
+            "## 1. System Overview\nDocument core system modules and execution boundaries.\n\n"
+            "## 2. Protocol Invariants\nDefine non-negotiable blockchain and security invariants.\n"
+        )
+        tmp_arch = specs_dir / ".ARCHITECTURE.md.tmp"
+        tmp_arch.write_text(arch_content, encoding="utf-8")
+        os.replace(str(tmp_arch), str(arch_file))
+    reconciled_paths["ARCHITECTURE.md"] = arch_file
+
+    # 3. Handle START_MANIFEST.md
+    if not manifest_existed_initially:
+        generate_start_manifest(root, project_name=project_name)
+    else:
+        # If manifest already existed, verify it to ensure reconciliation does not hide integrity violations
+        from stagecheck.core.start_manifest import SpecManifestVerificationError, verify_spec_manifest
+        result = verify_spec_manifest(root, strict=False)
+        if not result["valid"] and strict_integrity:
+            msg_parts = []
+            if result.get("tampered"):
+                msg_parts.append(f"Tampered spec files: {[t['file'] for t in result['tampered']]}")
+            if result.get("missing"):
+                msg_parts.append(f"Missing spec files: {result['missing']}")
+            if result.get("unregistered"):
+                msg_parts.append(f"Unregistered spec additions: {result['unregistered']}")
+            raise SpecManifestVerificationError(
+                f"Specification manifest integrity violation during reconciliation: {'; '.join(msg_parts)}",
+                details=result,
+            )
+
+    reconciled_paths["START_MANIFEST.md"] = manifest_file
+    return reconciled_paths
 
 
 def build_control_descriptors(
@@ -179,6 +541,8 @@ def build_control_descriptors(
     stagecheck_root: str = "@package",
     evidence_root: str = "evidence",
     qualification_root: str = "evals",
+    agent1_name: str = "agent1",
+    agent2_name: str = "agent2",
 ) -> Dict[str, str]:
     """Generate the formatted string content for all 8 mandatory control files.
 
@@ -197,6 +561,38 @@ def build_control_descriptors(
         },
     }
 
+    norm_a1 = validate_agent_slug(agent1_name.strip().lower())
+    norm_a2 = validate_agent_slug(agent2_name.strip().lower())
+    single_agent_mode = (norm_a1 == norm_a2)
+
+    if single_agent_mode:
+        registered_agents = [
+            {
+                "name": norm_a1,
+                "role": "dual_role",
+                "instruction": f"instructions/{norm_a1}_dual_role.md",
+                "comment": f"{agent1_name.strip()} unified dual-role agent",
+                "enabled": True,
+            }
+        ]
+    else:
+        registered_agents = [
+            {
+                "name": norm_a1,
+                "role": "prompt_and_audit",
+                "instruction": f"instructions/{norm_a1}_prompt_and_audit.md",
+                "comment": f"{agent1_name.strip()} prompt architect and auditor",
+                "enabled": True,
+            },
+            {
+                "name": norm_a2,
+                "role": "code_implementation",
+                "instruction": f"instructions/{norm_a2}_code_implementation.md",
+                "comment": f"{agent2_name.strip()} code implementer",
+                "enabled": True,
+            },
+        ]
+
     active_state_content: Dict[str, Any] = {
         "schema_version": "2.0",
         "task_id": "task-init",
@@ -206,23 +602,9 @@ def build_control_descriptors(
         "max_total_attempts": 3,
         "max_repairs": 2,
         "circuit_breaker_tripped": False,
+        "single_agent_mode": single_agent_mode,
         "target_repositories": list(baselines.keys()) if baselines else ["default"],
-        "registered_agents": [
-            {
-                "name": "agent1",
-                "role": "prompt_and_audit",
-                "instruction": "instructions/agent1_prompt_and_audit.md",
-                "comment": "Default prompt architect and auditor",
-                "enabled": True,
-            },
-            {
-                "name": "agent2",
-                "role": "code_implementation",
-                "instruction": "instructions/agent2_code_implementation.md",
-                "comment": "Default code implementer",
-                "enabled": True,
-            },
-        ],
+        "registered_agents": registered_agents,
     }
 
     stagecheck_root_content = {
@@ -244,15 +626,57 @@ def build_control_descriptors(
     }
 
     return {
-        "STAGECHECK_ROOT.json": canonical_json_dumps(stagecheck_root_content),
-        "EVIDENCE_ROOT.json": canonical_json_dumps(evidence_root_content),
-        "PRODUCT_REPOSITORIES.json": canonical_json_dumps(repo_registry_content),
-        "QUALIFICATION_ROOT.json": canonical_json_dumps(qualification_root_content),
-        "ACTIVE_STATE.json": canonical_json_dumps(active_state_content),
+        "STAGECHECK_ROOT.json": deterministic_json_dumps(stagecheck_root_content),
+        "EVIDENCE_ROOT.json": deterministic_json_dumps(evidence_root_content),
+        "PRODUCT_REPOSITORIES.json": deterministic_json_dumps(repo_registry_content),
+        "QUALIFICATION_ROOT.json": deterministic_json_dumps(qualification_root_content),
+        "ACTIVE_STATE.json": deterministic_json_dumps(active_state_content),
         "OWNER_GRANTS.md": DEFAULT_OWNER_GRANTS_MD,
         "FAILURE_PREVENTION.md": DEFAULT_FAILURE_PREVENTION_MD,
-        "DISPOSITIONS.json": canonical_json_dumps(dispositions_content),
+        "DISPOSITIONS.json": deterministic_json_dumps(dispositions_content),
     }
+
+
+def reconcile_controls(
+    workspace_root: Path,
+    baselines: Dict[str, RepoBaseline],
+    manifest_sha256: str = "0" * 64,
+    stagecheck_root: str = "@package",
+    agent1_name: str = "agent1",
+    agent2_name: str = "agent2",
+) -> Dict[str, Path]:
+    """Reconcile the 8 mandatory control files in controls/ without destroying existing files.
+
+    For each of the 8 mandatory control files:
+    - If it already exists: preserves developer customizations verbatim.
+    - If it is missing: generates compliant template and validates it against its schema.
+    """
+    root = Path(workspace_root).resolve()
+    controls_dir = root / "controls"
+    controls_dir.mkdir(parents=True, exist_ok=True)
+
+    descriptors = build_control_descriptors(
+        baselines=baselines,
+        manifest_sha256=manifest_sha256,
+        stagecheck_root=stagecheck_root,
+        agent1_name=agent1_name,
+        agent2_name=agent2_name,
+    )
+
+    reconciled_paths: Dict[str, Path] = {}
+    for filename, content in descriptors.items():
+        file_path = controls_dir / filename
+        if not file_path.exists():
+            file_path.write_text(content, encoding="utf-8")
+            if filename.endswith(".json"):
+                data = json.loads(content)
+                validate_control_descriptor(filename, data)
+        reconciled_paths[filename] = file_path
+
+    # Ensure qualification directory (evals) is scaffolded
+    (root / "evals").mkdir(parents=True, exist_ok=True)
+
+    return reconciled_paths
 
 
 def scaffold_controls_atomic(
@@ -260,6 +684,8 @@ def scaffold_controls_atomic(
     baselines: Dict[str, RepoBaseline],
     manifest_sha256: str = "0" * 64,
     stagecheck_root: str = "@package",
+    agent1_name: str = "agent1",
+    agent2_name: str = "agent2",
     fault_injector: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Path]:
     """Atomically generate all 8 control descriptors under controls/ directory.
@@ -272,6 +698,8 @@ def scaffold_controls_atomic(
         baselines: Discovered multi-repository baselines.
         manifest_sha256: 64-char SHA-256 digest of MANIFEST.sha256.
         stagecheck_root: Package root reference ('@package' or relative path).
+        agent1_name: Agent 1 identifier slug or name.
+        agent2_name: Agent 2 identifier slug or name.
         fault_injector: Optional test hook to inject faults during staging.
 
     Returns:
@@ -288,6 +716,8 @@ def scaffold_controls_atomic(
         baselines=baselines,
         manifest_sha256=manifest_sha256,
         stagecheck_root=stagecheck_root,
+        agent1_name=agent1_name,
+        agent2_name=agent2_name,
     )
 
     # Staging directory for atomic transaction
@@ -322,6 +752,9 @@ def scaffold_controls_atomic(
             os.replace(str(staged_file), str(dest_file))
             final_paths[filename] = dest_file
 
+        # Ensure qualification directory (evals) is scaffolded
+        (root / "evals").mkdir(parents=True, exist_ok=True)
+
         return final_paths
 
     except Exception as err:
@@ -345,4 +778,67 @@ def scaffold_controls_atomic(
         # Clean up staging directory
         if staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def scaffold_remotes_config(
+    workspace_root: Union[str, Path],
+    approve_remotes: Optional[List[str]] = None,
+) -> Path:
+    """Scaffold or reconcile controls/remotes.json and optionally approve push URLs."""
+    from stagecheck.core.paths import safe_resolve
+    from stagecheck.core.utils import pretty_json_dumps, strict_json_loads
+
+    root = Path(workspace_root).resolve()
+    controls_dir = root / "controls"
+    controls_dir.mkdir(parents=True, exist_ok=True)
+    remotes_path = safe_resolve("controls/remotes.json", root, allow_symlinks=False)
+
+    data: Dict[str, Any] = {"approved_push_urls": []}
+    if remotes_path.exists():
+        if remotes_path.is_symlink() or not remotes_path.is_file():
+            raise ScaffoldingError(f"Unsafe controls/remotes.json path: '{remotes_path}'")
+        parsed = strict_json_loads(remotes_path.read_text(encoding="utf-8"), source=str(remotes_path))
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("approved_push_urls", []), list):
+            raise ScaffoldingError("controls/remotes.json must be a JSON object with 'approved_push_urls' list.")
+        data = dict(parsed)
+        data.setdefault("approved_push_urls", [])
+
+    urls = [str(u) for u in data.get("approved_push_urls", [])]
+    changed = not remotes_path.exists()
+    for raw_url in approve_remotes or []:
+        if not isinstance(raw_url, str):
+            raise ScaffoldingError("Approved remote URL must be a string.")
+        clean_url = raw_url.strip()
+        if not clean_url or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in clean_url):
+            raise ScaffoldingError(f"Invalid remote push URL: {raw_url!r}")
+        if clean_url not in urls:
+            urls.append(clean_url)
+            changed = True
+
+    if changed:
+        data["approved_push_urls"] = urls
+        tmp_path = controls_dir / ".remotes.json.tmp"
+        tmp_path.write_text(pretty_json_dumps(data), encoding="utf-8")
+        os.replace(str(tmp_path), str(remotes_path))
+
+    return remotes_path
+
+
+def approve_remote_url(
+    workspace_root: Union[str, Path],
+    remote_url: str,
+) -> Path:
+    """Safely add an approved push URL to controls/remotes.json under runtime lock and write transaction."""
+    from stagecheck.core.locking import acquire_runtime_lock
+    from stagecheck.core.permissions import controlled_write_transaction
+
+    root = Path(workspace_root).resolve()
+    controls_dir = root / "controls"
+    if not controls_dir.is_dir():
+        raise ScaffoldingError(f"Workspace controls directory not found at '{controls_dir}'. Run 'stagecheck init' first.")
+
+    with acquire_runtime_lock(controls_dir):
+        with controlled_write_transaction(controls_dir):
+            return scaffold_remotes_config(root, approve_remotes=[remote_url])
+
 

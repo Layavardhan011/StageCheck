@@ -1,0 +1,906 @@
+"""Comprehensive Test Suite for Task 3.5: Interactive Supervisor, Debounce, and Watchdog Lifecycle.
+
+Verifies:
+1. Prompt Debounce (ARCH-01):
+   - Sliding 30-second silence window -> freeze_reason: "INOTIFY_SILENCE_30S".
+   - Hard 300-second ceiling under continuous editing -> freeze_reason: "HARD_CEILING_300S".
+   - Both exit reasons properly logged in prompt_verified.json.
+2. Dual-Condition Watchdog Lifecycle (FR-05):
+   - Active strictly in agent phases (PHASE_1_PLANNING, PHASE_2A_CODING, PHASE_2B_COMMITTING).
+   - Suspended during PHASE_3_AUDIT and GATE_4_SEALING.
+   - Relevant filesystem events (repos/, Phase-*) reset fs timer; irrelevant paths ignored.
+   - Agent turn heartbeats reset turn timer.
+   - Dual-condition trip when both delta_fs >= 600s and delta_turn >= 600s.
+   - Halts to AWAITING_HUMAN_DISPOSITION, preserves attempt count without consumption.
+   - Restart restores monotonic timing behavior from ACTIVE_STATE.json.
+3. Supervisor Engine and CLI commands:
+   - stagecheck supervisor check-task
+   - stagecheck supervisor check-stability
+   - stagecheck supervisor check-watchdog
+   - Step-by-step gate orchestration
+"""
+
+import datetime
+import json
+import subprocess
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+from stagecheck.cli.init_cmd import run_init
+from stagecheck.cli.main import main
+from stagecheck.cli.supervisor_cmd import run_supervisor_cmd
+from stagecheck.core.locking import acquire_runtime_lock
+from stagecheck.core.permissions import elevate_permissions_for_teardown
+from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+from stagecheck.core.state import load_active_state, save_active_state
+from stagecheck.core.supervisor import (
+    PromptDebouncer,
+    SupervisorEngine,
+    evaluate_watchdog,
+    get_last_relevant_filesystem_timestamp,
+    get_last_turn_heartbeat_timestamp,
+    is_relevant_sentinel_path,
+)
+
+
+def _setup_mock_repo(ws: Path, repo_name: str = "core-service") -> Path:
+    repo_dir = ws / "repos" / repo_name
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=str(repo_dir), capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test Committer"], cwd=str(repo_dir), capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@stagecheck.local"], cwd=str(repo_dir), capture_output=True, check=True)
+    (repo_dir / "README.md").write_text("# Test Repo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(repo_dir), capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo_dir), capture_output=True, check=True)
+    return repo_dir
+
+
+class TestPromptDebounce(unittest.TestCase):
+    """Test 30-second sliding debounce with 300-second hard ceiling (ARCH-01)."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self.temp_dir.name).resolve()
+        self.prompt_file = self.tmp / "prompt.md"
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_sliding_window_silence_debounce(self) -> None:
+        """Verify 30s silence debounce triggers INOTIFY_SILENCE_30S."""
+        debouncer = PromptDebouncer(quiet_seconds=30.0, max_ceiling_seconds=300.0)
+
+        # File does not exist yet
+        stable, reason = debouncer.check_stability(self.prompt_file)
+        self.assertFalse(stable)
+        self.assertIsNone(reason)
+
+        # File created at t=100
+        self.prompt_file.write_text("# Blueprint Draft 1\n", encoding="utf-8")
+        stable, reason = debouncer.check_stability(self.prompt_file, now=100.0)
+        self.assertFalse(stable)
+
+        # File untouched after 10s (t=110) -> not stable yet
+        stable, reason = debouncer.check_stability(self.prompt_file, now=110.0)
+        self.assertFalse(stable)
+
+        # File untouched after 29s (t=129) -> not stable yet
+        stable, reason = debouncer.check_stability(self.prompt_file, now=129.0)
+        self.assertFalse(stable)
+
+        # File untouched after 30s (t=130) -> STABLE via sliding window silence
+        stable, reason = debouncer.check_stability(self.prompt_file, now=130.0)
+        self.assertTrue(stable)
+        self.assertEqual(reason, "INOTIFY_SILENCE_30S")
+
+    def test_hard_ceiling_prevents_starvation_under_continuous_editing(self) -> None:
+        """Verify continuous edits past 300s trigger HARD_CEILING_300S."""
+        debouncer = PromptDebouncer(quiet_seconds=30.0, max_ceiling_seconds=300.0)
+
+        # File created at t=0
+        self.prompt_file.write_text("# Version 0\n", encoding="utf-8")
+        debouncer.check_stability(self.prompt_file, now=0.0)
+
+        # Simulate agent editing every 15s (never silent for 30s)
+        current_time = 0.0
+        version = 0
+        while current_time < 275.0:
+            current_time += 15.0
+            version += 1
+            self.prompt_file.write_text(f"# Version {version}\n", encoding="utf-8")
+            stable, reason = debouncer.check_stability(self.prompt_file, now=current_time)
+            self.assertFalse(stable, f"Prematurely stable at t={current_time}")
+
+        # At t=305s (still editing every 15s), hard ceiling of 300s is exceeded
+        current_time = 305.0
+        self.prompt_file.write_text("# Version Final Edit\n", encoding="utf-8")
+        stable, reason = debouncer.check_stability(self.prompt_file, now=current_time)
+        self.assertTrue(stable)
+        self.assertEqual(reason, "HARD_CEILING_300S")
+
+    def test_prompt_verified_records_both_freeze_reasons(self) -> None:
+        """Verify prompt_verified.json correctly records freeze_reason metadata."""
+        # 1. Setup workspace
+        ws = self.tmp / "ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        _setup_mock_repo(ws, "core-service")
+        rc = run_init(workspace=str(ws), agent1="agent1", agent2="agent2", repos="core-service")
+        self.assertEqual(rc, 0)
+
+        p1_dir = ws / "evidence/tasks/task-101/attempt_1/Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").write_text(
+            "# Task Execution Blueprint\n"
+            "## 1. Task Framing & Objectives\nObj\n"
+            "## 2. Architecture & Design Principles\nArch\n"
+            "## 3. Scope Definition & Boundary Guardrails\nScope\n"
+            "## 4. Work Breakdown Structure & Phasing\nPhases\n"
+            "## 5. Implementation Strategy\nStrat\n"
+            "## 6. Verification & Quality Engineering\nQA\n"
+            "## 7. Security Hardening & Isolation Constraints\nSec\n"
+            "## 8. Defect Severity Matrix & Resolution SLA\nSLA\n"
+            "## 9. Rollback & Emergency Teardown Protocol\nRollback\n"
+            "## 10. Operational Handover & Claims Synthesis\nHandover\n"
+            "## 11. Multi-Agent Turn Protocols\nTurn\n"
+            "## 12. Traceability Matrix & Manifest Attestation\nTrace\n"
+        )
+        (p1_dir / "declared_scope.json").write_text(
+            json.dumps({"schema_version": "2.0", "task_id": "task-101", "allowed_paths": ["repos/core-service/**"]})
+        )
+
+        # Freeze with INOTIFY_SILENCE_30S
+        rec_path = freeze_prompt_and_scope(ws, "task-101", 1, freeze_reason="INOTIFY_SILENCE_30S")
+        data1 = json.loads(rec_path.read_text())
+        self.assertEqual(data1["freeze_reason"], "INOTIFY_SILENCE_30S")
+
+        # Freeze with HARD_CEILING_300S
+        rec_path.chmod(0o644)
+        rec_path2 = freeze_prompt_and_scope(ws, "task-101", 1, freeze_reason="HARD_CEILING_300S")
+        data2 = json.loads(rec_path2.read_text())
+        self.assertEqual(data2["freeze_reason"], "HARD_CEILING_300S")
+
+        elevate_permissions_for_teardown(ws)
+
+
+class TestWatchdogLifecycle(unittest.TestCase):
+    """Test Dual-Condition Watchdog Lifecycle, Relevance, and Monotonic Recovery (FR-05)."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.ws = Path(self.temp_dir.name).resolve()
+        _setup_mock_repo(self.ws, "core-service")
+        rc = run_init(workspace=str(self.ws), agent1="agent1", agent2="agent2", repos="core-service")
+        self.assertEqual(rc, 0)
+
+        self.sentinel_log = self.ws / "evidence" / "sentinel.log"
+        self.sentinel_log.parent.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        elevate_permissions_for_teardown(self.ws)
+        self.temp_dir.cleanup()
+
+    def test_relevant_sentinel_paths(self) -> None:
+        """Verify is_relevant_sentinel_path only matches repos/ and active phase evidence."""
+        self.assertTrue(is_relevant_sentinel_path("repos/payment-service/src/main.py"))
+        self.assertTrue(is_relevant_sentinel_path("evidence/tasks/task-01/attempt_1/Phase-1/prompt.md"))
+        self.assertTrue(is_relevant_sentinel_path("evidence/tasks/task-01/attempt_1/Phase-2A/status.json"))
+        self.assertTrue(is_relevant_sentinel_path("evidence/tasks/task-01/attempt_1/Phase-2B/report.md"))
+
+        # Irrelevant paths must not count as agent work
+        self.assertFalse(is_relevant_sentinel_path(".git/index"))
+        self.assertFalse(is_relevant_sentinel_path("tmp/scratch.txt"))
+        self.assertFalse(is_relevant_sentinel_path(".tox/py312/lib/something.py"))
+        self.assertFalse(is_relevant_sentinel_path("controls/ACTIVE_STATE.json"))
+
+    def test_watchdog_suspended_in_non_agent_phases(self) -> None:
+        """Verify watchdog is strictly suspended in PHASE_3_AUDIT and GATE_4_SEALING."""
+        state = load_active_state(self.ws)
+        for suspended_phase in ("PHASE_3_AUDIT", "GATE_4_SEALING", "SEALED_PASSED", "IDLE"):
+            state["phase"] = suspended_phase
+            save_active_state(self.ws, state)
+
+            tripped, msg, meta = evaluate_watchdog(self.ws, timeout_seconds=600.0)
+            self.assertFalse(tripped)
+            self.assertFalse(meta["active"])
+            self.assertIn("suspended", msg)
+
+    def test_watchdog_healthy_when_fs_or_turn_active(self) -> None:
+        """Verify watchdog does NOT trip if either filesystem or turn heartbeat is recent."""
+        state = load_active_state(self.ws)
+        state["phase"] = "PHASE_2A_CODING"
+
+        now_utc = datetime.datetime(2026, 11, 6, 12, 0, 0, tzinfo=datetime.timezone.utc)
+
+        # 1. Heartbeat is recent (5 minutes ago = 300s), but fs is old (12 minutes ago = 720s)
+        t_recent = (now_utc - datetime.timedelta(seconds=300)).isoformat()
+        t_old = (now_utc - datetime.timedelta(seconds=720)).isoformat()
+
+        state.setdefault("watchdog", {})["last_active_timestamp"] = t_recent
+        save_active_state(self.ws, state)
+
+        self.sentinel_log.write_text(f"[{t_old}] [Tier 1] [MODIFIED] repos/core/app.py\n", encoding="utf-8")
+
+        tripped, msg, meta = evaluate_watchdog(self.ws, timeout_seconds=600.0, now_utc=now_utc)
+        self.assertFalse(tripped, "Watchdog tripped despite recent turn heartbeat")
+
+        # 2. Filesystem is recent (3 minutes ago = 180s), but heartbeat is old (15 minutes ago = 900s)
+        t_recent_fs = (now_utc - datetime.timedelta(seconds=180)).isoformat()
+        state.setdefault("watchdog", {})["last_active_timestamp"] = t_old
+        save_active_state(self.ws, state)
+
+        self.sentinel_log.write_text(f"[{t_recent_fs}] [Tier 1] [MODIFIED] repos/core/app.py\n", encoding="utf-8")
+
+        tripped, msg, meta = evaluate_watchdog(self.ws, timeout_seconds=600.0, now_utc=now_utc)
+        self.assertFalse(tripped, "Watchdog tripped despite recent filesystem activity")
+
+    def test_watchdog_trips_when_both_fs_and_turn_inactive(self) -> None:
+        """Verify watchdog trips to AWAITING_HUMAN_DISPOSITION when BOTH conditions exceed 600s."""
+        state = load_active_state(self.ws)
+        state["phase"] = "PHASE_2A_CODING"
+        state["attempt_index"] = 1
+
+        now_utc = datetime.datetime(2026, 11, 6, 12, 0, 0, tzinfo=datetime.timezone.utc)
+        t_stale = (now_utc - datetime.timedelta(seconds=650)).isoformat()
+
+        state.setdefault("watchdog", {})["last_active_timestamp"] = t_stale
+        save_active_state(self.ws, state)
+
+        self.sentinel_log.write_text(f"[{t_stale}] [Tier 1] [MODIFIED] repos/core/app.py\n", encoding="utf-8")
+
+        tripped, msg, meta = evaluate_watchdog(self.ws, timeout_seconds=600.0, now_utc=now_utc)
+        self.assertTrue(tripped)
+        self.assertIn("WATCHDOG_INACTIVITY_TIMEOUT", msg)
+
+        # Verify state transition
+        new_state = load_active_state(self.ws)
+        self.assertEqual(new_state["phase"], "AWAITING_HUMAN_DISPOSITION")
+        self.assertEqual(new_state["attempt_index"], 1)  # Budget preserved!
+        self.assertIn("WATCHDOG_INACTIVITY_TIMEOUT", new_state.get("halt_reason", ""))
+
+    def test_watchdog_restores_from_state_on_restart(self) -> None:
+        """Verify process restart reads last_active_timestamp and restores timing accurately."""
+        state = load_active_state(self.ws)
+        state["phase"] = "PHASE_1_PLANNING"
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        # Record activity 200s ago
+        past_iso = (now_utc - datetime.timedelta(seconds=200)).isoformat()
+        state.setdefault("watchdog", {})["last_active_timestamp"] = past_iso
+        save_active_state(self.ws, state)
+
+        # Fresh supervisor engine (simulating daemon restart)
+        engine = SupervisorEngine(self.ws, watchdog_timeout_seconds=600.0)
+        report = engine.check_task()
+
+        self.assertFalse(report["watchdog_tripped"])
+        self.assertTrue(report["watchdog"]["active"])
+        # Delta should reflect ~200s elapsed
+        self.assertGreaterEqual(report["watchdog"]["delta_turn_seconds"], 190.0)
+        self.assertLessEqual(report["watchdog"]["delta_turn_seconds"], 220.0)
+
+    def test_watchdog_defers_when_runtime_lock_held(self) -> None:
+        """Verify evaluate_watchdog defers state mutation if .stagecheck.lock is held (SC-SEC-02)."""
+        state = load_active_state(self.ws)
+        state["phase"] = "PHASE_2A_CODING"
+        state["attempt_index"] = 1
+
+        now_utc = datetime.datetime(2026, 11, 6, 12, 0, 0, tzinfo=datetime.timezone.utc)
+        t_stale = (now_utc - datetime.timedelta(seconds=650)).isoformat()
+        state.setdefault("watchdog", {})["last_active_timestamp"] = t_stale
+        save_active_state(self.ws, state)
+        self.sentinel_log.write_text(f"[{t_stale}] [Tier 1] [MODIFIED] repos/core/app.py\n", encoding="utf-8")
+
+        # While runtime lock is held by an active CLI transaction, watchdog must defer
+        with acquire_runtime_lock(self.ws):
+            tripped, msg, _ = evaluate_watchdog(self.ws, timeout_seconds=600.0, now_utc=now_utc)
+            self.assertFalse(tripped)
+            self.assertIn("deferred", msg.lower())
+            self.assertEqual(load_active_state(self.ws)["phase"], "PHASE_2A_CODING")
+
+        # Once lock is released, watchdog can transition cleanly
+        tripped_after, _, _ = evaluate_watchdog(self.ws, timeout_seconds=600.0, now_utc=now_utc)
+        self.assertTrue(tripped_after)
+        self.assertEqual(load_active_state(self.ws)["phase"], "AWAITING_HUMAN_DISPOSITION")
+
+
+class TestSupervisorCLI(unittest.TestCase):
+    """Test CLI command integration for stagecheck supervisor."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.ws = Path(self.temp_dir.name).resolve()
+        _setup_mock_repo(self.ws, "core-service")
+        rc = run_init(workspace=str(self.ws), agent1="agent1", agent2="agent2", repos="core-service")
+        self.assertEqual(rc, 0)
+
+    def tearDown(self) -> None:
+        elevate_permissions_for_teardown(self.ws)
+        self.temp_dir.cleanup()
+
+    def test_supervisor_check_task_cli(self) -> None:
+        """Verify 'stagecheck supervisor check-task --json'."""
+        rc = main(["supervisor", "check-task", "--workspace", str(self.ws), "--json"])
+        self.assertEqual(rc, 0)
+
+    def test_supervisor_check_stability_cli(self) -> None:
+        """Verify 'stagecheck supervisor check-stability'."""
+        test_file = self.ws / "test_file.txt"
+        test_file.write_text("Hello\n", encoding="utf-8")
+
+        # Right after creation with 30s threshold -> unstable (rc=1)
+        rc = main(["supervisor", "check-stability", "--file", str(test_file), "--seconds", "30", "--workspace", str(self.ws)])
+        self.assertEqual(rc, 1)
+
+    def test_supervisor_check_watchdog_cli(self) -> None:
+        """Verify 'stagecheck supervisor check-watchdog'."""
+        rc = main(["supervisor", "check-watchdog", "--workspace", str(self.ws), "--json"])
+        self.assertEqual(rc, 0)
+
+    def test_watchdog_ignores_unicode_line_separator_log_injection(self) -> None:
+        """U+2028/U+2029 injected records in sentinel.log must not spoof relevant filesystem activity."""
+        import datetime
+        from stagecheck.core.supervisor import get_last_relevant_filesystem_timestamp
+
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        ev_dir = self.ws / "evidence"
+        ev_dir.mkdir(parents=True, exist_ok=True)
+        forged_json = json.dumps({"ts": now_iso, "path": "repos/core-service/app.py"})
+        log_file = ev_dir / "sentinel.log"
+        log_file.write_text(
+            f"[2020-01-01T00:00:00+00:00] [Tier 4] [SCOPE_BREACH] repos/bad\u2028{forged_json}\n",
+            encoding="utf-8",
+        )
+        self.assertIsNone(get_last_relevant_filesystem_timestamp(self.ws))
+
+    def test_watchdog_toctou_aborts_when_heartbeat_refreshed_before_lock(self) -> None:
+        """evaluate_watchdog re-verifies freshness under lock so concurrent heartbeat wins cleanly."""
+        import contextlib
+        import datetime
+        from unittest import mock
+        from stagecheck.cli.start_cmd import run_start
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.state import load_active_state, save_active_state
+
+        self.assertEqual(run_start(workspace=self.ws, task="task-wd-toctou"), 0)
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        stale_iso = (now_utc - datetime.timedelta(seconds=900)).isoformat()
+        with controlled_write_transaction(self.ws / "controls"):
+            state = load_active_state(self.ws)
+            state["phase"] = "PHASE_2A_CODING"
+            state["watchdog"] = {"last_active_timestamp": stale_iso}
+            save_active_state(self.ws, state)
+
+        from stagecheck.core import supervisor as sup_mod
+        real_lock = sup_mod.acquire_runtime_lock
+
+        @contextlib.contextmanager
+        def _refreshed_lock(target):
+            # Simulate concurrent turn heartbeat refreshing ACTIVE_STATE right before lock is acquired
+            with real_lock(target) as fd:
+                st = load_active_state(self.ws)
+                st["watchdog"] = {"last_active_timestamp": now_utc.isoformat()}
+                save_active_state(self.ws, st)
+                yield fd
+
+        with mock.patch.object(sup_mod, "acquire_runtime_lock", side_effect=_refreshed_lock):
+            tripped, msg, _ = evaluate_watchdog(self.ws, timeout_seconds=600.0, now_utc=now_utc)
+        self.assertFalse(tripped)
+        self.assertIn("refreshed", msg.lower())
+        self.assertEqual(load_active_state(self.ws)["phase"], "PHASE_2A_CODING")
+
+    def test_supervisor_step_defers_cleanly_under_runtime_lock(self) -> None:
+        """SupervisorEngine.step returns LOCK_CONTENDED without mutating state when runtime lock is held."""
+        from stagecheck.cli.start_cmd import run_start
+        from stagecheck.core.locking import acquire_runtime_lock
+
+        self.assertEqual(run_start(workspace=self.ws, task="task-lock-step"), 0)
+        engine = SupervisorEngine(self.ws, watchdog_timeout_seconds=600.0)
+        with acquire_runtime_lock(self.ws):
+            res = engine.step(task_id="task-lock-step", attempt=1)
+        self.assertEqual(res.status, "WAITING")
+        self.assertEqual(res.action_taken, "LOCK_CONTENDED")
+
+    def test_supervisor_returns_halted_on_halted_phases_and_watchdog_resumes(self) -> None:
+        """Halted phases return HALTED; watchdog timeout resumes to interrupted phase with refreshed watchdog."""
+        from stagecheck.cli.start_cmd import run_start
+        from stagecheck.core.dispositions import resume_after_disposition
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.scaffold import scaffold_agent_instructions
+
+        self.assertEqual(run_start(workspace=self.ws, task="task-halt-resume"), 0)
+        with controlled_write_transaction(self.ws / "controls"):
+            st = load_active_state(self.ws)
+            st["phase"] = "PHASE_2A_CODING"
+            st["watchdog"] = {
+                "last_active_timestamp": "2020-01-01T00:00:00+00:00",
+                "last_active_monotonic": 1.0,
+            }
+            save_active_state(self.ws, st)
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        tripped, halt_msg, _ = evaluate_watchdog(self.ws, timeout_seconds=1800.0, now_utc=now_utc)
+        self.assertTrue(tripped)
+        self.assertIn("30 minutes", halt_msg)
+
+        st_tripped = load_active_state(self.ws)
+        self.assertEqual(st_tripped["phase"], "AWAITING_HUMAN_DISPOSITION")
+        self.assertEqual(st_tripped["watchdog"]["interrupted_phase"], "PHASE_2A_CODING")
+
+        engine = SupervisorEngine(self.ws)
+        for halted_phase in ("AWAITING_HUMAN_DISPOSITION", "CIRCUIT_BREAKER_TRIPPED", "ABORTED"):
+            with controlled_write_transaction(self.ws / "controls"):
+                s = load_active_state(self.ws)
+                s["phase"] = halted_phase
+                save_active_state(self.ws, s)
+            step_res = engine.step(task_id="task-halt-resume", attempt=1)
+            self.assertEqual(step_res.status, "HALTED")
+            self.assertEqual(step_res.current_phase, halted_phase)
+
+        with controlled_write_transaction(self.ws / "controls"):
+            s = load_active_state(self.ws)
+            s["phase"] = "AWAITING_HUMAN_DISPOSITION"
+            save_active_state(self.ws, s)
+
+        resumed = resume_after_disposition(self.ws, "task-halt-resume")
+        self.assertEqual(resumed["resumed_phase"], "PHASE_2A_CODING")
+        st_after = load_active_state(self.ws)
+        self.assertEqual(st_after["phase"], "PHASE_2A_CODING")
+        self.assertIsNone(st_after.get("halt_reason"))
+        self.assertNotIn("tripped_at", st_after.get("watchdog", {}))
+        self.assertNotIn("interrupted_phase", st_after.get("watchdog", {}))
+
+        # Refresh existing instruction files
+        a1_file = self.ws / "instructions" / "agent1_prompt_and_audit.md"
+        a1_file.write_text("# Old\n", encoding="utf-8")
+        scaffold_agent_instructions(self.ws, "agent1", "agent2", refresh=True)
+        self.assertIn("Do not stop", a1_file.read_text(encoding="utf-8"))
+
+    def test_reset_circuit_breaker_refreshes_watchdog_turn_and_cleared_gates(self) -> None:
+        """reset_circuit_breaker refreshes watchdog timestamps and resets turn and cleared_gates."""
+        from stagecheck.core.circuit_breaker import (
+            CircuitBreakerEvaluation,
+            reset_circuit_breaker,
+            trip_circuit_breaker,
+        )
+        from stagecheck.core.permissions import controlled_write_transaction
+
+        with controlled_write_transaction(self.ws / "controls"):
+            st = load_active_state(self.ws)
+            st["cleared_gates"] = {"GATE_1": "a" * 64}
+            st["turn"] = "AGENT2_CODING"
+            st["watchdog"] = {
+                "last_active_timestamp": "2020-01-01T00:00:00+00:00",
+                "last_active_monotonic": 1.0,
+                "tripped_at": "2020-01-01T00:30:00+00:00",
+                "interrupted_phase": "PHASE_2A_CODING",
+            }
+            save_active_state(self.ws, st)
+
+        trip_circuit_breaker(
+            self.ws,
+            load_active_state(self.ws)["task_id"],
+            1,
+            CircuitBreakerEvaluation(tripped=True, trigger="stagnant_defects", reason="Stagnant"),
+            [],
+        )
+        task_id = load_active_state(self.ws)["task_id"]
+        updated = reset_circuit_breaker(self.ws, task_id, authorized_by="owner@stagecheck.local")
+        self.assertEqual(updated["phase"], "PHASE_1_PLANNING")
+        self.assertEqual(updated["turn"], "AGENT1_PROMPTING")
+        self.assertEqual(updated["cleared_gates"], {})
+        self.assertNotIn("tripped_at", updated["watchdog"])
+        self.assertNotIn("interrupted_phase", updated["watchdog"])
+        self.assertNotEqual(updated["watchdog"]["last_active_timestamp"], "2020-01-01T00:00:00+00:00")
+
+    def test_default_60s_debounce_and_format_duration(self) -> None:
+        """Verify default 60s debounce triggers INOTIFY_SILENCE_60S and format_duration formatting."""
+        from stagecheck.cli.supervisor_cmd import format_duration
+
+        # 1. format_duration verification
+        self.assertEqual(format_duration(45.2), "45 sec")
+        self.assertEqual(format_duration(60.0), "1 min (60 sec)")
+        self.assertEqual(format_duration(100.0), "1 min 40 sec (100 sec)")
+        self.assertEqual(format_duration(195.0), "3 min 15 sec (195 sec)")
+
+        # 2. Debouncer default quiet_seconds is 60.0s
+        debouncer = PromptDebouncer()
+        self.assertEqual(debouncer.quiet_seconds, 60.0)
+
+        # File created at t=0
+        test_file = self.ws / "test_prompt.md"
+        test_file.write_text("# Blueprint\n", encoding="utf-8")
+        stable, reason = debouncer.check_stability(test_file, now=0.0)
+        self.assertFalse(stable)
+
+        # Untouched at 59s -> not stable
+        stable, reason = debouncer.check_stability(test_file, now=59.0)
+        self.assertFalse(stable)
+
+        # Untouched at 60s -> stable via INOTIFY_SILENCE_60S
+        stable, reason = debouncer.check_stability(test_file, now=60.0)
+        self.assertTrue(stable)
+        self.assertEqual(reason, "INOTIFY_SILENCE_60S")
+
+    def test_supervisor_step_debouncing_message_shows_1_min(self) -> None:
+        """Verify SupervisorEngine step debouncing message announces 1 min debounce."""
+        from stagecheck.core.permissions import controlled_write_transaction
+
+        engine = SupervisorEngine(workspace_root=self.ws)
+        self.assertEqual(engine.debouncer.quiet_seconds, 60.0)
+
+        task_id = load_active_state(self.ws)["task_id"]
+        with controlled_write_transaction(self.ws / "controls"):
+            st = load_active_state(self.ws)
+            st["phase"] = "PHASE_1_PLANNING"
+            save_active_state(self.ws, st)
+
+        # Draft prompt and scope
+        p1_dir = self.ws / "evidence" / "tasks" / task_id / "attempt_1" / "Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").write_text("# Draft Prompt\n", encoding="utf-8")
+        (p1_dir / "declared_scope.json").write_text('{"schema_version": "2.0", "task_id": "test", "allowed_paths": []}\n', encoding="utf-8")
+
+        res = engine.step(task_id=task_id, attempt=1, now=10.0)
+        self.assertEqual(res.status, "WAITING")
+        self.assertEqual(res.action_taken, "DEBOUNCING_PROMPT")
+        self.assertIn("1 min stability debounce", res.message)
+
+    def test_supervisor_watch_deduplication_and_attempt_highlight(self) -> None:
+        """Verify supervisor --watch deduplicates repeated waiting lines, displays elapsed time, and highlights attempt changes."""
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+        from stagecheck.cli.supervisor_cmd import run_supervisor_cmd
+        from stagecheck.core.supervisor import SupervisorStepResult
+
+        step_results = [
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=1,
+                current_phase="PHASE_1_PLANNING",
+                action_taken="DEBOUNCING_PROMPT",
+                status="WAITING",
+                message="prompt.md detected. Waiting for 1 min stability debounce.",
+            ),
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=1,
+                current_phase="PHASE_1_PLANNING",
+                action_taken="DEBOUNCING_PROMPT",
+                status="WAITING",
+                message="prompt.md detected. Waiting for 1 min stability debounce.",
+            ),
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=1,
+                current_phase="PHASE_2A_CODING",
+                action_taken="PROMPT_VERIFIED_AND_GATE1_ADVANCED",
+                status="ADVANCED",
+                message="Prompt verified. Advanced to PHASE_2A_CODING.",
+            ),
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=2,
+                current_phase="PHASE_1_PLANNING",
+                action_taken="WAITING_FOR_BLUEPRINT",
+                status="WAITING",
+                message="Waiting for Agent 1 to write prompt.",
+            ),
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=2,
+                current_phase="COMPLETED",
+                action_taken="GATE4_SEALED",
+                status="COMPLETED",
+                message="Task completed and sealed.",
+            ),
+        ]
+
+        buf = io.StringIO()
+        with patch("stagecheck.cli.supervisor_cmd.SupervisorEngine.step", side_effect=step_results):
+            with patch("time.sleep", return_value=None):
+                with redirect_stdout(buf):
+                    rc = run_supervisor_cmd(
+                        workspace=str(self.ws),
+                        watch=True,
+                        phase_delay=0.01,
+                    )
+
+        output = buf.getvalue()
+        self.assertEqual(rc, 0)
+
+        # 1. Repeated DEBOUNCING_PROMPT must appear only once as [WAITING]
+        self.assertEqual(output.count("[WAITING] Phase: PHASE_1_PLANNING | Action: DEBOUNCING_PROMPT"), 1)
+
+        # 2. When DEBOUNCING_PROMPT finished, completion duration displayed
+        self.assertIn("Completed in", output)
+
+        # 3. Next attempt banner displayed prominently
+        self.assertIn(">>> ADVANCING TO ATTEMPT 2 (Task: task-01) <<<", output)
+        self.assertIn("=" * 80, output)
+
+        # 4. Phase transition notice displayed
+        self.assertIn("[TRANSITION] Phase advanced to PHASE_2A_CODING.", output)
+
+    def test_supervisor_terminal_colors_formatting(self) -> None:
+        """Verify color formatting for statuses (WAITING=yellow, ADVANCED=green, etc.) and phases (PHASE-01=cyan, etc.)."""
+        from stagecheck.cli.supervisor_cmd import (
+            color_phase,
+            color_status,
+            format_attempt_banner,
+            format_completed_line,
+            format_status_line,
+            format_transition_line,
+        )
+
+        # Statuses: WAITING is yellow (\033[1;33m), ADVANCED is green (\033[1;32m), HALTED is red (\033[1;31m)
+        self.assertIn("\033[1;33m[WAITING]\033[0m", color_status("WAITING", enabled=True))
+        self.assertIn("\033[1;33m[WARNING]\033[0m", color_status("WARNING", enabled=True))
+        self.assertIn("\033[1;32m[ADVANCED]\033[0m", color_status("ADVANCED", enabled=True))
+        self.assertIn("\033[1;35m[TRANSITION]\033[0m", color_status("TRANSITION", enabled=True))
+        self.assertIn("\033[1;36m[IDLE]\033[0m", color_status("IDLE", enabled=True))
+        self.assertIn("\033[1;92m[COMPLETED]\033[0m", color_status("COMPLETED", enabled=True))
+        self.assertIn("\033[1;31m[HALTED]\033[0m", color_status("HALTED", enabled=True))
+
+        # Phases: Phase 1 is cyan (\033[1;36m), Phase 2A is blue (\033[1;94m), Phase 2B is magenta (\033[1;35m), Phase 3 is yellow (\033[1;33m)
+        self.assertIn("\033[1;36mPHASE_1_PLANNING\033[0m", color_phase("PHASE_1_PLANNING", enabled=True))
+        self.assertIn("\033[1;36mPHASE-01\033[0m", color_phase("PHASE-01", enabled=True))
+        self.assertIn("\033[1;94mPHASE_2A_CODING\033[0m", color_phase("PHASE_2A_CODING", enabled=True))
+        self.assertIn("\033[1;94mPHASE-02A\033[0m", color_phase("PHASE-02A", enabled=True))
+        self.assertIn("\033[1;35mPHASE_2B_COMMITTING\033[0m", color_phase("PHASE_2B_COMMITTING", enabled=True))
+        self.assertIn("\033[1;35mPHASE-02B\033[0m", color_phase("PHASE-02B", enabled=True))
+        self.assertIn("\033[1;33mPHASE_3_AUDIT\033[0m", color_phase("PHASE_3_AUDIT", enabled=True))
+        self.assertIn("\033[1;33mPHASE-03\033[0m", color_phase("PHASE-03", enabled=True))
+
+        # Formatted status line contains colored status and phase
+        line = format_status_line("WAITING", "PHASE_1_PLANNING", "WAITING_FOR_BLUEPRINT", "Waiting for Agent 1", enabled=True)
+        self.assertIn("\033[1;33m[WAITING]\033[0m", line)
+        self.assertIn("\033[1;36mPHASE_1_PLANNING\033[0m", line)
+
+        # Transition line contains colored TRANSITION and phase
+        trans = format_transition_line("PHASE_2B_COMMITTING", 30, enabled=True)
+        self.assertIn("\033[1;35m[TRANSITION]\033[0m", trans)
+        self.assertIn("\033[1;35mPHASE_2B_COMMITTING\033[0m", trans)
+
+        # Completed line contains cyan prefix and duration
+        comp = format_completed_line("Completed", "30 sec", enabled=True)
+        self.assertIn("30 sec", comp)
+
+        # Attempt banner contains yellow attempt title
+        banner = format_attempt_banner(2, "task-01", enabled=True)
+        self.assertIn("ADVANCING TO ATTEMPT 2", banner)
+        self.assertIn("\033[1;93m", banner)
+
+        # Task started banner contains cyan border and task title
+        from stagecheck.cli.supervisor_cmd import format_task_started_banner
+        start_banner = format_task_started_banner("task-01", enabled=True)
+        self.assertIn(">>> TASK STARTED ----> Task-01 <<<", start_banner)
+        self.assertIn("\033[1;96m", start_banner)
+
+    def test_supervisor_watch_with_forced_color(self) -> None:
+        """Verify supervisor --watch emits ANSI colors when color is forced."""
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+        from stagecheck.cli.supervisor_cmd import run_supervisor_cmd
+        from stagecheck.core.supervisor import SupervisorStepResult
+
+        step_results = [
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=1,
+                current_phase="PHASE_1_PLANNING",
+                action_taken="WAITING_FOR_BLUEPRINT",
+                status="WAITING",
+                message="Waiting for Agent 1.",
+            ),
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=1,
+                current_phase="SEALED_PASSED",
+                action_taken="GATE4_SEALED",
+                status="COMPLETED",
+                message="Task completed and sealed.",
+            ),
+        ]
+
+        buf = io.StringIO()
+        with patch("stagecheck.cli.supervisor_cmd.SupervisorEngine.step", side_effect=step_results):
+            with patch("time.sleep", return_value=None):
+                with redirect_stdout(buf):
+                    rc = run_supervisor_cmd(
+                        workspace=str(self.ws),
+                        watch=True,
+                        phase_delay=0.01,
+                        color=True,
+                    )
+
+        output = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn(">>> TASK STARTED ----> Task-01 <<<", output)
+        self.assertIn("\033[1;33m[WAITING]\033[0m", output)
+        self.assertIn("\033[1;36mPHASE_1_PLANNING\033[0m", output)
+        self.assertIn("\033[1;92m[COMPLETED]\033[0m", output)
+        self.assertIn(">>> TASK COMPLETED ----> Task-01 <<<", output)
+        self.assertIn("[Waiting]", output)
+        self.assertIn("for 60 sec", output)
+
+    def test_supervisor_transition_banner_precedes_waiting_status_on_phase_change(self) -> None:
+        """Verify that on phase transition, [TRANSITION] is output BEFORE [WAITING] for the new phase."""
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+        from stagecheck.cli.supervisor_cmd import run_supervisor_cmd
+        from stagecheck.core.supervisor import SupervisorStepResult
+
+        step_results = [
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=1,
+                current_phase="PHASE_1_PLANNING",
+                action_taken="WAITING_FOR_BLUEPRINT",
+                status="WAITING",
+                message="Waiting for Agent 1 to write Phase-1/prompt.md.",
+            ),
+            # Phase changed externally or advanced to PHASE_2A_CODING
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=1,
+                current_phase="PHASE_2A_CODING",
+                action_taken="WAITING_FOR_PRECOMMIT_STATUS",
+                status="WAITING",
+                message="Waiting for Agent 2 to implement code.",
+            ),
+            SupervisorStepResult(
+                task_id="task-01",
+                attempt=1,
+                current_phase="SEALED_PASSED",
+                action_taken="GATE4_SEALED",
+                status="COMPLETED",
+                message="Task completed and sealed.",
+            ),
+        ]
+
+        buf = io.StringIO()
+        with patch("stagecheck.cli.supervisor_cmd.SupervisorEngine.step", side_effect=step_results):
+            with patch("time.sleep", return_value=None):
+                with redirect_stdout(buf):
+                    rc = run_supervisor_cmd(
+                        workspace=str(self.ws),
+                        watch=True,
+                        phase_delay=30.0,
+                        color=False,
+                    )
+
+        output = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("[TRANSITION] Phase advanced to PHASE_2A_CODING", output)
+        self.assertIn("[WAITING] Phase: PHASE_2A_CODING | Action: WAITING_FOR_PRECOMMIT_STATUS", output)
+
+        # Crucial ordering check: [TRANSITION] must appear BEFORE [WAITING] for PHASE_2A_CODING
+        trans_idx = output.index("[TRANSITION] Phase advanced to PHASE_2A_CODING")
+        wait_p2a_idx = output.index("[WAITING] Phase: PHASE_2A_CODING | Action: WAITING_FOR_PRECOMMIT_STATUS")
+        self.assertLess(trans_idx, wait_p2a_idx, "Expected [TRANSITION] to precede [WAITING] for PHASE_2A_CODING")
+
+    def test_supervisor_step_triggers_audit_automatically_on_phase_3(self) -> None:
+        """When in PHASE_3_AUDIT and verdict.json is missing, step() triggers run_audit outside lock."""
+        from unittest.mock import patch
+        from stagecheck.cli.start_cmd import run_start
+        from stagecheck.core.agents import resolve_task_attempt_dir
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.supervisor import SupervisorEngine
+
+        self.assertEqual(run_start(workspace=self.ws, task="task-audit-auto"), 0)
+        with controlled_write_transaction(self.ws / "controls"):
+            st = load_active_state(self.ws)
+            st["phase"] = "PHASE_3_AUDIT"
+            st["turn"] = "STAGECHECK_AUDITING"
+            st["cleared_gates"] = {
+                "GATE_1": "1" * 64,
+                "GATE_2A": "2" * 64,
+                "GATE_2B": "3" * 64,
+            }
+            save_active_state(self.ws, st)
+
+        engine = SupervisorEngine(self.ws)
+        attempt_dir = resolve_task_attempt_dir(self.ws, "task-audit-auto", 1)
+        p3_dir = attempt_dir / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Audit raises an exception -> returns HALTED with AUDIT_EXECUTION_ERROR
+        with patch("stagecheck.core.orchestrator.run_audit", side_effect=RuntimeError("container engine offline")):
+            res = engine.step(task_id="task-audit-auto", attempt=1)
+            self.assertEqual(res.status, "HALTED")
+            self.assertEqual(res.action_taken, "AUDIT_EXECUTION_ERROR")
+            self.assertIn("container engine offline", res.message)
+
+        # 2. Audit succeeds and writes verdict.json -> re-step advances to GATE_4_SEALING
+        def fake_run_audit(workspace_root, task_id, attempt):
+            verdict_payload = {
+                "task_id": task_id,
+                "attempt": attempt,
+                "iteration": attempt,
+                "status": "CLEAR",
+                "result": "CLEAR",
+                "counts": {"blocking": 0, "non_blocking": 0},
+                "defects": [],
+            }
+            (p3_dir / "verdict.json").write_text(json.dumps(verdict_payload, indent=2), encoding="utf-8")
+            return True, verdict_payload
+
+        with patch("stagecheck.core.orchestrator.run_audit", side_effect=fake_run_audit) as mock_audit, \
+             patch("stagecheck.core.rubric_engine.verify_complete_rubric_evaluation", return_value=(True, [], [])):
+            res = engine.step(task_id="task-audit-auto", attempt=1)
+            self.assertTrue(mock_audit.called)
+            self.assertEqual(res.status, "ADVANCED")
+            self.assertEqual(res.current_phase, "GATE_4_SEALING")
+            self.assertEqual(res.action_taken, "GATE3_ADVANCED")
+
+    def test_supervisor_step_handles_audit_failure_and_transitions_to_attempt_2(self) -> None:
+        """When audit fails on attempt 1, supervisor transitions to attempt 2 and re-steps with attempt=2."""
+        from unittest.mock import patch
+        from stagecheck.cli.start_cmd import run_start
+        from stagecheck.core.agents import resolve_task_attempt_dir
+        from stagecheck.core.gate_engine import handle_audit_verdict
+        from stagecheck.core.permissions import controlled_write_transaction, freeze_phase_directory
+        from stagecheck.core.supervisor import SupervisorEngine
+
+        self.assertEqual(run_start(workspace=self.ws, task="task-audit-fail"), 0)
+        with controlled_write_transaction(self.ws / "controls"):
+            st = load_active_state(self.ws)
+            st["phase"] = "PHASE_3_AUDIT"
+            st["turn"] = "STAGECHECK_AUDITING"
+            st["cleared_gates"] = {
+                "GATE_1": "1" * 64,
+                "GATE_2A": "2" * 64,
+                "GATE_2B": "3" * 64,
+            }
+            save_active_state(self.ws, st)
+
+        engine = SupervisorEngine(self.ws)
+        attempt1_dir = resolve_task_attempt_dir(self.ws, "task-audit-fail", 1)
+        p3_dir = attempt1_dir / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+
+        def fake_failing_audit(workspace_root, task_id, attempt):
+            verdict_payload = {
+                "task_id": task_id,
+                "attempt": attempt,
+                "iteration": attempt,
+                "status": "FAILED",
+                "result": "BLOCKED",
+                "counts": {"blocking": 1, "non_blocking": 0},
+                "blocking_defects_count": 1,
+                "defects": [
+                    {
+                        "defect_id": "test_defect",
+                        "stage": "stage4_secrets",
+                        "severity": "CRITICAL",
+                        "blocking": True,
+                        "message": "Critical defect found",
+                    }
+                ],
+            }
+            (p3_dir / "verdict.json").write_text(json.dumps(verdict_payload, indent=2), encoding="utf-8")
+            handle_audit_verdict(workspace_root, task_id, attempt, verdict_payload)
+            freeze_phase_directory(attempt1_dir / "Phase-1")
+            return False, verdict_payload
+
+        with patch("stagecheck.core.orchestrator.run_audit", side_effect=fake_failing_audit):
+            res = engine.step(task_id="task-audit-fail", attempt=1)
+            self.assertEqual(res.attempt, 2)
+            self.assertEqual(res.current_phase, "PHASE_1_PLANNING")
+            self.assertEqual(res.status, "WAITING")
+            self.assertEqual(res.action_taken, "WAITING_FOR_BLUEPRINT")
+
+        st_after = load_active_state(self.ws)
+        self.assertEqual(st_after["attempt_index"], 2)
+        self.assertEqual(st_after["phase"], "PHASE_1_PLANNING")
+        self.assertEqual(st_after["turn"], "AGENT1_PLANNING")
+
+
+
+if __name__ == "__main__":
+    unittest.main()

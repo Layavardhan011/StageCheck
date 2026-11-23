@@ -22,6 +22,7 @@ from stagecheck.checks.stage9_carry_forward import run_stage9_carry_forward
 from stagecheck.cli.main import main
 from stagecheck.core.agents_md import write_agents_contract
 from stagecheck.core.orchestrator import AuditOrchestrator, run_audit
+from stagecheck.core.permissions import controlled_write_transaction
 from stagecheck.core.prompt_gate import freeze_prompt_and_scope
 from stagecheck.core.scaffold import scaffold_controls_atomic
 from stagecheck.core.git import discover_repository
@@ -50,6 +51,27 @@ class TestNineStageVerification(unittest.TestCase):
 
         dummy_file = self.repo_dir / "README.md"
         dummy_file.write_text("# Test Repo\n", encoding="utf-8")
+        (self.repo_dir / "test_app.py").write_text(
+            "import unittest\n\n\n"
+            "def validate_item(v):\n"
+            "    if not isinstance(v, int):\n"
+            "        raise TypeError('int expected')\n"
+            "    if v < 0:\n"
+            "        raise ValueError('negative disallowed')\n"
+            "    return v\n\n\n"
+            "class TestApp(unittest.TestCase):\n"
+            "    def test_positive(self):\n"
+            "        self.assertEqual(validate_item(1), 1)\n\n"
+            "    def test_negative_boundary(self):\n"
+            "        with self.assertRaises(ValueError):\n"
+            "            validate_item(-1)\n\n"
+            "    def test_malformed_input(self):\n"
+            "        with self.assertRaises(TypeError):\n"
+            "            validate_item(None)\n\n"
+            "    def test_duplicate_replay_idempotent(self):\n"
+            "        self.assertEqual(validate_item(2), validate_item(2))\n",
+            encoding="utf-8",
+        )
         subprocess.run(["git", "-C", str(self.repo_dir), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.repo_dir), "commit", "-m", "initial"], check=True)
 
@@ -58,6 +80,51 @@ class TestNineStageVerification(unittest.TestCase):
 
         baseline = discover_repository(self.repo_dir, name="app", workspace_root=self.workspace_root)
         scaffold_controls_atomic(self.workspace_root, {"app": baseline})
+        from stagecheck.core.rubric_engine import load_270_rule_catalog
+
+        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+
+        waiver_ev = self.workspace_root / "evidence" / "waiver_orch.txt"
+        waiver_ev.parent.mkdir(parents=True, exist_ok=True)
+        waiver_ev.write_text("Approved waiver evidence for orchestrator tests.\n", encoding="utf-8")
+
+        catalog = load_270_rule_catalog()
+        waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        w_entry = build_waiver_entry(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            defect_id=waiver_ids[0],
+            rationale="Authorized for orchestrator verification tests",
+            authorized_by="owner@stagecheck.local",
+            attempt=self.attempt,
+            evidence_path="evidence/waiver_orch.txt",
+            rule_id=waiver_ids[0],
+            waived_rules=waiver_ids,
+        )
+        disp_doc = {
+            "schema_version": "2.0",
+            "dispositions": [w_entry],
+        }
+        from stagecheck.core.start_manifest import generate_start_manifest
+        from stagecheck.core.state import load_active_state, save_active_state
+
+        with controlled_write_transaction(self.workspace_root / "controls"):
+            (self.workspace_root / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps(disp_doc), encoding="utf-8"
+            )
+        record_waiver_in_replay_ledger(self.workspace_root, w_entry)
+        state = load_active_state(self.workspace_root)
+        state["cleared_gates"] = {"GATE_1": "0" * 64}
+        save_active_state(self.workspace_root, state)
+        write_agents_contract(self.workspace_root)
+        from stagecheck.core.start_manifest import generate_start_manifest
+        from stagecheck.core.state import load_active_state, save_active_state
+
+        (self.workspace_root / "specs").mkdir(parents=True, exist_ok=True)
+        generate_start_manifest(self.workspace_root)
+        state = load_active_state(self.workspace_root)
+        state["cleared_gates"] = {"GATE_1": "0" * 64}
+        save_active_state(self.workspace_root, state)
         write_agents_contract(self.workspace_root)
 
         # Ensure on a permitted task branch per branch governance
@@ -125,6 +192,7 @@ class TestNineStageVerification(unittest.TestCase):
             "cycle": 1,
             "status": "APPROVED",
             "summary": "Ready to commit",
+            "base_commits": {"app": head_commit},
             "pre_existing_issues_ignored": [],
             "architectural_intents_approved": [],
             "new_issues_found": [],
@@ -136,6 +204,41 @@ class TestNineStageVerification(unittest.TestCase):
         }
         (p2a_dir / "pre_commit_review.json").write_text(
             canonical_json_dumps(review_data), encoding="utf-8"
+        )
+        (p2a_dir / "pre_commit_status.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "cycle": 1,
+                "status": "AWAITING_REVIEW",
+                "touched_repositories": ["app"],
+                "base_commits": {"app": head_commit},
+            }),
+            encoding="utf-8",
+        )
+        from stagecheck.core.rubric_engine import build_agent_reviews_artifact, load_270_rule_catalog
+
+        agent_reviews = {
+            r.rule_id: {
+                "status": "PASS",
+                "rationale": f"Verified semantic criterion for {r.title}.",
+                "evidence_path": "Phase-2A/agent_reviews.json",
+            }
+            for r in load_270_rule_catalog()
+            if r.category == "AGENT_ASSISTED"
+        }
+        reviews_artifact = build_agent_reviews_artifact(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            reviews=agent_reviews,
+            reviewer="agent1",
+            reviewer_role="prompt_and_audit",
+        )
+        (p2a_dir / "agent_reviews.json").write_text(
+            canonical_json_dumps(reviews_artifact),
+            encoding="utf-8",
         )
 
     def _setup_valid_delivery_report(self):
@@ -156,6 +259,19 @@ class TestNineStageVerification(unittest.TestCase):
             "## Verification\nRan tests successfully.\n"
         )
         report_file.write_text(report_content, encoding="utf-8")
+        from stagecheck.core.utils import sha256_file
+
+        (p2b_dir / "claims.json").write_text(
+            canonical_json_dumps({
+                "task_id": self.task_id,
+                "iteration": 1,
+                "contract_sha256": sha256_file(self.workspace_root / "AGENTS.md"),
+                "record": "Phase-2B/report.md",
+                "record_sha256": sha256_file(report_file),
+                "claims": [],
+            }),
+            encoding="utf-8",
+        )
 
     def test_stage1_preflight_pass_and_failure(self):
         """Test Stage 1 detects missing prompt verification and passes when verified."""
@@ -189,6 +305,41 @@ class TestNineStageVerification(unittest.TestCase):
             res = run_stage1_preflight(ctx)
             self.assertFalse(res.is_clear)
             self.assertTrue(any(d.defect_id.startswith("preflight.gitleaks_") and d.blocking for d in res.defects))
+
+    def test_stage1_preflight_unresolved_placeholder_task_scoped(self):
+        """Verify preflight placeholder check scopes strictly to task changes and ignores pre-existing files."""
+        self._setup_valid_prompt_and_scope()
+
+        # 1. Commit pre-existing upstream file with template placeholder (e.g., legacy docker script)
+        legacy_file = self.repo_dir / "legacy_clean.sh"
+        legacy_file.write_text("#!/bin/bash\necho {{UPSTREAM_PLACEHOLDER}}\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo_dir), "add", "legacy_clean.sh"], check=True)
+        subprocess.run(["git", "-C", str(self.repo_dir), "commit", "-m", "upstream commit"], check=True)
+
+        rev_res = subprocess.run(["git", "-C", str(self.repo_dir), "rev-parse", "HEAD"], check=True, capture_output=True, text=True)
+        base_commit = rev_res.stdout.strip()
+
+        # 2. Preflight with base_commit set should NOT flag legacy_clean.sh
+        ctx = AuditContext(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            touched_repos=["app"],
+            all_registered_repos=["app"],
+            base_commits={"app": base_commit},
+            target_commits={"app": "HEAD"},
+        )
+        res = run_stage1_preflight(ctx)
+        self.assertFalse(any(d.defect_id == "preflight.unresolved_placeholder" for d in res.defects))
+
+        # 3. Introduce an uncommitted task file with TODO_IMPLEMENT
+        task_file = self.repo_dir / "new_feature.py"
+        task_file.write_text("def solve():\n    TODO_IMPLEMENT\n", encoding="utf-8")
+
+        res_task = run_stage1_preflight(ctx)
+        placeholder_defects = [d for d in res_task.defects if d.defect_id == "preflight.unresolved_placeholder"]
+        self.assertEqual(len(placeholder_defects), 1)
+        self.assertIn("new_feature.py", placeholder_defects[0].message)
 
     def test_stage6_secrets_strict_and_report_only_modes(self):
         """Test Stage 6 enforces fail-closed behavior when scanner is missing."""
@@ -298,6 +449,19 @@ class TestNineStageVerification(unittest.TestCase):
         self.assertFalse(res_fail.is_clear)
         self.assertTrue(any("citation" in d.defect_id for d in res_fail.defects))
 
+        # Unknown citation types must fail closed
+        ctx_unknown = AuditContext(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            touched_repos=["app"],
+            all_registered_repos=["app"],
+            claims={"claims": [{"id": "c3", "citations": [{"type": "bogus_kind"}]}]},
+        )
+        res_unknown = run_stage3_citations(ctx_unknown)
+        self.assertFalse(res_unknown.is_clear)
+        self.assertTrue(any(d.defect_id == "citations.unsupported_type" for d in res_unknown.defects))
+
     def test_stage4_report_lint_and_injection(self):
         """Test Stage 4 enforces delivery report presence and anti-prompt injection."""
         ctx = AuditContext(
@@ -336,12 +500,18 @@ class TestNineStageVerification(unittest.TestCase):
 
     def test_stage5_authority_review_approval(self):
         """Test Stage 5 verifies pre-commit review approval gate."""
+        head_commit = subprocess.run(
+            ["git", "-C", str(self.repo_dir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
         ctx = AuditContext(
             workspace_root=self.workspace_root,
             task_id=self.task_id,
             attempt=self.attempt,
             touched_repos=["app"],
             all_registered_repos=["app"],
+            base_commits={"app": head_commit},
+            target_commits={"app": head_commit},
         )
         # Missing pre_commit_review.json
         res_missing = run_stage5_authority(ctx)
@@ -393,6 +563,24 @@ class TestNineStageVerification(unittest.TestCase):
         res_valid_name = run_stage7_qual_naming(ctx_req)
         self.assertTrue(res_valid_name.is_clear)
 
+        # 5. Missing qualification directory when tests are NOT required -> CLEAR (non-blocking INFO)
+        valid_test.unlink()
+        (self.workspace_root / "evals").rmdir()
+        self.assertFalse((self.workspace_root / "evals").exists())
+
+        res_missing_not_required = run_stage7_qual_naming(ctx)
+        self.assertTrue(res_missing_not_required.is_clear)
+        self.assertTrue(any("directory_not_present" in d.defect_id for d in res_missing_not_required.defects))
+        self.assertFalse(any(d.blocking for d in res_missing_not_required.defects))
+
+        # 6. Missing qualification directory when tests ARE required -> FAIL (blocking defect)
+        res_missing_required = run_stage7_qual_naming(ctx_req)
+        self.assertFalse(res_missing_required.is_clear)
+        self.assertTrue(any("directory_missing" in d.defect_id for d in res_missing_required.defects))
+
+        # Restore evals directory for subsequent tests in fixture
+        (self.workspace_root / "evals").mkdir(parents=True, exist_ok=True)
+
     def test_stage8_rerun_clean_and_failure(self):
         """Test Stage 8 command execution and working-tree mutation detection."""
         # Clean execution
@@ -407,9 +595,9 @@ class TestNineStageVerification(unittest.TestCase):
                     "citations": [
                         {
                             "type": "command",
-                            "record": "echo",
-                            "argv": ["echo", "test-pass"],
-                            "cwd": ".",
+                            "record": "python3",
+                            "argv": ["python3", "-m", "unittest", "--help"],
+                            "cwd": "repos/app",
                             "exit_status": 0,
                         }
                     ],
@@ -439,9 +627,9 @@ class TestNineStageVerification(unittest.TestCase):
                     "citations": [
                         {
                             "type": "command",
-                            "record": "false",
-                            "argv": ["false"],
-                            "cwd": ".",
+                            "record": "python3",
+                            "argv": ["python3", "-m", "unittest", "nonexistent_test_module_that_fails"],
+                            "cwd": "repos/app",
                             "exit_status": 0,
                         }
                     ],
@@ -484,16 +672,61 @@ class TestNineStageVerification(unittest.TestCase):
         res2_fail = run_stage9_carry_forward(ctx_att2)
         self.assertFalse(res2_fail.is_clear)
 
-        # Attempt 2 with prior seal -> CLEAR
-        prior_dir = self.workspace_root / "evidence" / "tasks" / self.task_id / "attempt_1"
-        prior_dir.mkdir(parents=True, exist_ok=True)
-        prior_seal = prior_dir / "seal.json"
-        prior_seal.write_text(
-            canonical_json_dumps({"payload_sha256": "0" * 64, "manifest_sha256": "0" * 64}),
-            encoding="utf-8",
+        # Attempt 2 with cryptographically valid prior seal & non-empty issue history -> CLEAR
+        from stagecheck.core.evidence import append_issue_history, create_task_seal
+        append_issue_history(
+            self.workspace_root,
+            self.task_id,
+            attempt=1,
+            outcome="FAILED",
+            defects=[{"defect_id": "test.prior_defect", "check_id": "rerun", "severity": "HIGH", "mode": "blocking"}],
+        )
+        create_task_seal(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            attempt=1,
+            verdict_data={"result": "BLOCKED", "status": "FAILED"},
+            checked_heads={"app": "0" * 40},
+            outcome="FAILED",
         )
         res2_pass = run_stage9_carry_forward(ctx_att2)
         self.assertTrue(res2_pass.is_clear)
+
+    def test_stage9_carry_forward_unsealed_retry_attempt(self):
+        """Test Stage 9 unsealed retry attempt clears when prior attempt failed and ledger is present."""
+        import json
+        from stagecheck.core.evidence import append_issue_history
+        from stagecheck.checks.stage9_carry_forward import run_stage9_carry_forward
+
+        task_id = "task-unsealed-retry"
+        p1_dir = self.workspace_root / "evidence" / "tasks" / task_id / "attempt_1"
+        p1_p3 = p1_dir / "Phase-3"
+        p1_p3.mkdir(parents=True, exist_ok=True)
+
+        # Attempt 1 failed audit, no seal.json generated (Gate 4 never executed)
+        (p1_p3 / "verdict.json").write_text(
+            json.dumps({"task_id": task_id, "attempt": 1, "result": "BLOCKED", "status": "FAILED", "defects": [{"blocking": True}]}),
+            encoding="utf-8",
+        )
+        # Issue history records attempt 1 defects
+        append_issue_history(
+            self.workspace_root,
+            task_id,
+            attempt=1,
+            outcome="FAILED",
+            defects=[{"defect_id": "test.prior_defect", "check_id": "scope", "severity": "HIGH", "mode": "blocking"}],
+        )
+
+        ctx_att2 = AuditContext(
+            workspace_root=self.workspace_root,
+            task_id=task_id,
+            attempt=2,
+            touched_repos=["app"],
+            all_registered_repos=["app"],
+        )
+        res = run_stage9_carry_forward(ctx_att2)
+        self.assertTrue(res.is_clear)
+        self.assertTrue(any(d.defect_id == "carry_forward.unsealed_prior_retry" and not d.blocking for d in res.defects))
 
     def test_multi_repo_zero_partial_pass_aggregate(self):
         """Test multi-repository zero partial pass: failure in one repo blocks aggregate."""
@@ -510,10 +743,57 @@ class TestNineStageVerification(unittest.TestCase):
 
         baseline_b = discover_repository(repo_b_dir, name="service-b", workspace_root=self.workspace_root)
         baseline_app = discover_repository(self.repo_dir, name="app", workspace_root=self.workspace_root)
+        controls_dir = self.workspace_root / "controls"
+        if controls_dir.exists():
+            controls_dir.chmod(0o755)
+            for item in controls_dir.iterdir():
+                if item.is_file():
+                    item.chmod(0o644)
         scaffold_controls_atomic(
             self.workspace_root,
             {"app": baseline_app, "service-b": baseline_b},
         )
+        from stagecheck.core.rubric_engine import load_270_rule_catalog
+
+        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+
+        catalog = load_270_rule_catalog()
+        waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        w_entry = build_waiver_entry(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            defect_id=waiver_ids[0],
+            rationale="Authorized for multi-repo orchestrator test",
+            authorized_by="owner@stagecheck.local",
+            attempt=self.attempt,
+            evidence_path="evidence/waiver_orch.txt",
+            rule_id=waiver_ids[0],
+            waived_rules=waiver_ids,
+        )
+        disp_doc = {
+            "schema_version": "2.0",
+            "dispositions": [w_entry],
+        }
+        from stagecheck.core.start_manifest import generate_start_manifest
+        from stagecheck.core.state import load_active_state, save_active_state
+
+        with controlled_write_transaction(self.workspace_root / "controls"):
+            (self.workspace_root / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps(disp_doc), encoding="utf-8"
+            )
+        record_waiver_in_replay_ledger(self.workspace_root, w_entry)
+        state = load_active_state(self.workspace_root)
+        state["cleared_gates"] = {"GATE_1": "0" * 64}
+        save_active_state(self.workspace_root, state)
+        write_agents_contract(self.workspace_root)
+        from stagecheck.core.start_manifest import generate_start_manifest
+        from stagecheck.core.state import load_active_state, save_active_state
+
+        (self.workspace_root / "specs").mkdir(parents=True, exist_ok=True)
+        generate_start_manifest(self.workspace_root)
+        state = load_active_state(self.workspace_root)
+        state["cleared_gates"] = {"GATE_1": "0" * 64}
+        save_active_state(self.workspace_root, state)
         write_agents_contract(self.workspace_root)
 
         self._setup_valid_prompt_and_scope()
@@ -579,6 +859,41 @@ class TestNineStageVerification(unittest.TestCase):
         # Review with matching diff_hash
         p2a_dir = self.workspace_root / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
         p2a_dir.mkdir(parents=True, exist_ok=True)
+        (p2a_dir / "pre_commit_status.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "cycle": 1,
+                "status": "AWAITING_REVIEW",
+                "touched_repositories": ["app"],
+                "base_commits": {"app": base_commit},
+            }),
+            encoding="utf-8",
+        )
+        from stagecheck.core.rubric_engine import build_agent_reviews_artifact, load_270_rule_catalog
+
+        agent_reviews = {
+            r.rule_id: {
+                "status": "PASS",
+                "rationale": f"Verified semantic criterion for {r.title}.",
+                "evidence_path": "Phase-2A/agent_reviews.json",
+            }
+            for r in load_270_rule_catalog()
+            if r.category == "AGENT_ASSISTED"
+        }
+        reviews_artifact = build_agent_reviews_artifact(
+            workspace_root=self.workspace_root,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            reviews=agent_reviews,
+            reviewer="agent1",
+            reviewer_role="prompt_and_audit",
+        )
+        (p2a_dir / "agent_reviews.json").write_text(
+            canonical_json_dumps(reviews_artifact),
+            encoding="utf-8",
+        )
         review_data = {
             "schema_version": "2.0",
             "task_id": self.task_id,
@@ -601,20 +916,46 @@ class TestNineStageVerification(unittest.TestCase):
         self.assertEqual(verdict["result"], "BLOCKED")
         self.assertTrue(any(d["defect_id"] == "scope_paths.out_of_scope_modification" for d in verdict["defects"]))
 
-        # Now add waiver to controls/DISPOSITIONS.json
+        # Now add waivers to controls/DISPOSITIONS.json (waiving emitted scope defects & preserving HUMAN_WAIVER authorizations)
+        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+
         disp_file = self.workspace_root / "controls" / "DISPOSITIONS.json"
+        waiver_ids = [r.rule_id for r in load_270_rule_catalog() if r.category == "HUMAN_WAIVER"]
+        dispositions = [
+            build_waiver_entry(
+                workspace_root=self.workspace_root,
+                task_id=self.task_id,
+                defect_id=d["defect_id"],
+                rationale="Temporary authorized file",
+                authorized_by="owner@stagecheck.local",
+                attempt=self.attempt,
+                evidence_path="evidence/waiver_orch.txt",
+            )
+            for d in verdict["defects"]
+            if d.get("mode") == "blocking" or d.get("blocking")
+        ]
+        dispositions.append(
+            build_waiver_entry(
+                workspace_root=self.workspace_root,
+                task_id=self.task_id,
+                defect_id=waiver_ids[0],
+                rationale="Authorized for orchestrator waiver test",
+                authorized_by="owner@stagecheck.local",
+                attempt=self.attempt,
+                evidence_path="evidence/waiver_orch.txt",
+                rule_id=waiver_ids[0],
+                waived_rules=waiver_ids,
+            )
+        )
         disp_data = {
             "schema_version": "2.0",
-            "dispositions": [
-                {
-                    "defect_id": "scope_paths.out_of_scope_modification",
-                    "authorized_by": "human-governor",
-                    "rationale": "Temporary authorized file",
-                    "status": "APPROVED",
-                }
-            ],
+            "dispositions": dispositions,
         }
-        disp_file.write_text(canonical_json_dumps(disp_data), encoding="utf-8")
+        with controlled_write_transaction(self.workspace_root / "controls"):
+            disp_file.write_text(canonical_json_dumps(disp_data), encoding="utf-8")
+        for w_entry in dispositions:
+            record_waiver_in_replay_ledger(self.workspace_root, w_entry)
+        write_agents_contract(self.workspace_root)
 
         # Re-run: defect should now be waived
         ctx_waived = orchestrator.discover_context(self.task_id, self.attempt)
@@ -629,8 +970,85 @@ class TestNineStageVerification(unittest.TestCase):
         self._setup_valid_precommit_review()
         self._setup_valid_delivery_report()
 
+        # Premature audit before Gate 2B clearance must fail fail-closed
+        exit_code_premature = main(["audit", "--task", self.task_id, "--workspace", str(self.workspace_root)])
+        self.assertEqual(exit_code_premature, 1)
+
+        # Clear Gate 1 & Gate 2B and transition state to PHASE_3_AUDIT
+        from stagecheck.core.gate_engine import GateId, generate_gate_receipt
+        from stagecheck.core.state import load_active_state, save_active_state
+        state = load_active_state(self.workspace_root)
+        state["task_id"] = self.task_id
+        state["attempt_index"] = self.attempt
+        state["phase"] = "PHASE_3_AUDIT"
+        receipt_path, receipt_data, receipt_sha = generate_gate_receipt(
+            workspace_root=self.workspace_root,
+            gate_id=GateId.GATE_2B,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            from_phase="PHASE_2A_CODING",
+            to_phase="PHASE_3_AUDIT",
+            deliverables=[],
+            checks_evaluated=["gate2b.prior_review_approved", "gate2b.delivery_report_exists"],
+        )
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.write_text(canonical_json_dumps(receipt_data), encoding="utf-8")
+        state["cleared_gates"] = {"GATE_1": "0" * 64, "GATE_2B": sha256_file(receipt_path)}
+        save_active_state(self.workspace_root, state)
+
         exit_code = main(["audit", "--task", self.task_id, "--workspace", str(self.workspace_root)])
         self.assertEqual(exit_code, 0)
+
+    def test_audit_writes_artifacts_under_readonly_attempt_and_task_directories(self) -> None:
+        """AuditOrchestrator writes Phase-3 deliverables even when attempt and task dirs are 0555."""
+        self._setup_valid_prompt_and_scope()
+        self._setup_valid_precommit_review()
+        self._setup_valid_delivery_report()
+
+        from stagecheck.core.gate_engine import GateId, generate_gate_receipt
+        from stagecheck.core.state import load_active_state, save_active_state
+        state = load_active_state(self.workspace_root)
+        state["task_id"] = self.task_id
+        state["attempt_index"] = self.attempt
+        state["phase"] = "PHASE_3_AUDIT"
+        receipt_path, receipt_data, _ = generate_gate_receipt(
+            workspace_root=self.workspace_root,
+            gate_id=GateId.GATE_2B,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            from_phase="PHASE_2A_CODING",
+            to_phase="PHASE_3_AUDIT",
+            deliverables=[],
+            checks_evaluated=["gate2b.prior_review_approved", "gate2b.delivery_report_exists"],
+        )
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.write_text(canonical_json_dumps(receipt_data), encoding="utf-8")
+        state["cleared_gates"] = {"GATE_1": "0" * 64, "GATE_2B": sha256_file(receipt_path)}
+        save_active_state(self.workspace_root, state)
+
+        # Freeze task and attempt directory to 0555
+        task_dir = self.workspace_root / "evidence" / "tasks" / self.task_id
+        attempt_dir = task_dir / f"attempt_{self.attempt}"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(str(attempt_dir), 0o555)
+        os.chmod(str(task_dir), 0o555)
+
+        try:
+            passed, result = run_audit(self.workspace_root, self.task_id, self.attempt)
+            self.assertTrue(passed)
+            self.assertEqual(result.get("status"), "PASSED")
+
+            phase3_dir = attempt_dir / "Phase-3"
+            self.assertTrue((phase3_dir / "verdict.json").is_file())
+            self.assertTrue((phase3_dir / "test_execution.json").is_file())
+            self.assertTrue((phase3_dir / "scanner_report.json").is_file())
+            self.assertTrue((phase3_dir / "rubric_evaluation.json").is_file())
+            self.assertTrue((task_dir / "verdict.json").is_file())
+        finally:
+            os.chmod(str(task_dir), 0o755)
+            os.chmod(str(attempt_dir), 0o755)
+            if (attempt_dir / "Phase-3").is_dir():
+                os.chmod(str(attempt_dir / "Phase-3"), 0o755)
 
 
 if __name__ == "__main__":

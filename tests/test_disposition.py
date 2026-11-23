@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from stagecheck.cli.main import main
 from stagecheck.core.dispositions import (
+    DispositionError,
     NonInteractiveDispositionBlockedError,
     add_disposition,
     load_dispositions,
@@ -56,6 +57,11 @@ class TestDispositions(unittest.TestCase):
         os.chmod(state_file, 0o444)
         os.chmod(state_file.parent, 0o555)
 
+        self.evidence_rel = "evidence/waiver_support.txt"
+        evidence_file = self.workspace_root / self.evidence_rel
+        evidence_file.parent.mkdir(parents=True, exist_ok=True)
+        evidence_file.write_text("Verified supporting waiver evidence.\n", encoding="utf-8")
+
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
@@ -80,7 +86,8 @@ class TestDispositions(unittest.TestCase):
             defect_id="scope_paths.out_of_scope_modification",
             rationale="Intentional design upgrade for RFC-12",
             action="ACCEPT_AS_INTENTIONAL",
-            authorized_by="developer@company.com",
+            authorized_by="owner@stagecheck.local",
+            evidence_path=self.evidence_rel,
             require_tty=False,
             confirmed=True,
         )
@@ -113,6 +120,8 @@ class TestDispositions(unittest.TestCase):
                 task_id=self.task_id,
                 defect_id="rerun.timeout",
                 rationale="Expected long run",
+                authorized_by="owner@stagecheck.local",
+                evidence_path=self.evidence_rel,
                 require_tty=False,
                 confirmed=True,
             )
@@ -135,12 +144,28 @@ class TestDispositions(unittest.TestCase):
         }
         (attempt_dir / "verdict.json").write_text(canonical_json_dumps(verdict_data), encoding="utf-8")
 
+        state_file = self.workspace_root / "controls" / "ACTIVE_STATE.json"
+
+        def _set_awaiting_disposition() -> None:
+            with open(state_file, "r", encoding="utf-8") as f:
+                s = json.load(f)
+            s["phase"] = "AWAITING_HUMAN_DISPOSITION"
+            os.chmod(state_file.parent, 0o755)
+            os.chmod(state_file, 0o644)
+            state_file.write_text(canonical_json_dumps(s), encoding="utf-8")
+            os.chmod(state_file, 0o444)
+            os.chmod(state_file.parent, 0o555)
+
+        _set_awaiting_disposition()
+
         # 1. Waive only defect_1 -> 1 defect still unresolved -> transitions to PHASE_1_REPAIR
         add_disposition(
             workspace_root=self.workspace_root,
             task_id=self.task_id,
             defect_id="defect_1",
             rationale="Waived defect 1",
+            authorized_by="owner@stagecheck.local",
+            evidence_path=self.evidence_rel,
             require_tty=False,
             confirmed=True,
         )
@@ -148,17 +173,21 @@ class TestDispositions(unittest.TestCase):
         self.assertEqual(res_repair["resumed_phase"], "PHASE_1_REPAIR")
         self.assertIn("1 blocking defect(s) remain", res_repair["reason"])
 
-        # 2. Waive defect_2 -> all blocking defects waived -> transitions to PHASE_3_VERIFICATION
+        _set_awaiting_disposition()
+
+        # 2. Waive defect_2 -> all blocking defects waived -> transitions to PHASE_3_AUDIT
         add_disposition(
             workspace_root=self.workspace_root,
             task_id=self.task_id,
             defect_id="defect_2",
             rationale="Waived defect 2",
+            authorized_by="owner@stagecheck.local",
+            evidence_path=self.evidence_rel,
             require_tty=False,
             confirmed=True,
         )
         res_verify = resume_after_disposition(self.workspace_root, self.task_id)
-        self.assertEqual(res_verify["resumed_phase"], "PHASE_3_VERIFICATION")
+        self.assertEqual(res_verify["resumed_phase"], "PHASE_3_AUDIT")
         self.assertIn("All blocking defects waived", res_verify["reason"])
 
     def test_resume_preserves_circuit_breaker_tripped(self):
@@ -178,12 +207,33 @@ class TestDispositions(unittest.TestCase):
 
     def test_cli_disposition_and_resume(self):
         """Verify CLI 'stagecheck disposition add' and 'stagecheck resume' execution."""
+        state_file = self.workspace_root / "controls" / "ACTIVE_STATE.json"
+        with open(state_file, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        state["phase"] = "AWAITING_HUMAN_DISPOSITION"
+        os.chmod(state_file.parent, 0o755)
+        os.chmod(state_file, 0o644)
+        state_file.write_text(canonical_json_dumps(state), encoding="utf-8")
+        os.chmod(state_file, 0o444)
+        os.chmod(state_file.parent, 0o555)
+        p3_dir = self.workspace_root / "evidence" / "tasks" / self.task_id / "attempt_1" / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        (p3_dir / "verdict.json").write_text(
+            canonical_json_dumps({
+                "result": "BLOCKED",
+                "defects": [{"defect_id": "secrets.leak_detected", "mode": "blocking"}],
+            }),
+            encoding="utf-8",
+        )
+
         # 1. CLI disposition add with --yes
         exit_disp = main([
             "disposition", "add",
             "--task", self.task_id,
             "--defect", "secrets.leak_detected",
             "--rationale", "Test key for mock test suite only",
+            "--authorized-by", "owner@stagecheck.local",
+            "--evidence", self.evidence_rel,
             "--yes",
             "--workspace", str(self.workspace_root),
         ])
@@ -196,6 +246,62 @@ class TestDispositions(unittest.TestCase):
             "--workspace", str(self.workspace_root),
         ])
         self.assertEqual(exit_resume, 0)
+
+    def test_disposition_rejects_path_traversal_task_id(self):
+        """Verify add_disposition and resume_after_disposition reject path traversal in task_id (SC-SEC-01)."""
+        malicious_ids = ["../../etc", "../escaped", "task/sub", "task\\sub", "task..id", ""]
+        for bad_id in malicious_ids:
+            with self.subTest(task_id=bad_id):
+                with self.assertRaises(DispositionError):
+                    add_disposition(
+                        workspace_root=self.workspace_root,
+                        task_id=bad_id,
+                        defect_id="D-01",
+                        rationale="Attempt traversal",
+                        require_tty=False,
+                        confirmed=True,
+                    )
+                with self.assertRaises(DispositionError):
+                    resume_after_disposition(self.workspace_root, bad_id)
+
+        self.assertFalse((self.workspace_root / "escaped").exists())
+
+    def test_resume_rejects_symlinked_phase3_dir_and_verdict_mismatch(self):
+        """Verify resume_after_disposition rejects symlinked Phase-3 dir and mismatched task_id/iteration."""
+        from stagecheck.core.permissions import controlled_write_transaction
+        from stagecheck.core.state import load_active_state, save_active_state
+
+        with controlled_write_transaction(self.workspace_root / "controls"):
+            s = load_active_state(self.workspace_root)
+            s["phase"] = "AWAITING_HUMAN_DISPOSITION"
+            save_active_state(self.workspace_root, s)
+
+        attempt_dir = self.workspace_root / "evidence" / "tasks" / self.task_id / "attempt_1"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        outside = self.workspace_root / "outside_p3"
+        outside.mkdir(parents=True, exist_ok=True)
+        (outside / "verdict.json").write_text(json.dumps({"defects": []}), encoding="utf-8")
+
+        p3_dir = attempt_dir / "Phase-3"
+        p3_dir.symlink_to(outside)
+        with self.assertRaises(DispositionError):
+            resume_after_disposition(self.workspace_root, self.task_id)
+
+        p3_dir.unlink()
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        (p3_dir / "verdict.json").write_text(
+            json.dumps({"task_id": "other-task", "iteration": 1, "defects": []}),
+            encoding="utf-8",
+        )
+        with self.assertRaises(DispositionError):
+            resume_after_disposition(self.workspace_root, self.task_id)
+
+        (p3_dir / "verdict.json").write_text(
+            json.dumps({"task_id": self.task_id, "iteration": 99, "defects": []}),
+            encoding="utf-8",
+        )
+        with self.assertRaises(DispositionError):
+            resume_after_disposition(self.workspace_root, self.task_id)
 
 
 if __name__ == "__main__":

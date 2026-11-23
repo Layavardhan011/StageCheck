@@ -48,6 +48,7 @@ def run_stage6_secrets(ctx: AuditContext) -> StageResult:
                 target_commit=target_commit,
                 repo_name=repo_name,
                 stage=stage_id,
+                workspace_root=ctx.workspace_root,
             )
             if not scan_res.is_clear:
                 defects.extend(scan_res.defects)

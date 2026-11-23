@@ -10,12 +10,16 @@ from pathlib import Path
 
 from stagecheck.core.git import (
     DirtyRepositoryError,
+    GitError,
     NotAGitRepositoryError,
     RepoBaseline,
     RepositoryNotFoundError,
+    SAFE_GIT_SECURITY_FLAGS,
     UnbornRepositoryError,
+    _run_git_cmd,
     discover_multi_repositories,
     discover_repository,
+    run_safe_git,
 )
 
 
@@ -153,6 +157,176 @@ class TestGitDiscovery(unittest.TestCase):
             .stdout.strip()
         )
         self.assertEqual(initial_head, after_head)
+
+    def test_git_security_flags_applied(self) -> None:
+        """Verify SAFE_GIT_SECURITY_FLAGS and safe diff flags prevent config injection (DEC-015 / SR-02)."""
+        repo_path = self.workspace / "repos" / "security-repo"
+        self._init_git_repo(repo_path, initial_commit=True)
+
+        # 1. Verify SAFE_GIT_SECURITY_FLAGS definition
+        self.assertIn("-c", SAFE_GIT_SECURITY_FLAGS)
+        self.assertIn("core.fsmonitor=false", SAFE_GIT_SECURITY_FLAGS)
+        self.assertIn("core.pager=cat", SAFE_GIT_SECURITY_FLAGS)
+        self.assertIn("core.hooksPath=/dev/null", SAFE_GIT_SECURITY_FLAGS)
+        self.assertIn("core.editor=cat", SAFE_GIT_SECURITY_FLAGS)
+
+        # 2. Verify _run_git_cmd uses the flags
+        from unittest.mock import patch
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="test\n", stderr="")
+            _run_git_cmd(repo_path, ["status", "--porcelain"])
+            self.assertTrue(mock_run.called)
+            called_cmd = mock_run.call_args[0][0]
+            self.assertEqual(called_cmd[0], "git")
+            for flag in SAFE_GIT_SECURITY_FLAGS:
+                self.assertIn(flag, called_cmd)
+
+        # 3. Verify get_repo_diff uses safe git flags and --no-ext-diff --no-textconv
+        from stagecheck.core.branch_governance import get_repo_diff
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="diff output", stderr="")
+            get_repo_diff(repo_path, "HEAD~1")
+            self.assertTrue(mock_run.called)
+            called_cmd = mock_run.call_args[0][0]
+            for flag in SAFE_GIT_SECURITY_FLAGS:
+                self.assertIn(flag, called_cmd)
+            self.assertIn("--binary", called_cmd)
+            self.assertIn("--no-ext-diff", called_cmd)
+            self.assertIn("--no-textconv", called_cmd)
+
+    def test_run_safe_git_blocks_fsmonitor_and_ext_diff(self) -> None:
+        """Verify run_safe_git prevents local core.fsmonitor and diff.external execution (SC-SEC-07)."""
+        repo_path = self.workspace / "repos" / "fsmonitor-repo"
+        self._init_git_repo(repo_path, initial_commit=True)
+
+        marker = self.workspace / "fsmonitor_marker"
+        diff_marker = self.workspace / "extdiff_marker"
+        subprocess.run(
+            ["git", "config", "core.fsmonitor", f"touch {marker} && false"],
+            cwd=str(repo_path), check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "diff.external", f"touch {diff_marker} && false"],
+            cwd=str(repo_path), check=True, capture_output=True,
+        )
+
+        # Modify tracked file so git diff and git status exercise diff/status paths
+        (repo_path / "README.md").write_text("# Modified\n", encoding="utf-8")
+
+        res_status = run_safe_git(repo_path, ["status", "--porcelain"])
+        self.assertEqual(res_status.returncode, 0)
+        self.assertIn("README.md", res_status.stdout)
+        self.assertFalse(marker.exists(), "run_safe_git must neutralize core.fsmonitor")
+
+        res_diff = run_safe_git(repo_path, ["diff"])
+        self.assertEqual(res_diff.returncode, 0)
+        self.assertFalse(diff_marker.exists(), "run_safe_git must neutralize diff.external")
+
+    def test_assert_safe_repo_git_config_detects_malicious_keys(self) -> None:
+        """Verify assert_safe_repo_git_config fails closed on dangerous git config sections (SC-SEC-07)."""
+        from stagecheck.core.git import assert_safe_repo_git_config
+
+        dangerous_configs = [
+            ("filter \"evil\"", "clean", "evil-clean %f"),
+            ("filter \"evil\"", "smudge", "evil-smudge %f"),
+            ("diff \"evil\"", "command", "/bin/sh -c evil"),
+            ("merge \"evil\"", "driver", "/bin/sh -c evil"),
+            ("core", "sshCommand", "evil-ssh"),
+            ("credential", "helper", "evil-credential-helper"),
+            ("alias", "status", "!evil-cmd"),
+            ("remote \"origin\"", "uploadpack", "evil-uploadpack"),
+        ]
+
+        for section, key, val in dangerous_configs:
+            with self.subTest(section=section, key=key):
+                test_repo = self.workspace / "repos" / f"danger-{key}"
+                self._init_git_repo(test_repo, initial_commit=True)
+                cfg_path = test_repo / ".git" / "config"
+                with cfg_path.open("a", encoding="utf-8") as f:
+                    f.write(f"\n[{section}]\n    {key} = {val}\n")
+
+                with self.assertRaises(GitError) as ctx:
+                    assert_safe_repo_git_config(test_repo)
+                self.assertIn("UNSAFE_GIT_CONFIG", str(ctx.exception))
+
+                # run_safe_git must also fail closed
+                with self.assertRaises(GitError):
+                    run_safe_git(test_repo, ["status", "--porcelain"])
+
+    def test_assert_safe_repo_git_config_blocks_indented_includes_worktree_and_subdirs(self) -> None:
+        """Regression test for indented headers, include/includeIf, core.worktree, core.bare, and subdirs."""
+        from stagecheck.core.git import assert_safe_repo_git_config
+
+        bypasses = [
+            ("indented-filter", "  [filter \"evil\"]\n    clean = evil-cmd\n"),
+            ("include", "[include]\n  path = /tmp/evil.cfg\n"),
+            ("includeIf", "[includeIf \"gitdir:/tmp/\"]\n  path = /tmp/evil.cfg\n"),
+            ("worktree", "[core]\n  worktree = /tmp/outside\n"),
+            ("bare-true", "[core]\n  bare = true\n"),
+            ("attributesfile", "[core]\n  attributesfile = /tmp/attrs\n"),
+            ("excludesfile", "[core]\n  excludesfile = /tmp/excl\n"),
+            ("uploadpack-hook", "[uploadpack]\n  packObjectsHook = /bin/evil\n"),
+            ("inline-second-section", "[core] [include] path = /tmp/evil.cfg\n"),
+            ("inline-second-sshcommand", "[user] [core] sshCommand = /tmp/evil.sh\n"),
+        ]
+        for label, snippet in bypasses:
+            with self.subTest(case=label):
+                test_repo = self.workspace / "repos" / f"bypass-{label}"
+                self._init_git_repo(test_repo, initial_commit=True)
+                cfg_path = test_repo / ".git" / "config"
+                cfg_path.write_text(cfg_path.read_text(encoding="utf-8") + "\n" + snippet, encoding="utf-8")
+
+                with self.assertRaises(GitError):
+                    assert_safe_repo_git_config(test_repo)
+
+                subdir = test_repo / "nested" / "pkg"
+                subdir.mkdir(parents=True, exist_ok=True)
+                with self.assertRaises(GitError):
+                    assert_safe_repo_git_config(subdir)
+
+        # Also verify extensions.worktreeConfig + .git/config.worktree is inspected
+        wt_repo = self.workspace / "repos" / "bypass-worktree-cfg"
+        self._init_git_repo(wt_repo, initial_commit=True)
+        cfg_wt = wt_repo / ".git" / "config"
+        cfg_wt.write_text(cfg_wt.read_text(encoding="utf-8") + "\n[extensions]\n  worktreeConfig = true\n", encoding="utf-8")
+        (wt_repo / ".git" / "config.worktree").write_text("[core]\n  sshCommand = /tmp/evil.sh\n", encoding="utf-8")
+        with self.assertRaises(GitError):
+            assert_safe_repo_git_config(wt_repo)
+
+    def test_remote_name_dash_prefix_and_quotepath_nul_framing(self) -> None:
+        """Regression test for dash-prefixed remote names and C-quoted/special filenames."""
+        from stagecheck.core.git import (
+            get_repo_remote_push_urls,
+            parse_git_porcelain_z,
+            run_safe_git,
+            split_git_nul_paths,
+        )
+
+        repo_path = self.workspace / "repos" / "framing-repo"
+        self._init_git_repo(repo_path, initial_commit=True)
+
+        # 1. Dash-prefixed remote name must be inspected cleanly using '--'
+        subprocess.run(
+            ["git", "remote", "add", "--", "-evil", "https://evil.example.org/repo.git"],
+            cwd=str(repo_path), check=True, capture_output=True,
+        )
+        urls = get_repo_remote_push_urls(repo_path)
+        self.assertIn("https://evil.example.org/repo.git", urls)
+
+        # 2. Tab/quote/Unicode filenames must survive status -z and ls-files -z without C-quoting
+        secret_dir = repo_path / "secrets"
+        secret_dir.mkdir(exist_ok=True)
+        special_file = secret_dir / "key\t1.txt"
+        special_file.write_text("secret=val\n", encoding="utf-8")
+        st_res = run_safe_git(repo_path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], check=True)
+        parsed = parse_git_porcelain_z(st_res.stdout)
+        self.assertIn("secrets/key\t1.txt", parsed)
+        ls_res = run_safe_git(repo_path, ["ls-files", "--others", "--exclude-standard", "-z"], check=True)
+        self.assertIn("secrets/key\t1.txt", split_git_nul_paths(ls_res.stdout))
+
+        # 3. Renamed file should report both destination and source path from porcelain -z
+        sample_z = "R  new/dest.py\x00old/forbidden.py\x00"
+        self.assertEqual(parse_git_porcelain_z(sample_z), ["new/dest.py", "old/forbidden.py"])
 
 
 if __name__ == "__main__":

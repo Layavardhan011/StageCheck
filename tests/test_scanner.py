@@ -163,6 +163,66 @@ class TestSecretScannerFailClosed(unittest.TestCase):
             resolved = scanner.resolve_binary()
             self.assertEqual(resolved, "/usr/local/bin/gitleaks")
 
+    def test_gitleaks_pinned_config(self):
+        """Verify authoritative Gitleaks --config binding prevents rule drift (DEC-017 / SR-04)."""
+        SecretScanner.reset_test_launcher()
+        scanner = SecretScanner()
+
+        with patch.object(scanner, "resolve_binary", return_value="/usr/bin/gitleaks"):
+            with patch("os.path.isfile", return_value=True), patch("os.access", return_value=True):
+                mock_version = MagicMock(returncode=0, stdout="v8.18.4\n")
+                mock_scan = MagicMock(returncode=0, stdout="Scan completed with 0 leaks found.\n")
+
+                with patch("subprocess.run", side_effect=[mock_version, mock_scan]) as mock_sub:
+                    res = scanner.scan_commit_range(
+                        self.dummy_repo, "HEAD~1", "HEAD", repo_name="backend"
+                    )
+                    self.assertTrue(res.is_clear)
+                    self.assertEqual(mock_sub.call_count, 2)
+                    call_cmd = mock_sub.call_args[0][0]
+                    self.assertEqual(call_cmd[0], "/usr/bin/gitleaks")
+                    self.assertEqual(call_cmd[1], "detect")
+                    # Check --config argument is present
+                    has_config = any(arg.startswith("--config=") for arg in call_cmd)
+                    self.assertTrue(has_config, f"Expected --config in {call_cmd}")
+
+    def test_resolve_config_ignores_cwd_and_workspace_overrides(self):
+        """Verify resolve_config_flags ignores CWD/workspace config/.gitleaks.toml and fails closed if missing (SC-SEC-09)."""
+        import os
+        import tempfile
+        import stagecheck
+
+        pkg_cfg = (Path(stagecheck.__file__).resolve().parent / "config" / ".gitleaks.toml").resolve()
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp).resolve()
+            (t / "config").mkdir()
+            (t / "config" / ".gitleaks.toml").write_text("# permissive CWD override\n", encoding="utf-8")
+            ws_repo = t / "ws" / "repos" / "app"
+            ws_repo.mkdir(parents=True)
+            (t / "ws" / "config").mkdir()
+            (t / "ws" / "config" / ".gitleaks.toml").write_text("# permissive ws override\n", encoding="utf-8")
+
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(t)
+                flags = SecretScanner.resolve_config_flags(ws_repo)
+                self.assertEqual(flags, [f"--config={pkg_cfg}"])
+            finally:
+                os.chdir(old_cwd)
+
+        # If authoritative config is missing, scan_commit_range and scan_staged_changes fail closed
+        scanner = SecretScanner()
+        with patch.object(scanner, "verify_scanner_binary", return_value=(True, [])), \
+             patch.object(scanner, "resolve_binary", return_value="/usr/bin/gitleaks"), \
+             patch.object(SecretScanner, "resolve_config_flags", side_effect=FileNotFoundError("missing")):
+            res1 = scanner.scan_commit_range(self.dummy_repo, "HEAD~1", "HEAD", "app")
+            self.assertFalse(res1.is_clear)
+            self.assertEqual(res1.status, ScannerStatus.SCANNER_ERROR)
+
+            res2 = scanner.scan_staged_changes(self.dummy_repo, "app")
+            self.assertFalse(res2.is_clear)
+            self.assertEqual(res2.status, ScannerStatus.SCANNER_ERROR)
+
 
 if __name__ == "__main__":
     unittest.main()

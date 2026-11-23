@@ -21,19 +21,27 @@
     },
     "task_id": {
       "type": "string",
-      "pattern": "^task-[a-zA-Z0-9_-]+$"
+      "pattern": "^[a-zA-Z0-9_-]+$"
     },
     "phase": {
       "type": "string",
       "enum": [
         "NOT_STARTED",
+        "UNINITIALIZED",
+        "IDLE",
         "PHASE_1_PLANNING",
         "PHASE_1_REPAIR",
+        "PHASE_2A_CODING",
         "PHASE_2A_IMPLEMENTATION",
+        "PHASE_2B_COMMITTING",
         "PHASE_2B_DELIVERY",
+        "PHASE_3_AUDIT",
         "PHASE_3_AUDITING",
+        "GATE_4_SEALING",
+        "SEALED_PASSED",
         "AWAITING_HUMAN_DISPOSITION",
         "CIRCUIT_BREAKER_TRIPPED",
+        "ABORTED",
         "COMPLETED"
       ]
     },
@@ -57,8 +65,32 @@
     "circuit_breaker_tripped": {
       "type": "boolean"
     },
+    "single_agent_mode": {
+      "type": "boolean"
+    },
     "halt_reason": {
+      "type": ["string", "null"]
+    },
+    "turn": {
       "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "cleared_gates": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "watchdog": {
+      "type": "object",
+      "properties": {
+        "last_active_timestamp": { "type": "string" },
+        "last_active_monotonic": { "type": "number" },
+        "timeout_seconds": { "type": "integer" }
+      }
     },
     "target_repositories": {
       "type": "array",
@@ -109,6 +141,7 @@
         "max_total_attempts": {"type": "integer"},
         "max_repairs": {"type": "integer"},
         "circuit_breaker_enabled": {"type": "boolean"},
+        "single_agent_mode": {"type": "boolean"},
         "review_timeout_seconds": {"type": "integer"},
         "registered_agents": {
           "type": "array",

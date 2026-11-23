@@ -10,6 +10,7 @@ from pathlib import Path
 
 from stagecheck.cli.main import main
 from stagecheck.core.circuit_breaker import (
+    AttemptBudgetExhaustedError,
     CircuitBreakerEvaluation,
     ResetAttemptsError,
     evaluate_circuit_breaker,
@@ -86,7 +87,8 @@ class TestCircuitBreaker(unittest.TestCase):
             state = json.load(f)
         self.assertEqual(state["phase"], "AWAITING_HUMAN_DISPOSITION")
         self.assertTrue(state["circuit_breaker_tripped"])
-        self.assertEqual(state["halt_trigger"], "max_attempts_exhausted")
+        self.assertNotIn("halt_trigger", state)
+        self.assertIn("maximum permitted attempt threshold", state.get("halt_reason", ""))
 
     def test_stagnant_defects_zero_progress_trigger(self):
         """Verify Trigger 2: Consecutive attempts with identical blocking defects trip breaker."""
@@ -207,46 +209,80 @@ class TestCircuitBreaker(unittest.TestCase):
         self.assertIn("Option A (Manual Code Fix)", content)
         self.assertIn("Option B (Human Disposition)", content)
         self.assertIn("Option C (Attempt Reset)", content)
+        self.assertIn("Attempt budget exhausted (3/3 attempts used)", content)
         self.assertIn("Option D (Permanent Halt)", content)
         self.assertIn("qual_naming.required_suite_empty", content)
+
+        # Also verify attempt 1 informs developer of allocating Attempt 2 of 3
+        report_p1 = write_escalation_report(
+            self.workspace_root,
+            self.task_id,
+            attempt=1,
+            evaluation=evaluation,
+            defects=defects,
+        )
+        content_1 = report_p1.read_text(encoding="utf-8")
+        self.assertIn("allocate Attempt 2 of 3", content_1)
 
     def test_reset_attempts_preconditions_and_monotonic_budget(self):
         """Verify reset-attempts validates task match, trips requirement, and unlatches state."""
         # 1. Reject reset when task is NOT tripped
         with self.assertRaises(ResetAttemptsError) as cm_premature:
-            reset_circuit_breaker(self.workspace_root, self.task_id)
+            reset_circuit_breaker(self.workspace_root, self.task_id, authorized_by="owner@stagecheck.local")
         self.assertIn("not tripped", str(cm_premature.exception))
 
-        # Trip the breaker
-        eval_tripped = CircuitBreakerEvaluation(tripped=True, trigger="max_attempts_exhausted", reason="Done")
-        trip_circuit_breaker(self.workspace_root, self.task_id, 3, eval_tripped, [])
+        # Trip the breaker at attempt 2
+        eval_tripped = CircuitBreakerEvaluation(tripped=True, trigger="stagnant_defects", reason="No progress")
+        trip_circuit_breaker(self.workspace_root, self.task_id, 2, eval_tripped, [])
 
         # 2. Reject reset when task ID mismatches
         with self.assertRaises(ResetAttemptsError) as cm_mismatch:
-            reset_circuit_breaker(self.workspace_root, "different-task-999")
+            reset_circuit_breaker(self.workspace_root, "different-task-999", authorized_by="owner@stagecheck.local")
         self.assertIn("Task ID mismatch", str(cm_mismatch.exception))
 
-        # 3. Successful reset
+        # 3. Successful reset from attempt 2 -> advances monotonically to attempt 3
         updated = reset_circuit_breaker(
             self.workspace_root,
             self.task_id,
-            authorized_by="developer@example.com",
+            authorized_by="owner@stagecheck.local",
         )
         self.assertFalse(updated["circuit_breaker_tripped"])
         self.assertEqual(updated["phase"], "PHASE_1_PLANNING")
-        self.assertEqual(updated["attempt_budget_base"], 3)
-        self.assertEqual(updated["last_reset"]["authorized_by"], "developer@example.com")
+        self.assertEqual(updated["attempt_index"], 3)
+        self.assertEqual(updated["resets_authorized"][-1]["authorized_by"], "owner@stagecheck.local")
+
+    def test_attempt_budget_cap_enforcement(self):
+        """Verify DEC-028 / FR-06: Attempt budget hard cap of 3 cannot be bypassed via retry."""
+        # Trip breaker at attempt 3
+        eval_tripped = CircuitBreakerEvaluation(tripped=True, trigger="max_attempts_exhausted", reason="Exhausted")
+        trip_circuit_breaker(self.workspace_root, self.task_id, 3, eval_tripped, [])
+
+        # Attempting reset or retry at attempt 3 MUST fail closed with AttemptBudgetExhaustedError
+        with self.assertRaises(AttemptBudgetExhaustedError) as cm_exhausted:
+            reset_circuit_breaker(self.workspace_root, self.task_id, authorized_by="owner@stagecheck.local")
+        self.assertIn("Attempt budget exhausted", str(cm_exhausted.exception))
+
+    def test_attempt_budget_accounting(self):
+        """Verify DEC-006 / FR-06: Attempt budget accounting strictly enforces max 3 attempts."""
+        eval_tripped = CircuitBreakerEvaluation(tripped=True, trigger="max_attempts_exhausted", reason="Exhausted")
+        trip_circuit_breaker(self.workspace_root, self.task_id, 3, eval_tripped, [])
+
+        state_file = self.workspace_root / "controls" / "ACTIVE_STATE.json"
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        self.assertEqual(state["attempt_index"], 3)
+        self.assertEqual(state["phase"], "AWAITING_HUMAN_DISPOSITION")
 
     def test_cli_reset_attempts_command(self):
         """Verify CLI 'stagecheck reset-attempts' exit codes."""
-        # Trip breaker first
-        eval_tripped = CircuitBreakerEvaluation(tripped=True, trigger="max_attempts_exhausted", reason="Done")
-        trip_circuit_breaker(self.workspace_root, self.task_id, 3, eval_tripped, [])
+        # Trip breaker first at attempt 2
+        eval_tripped = CircuitBreakerEvaluation(tripped=True, trigger="stagnant_defects", reason="Done")
+        trip_circuit_breaker(self.workspace_root, self.task_id, 2, eval_tripped, [])
 
         exit_code = main([
             "reset-attempts",
             "--task", self.task_id,
-            "--authorized-by", "owner@example.com",
+            "--authorized-by", "owner@stagecheck.local",
+            "--yes",
             "--workspace", str(self.workspace_root),
         ])
         self.assertEqual(exit_code, 0)

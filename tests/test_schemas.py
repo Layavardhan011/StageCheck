@@ -8,6 +8,7 @@ from stagecheck.core.utils import SchemaValidationError
 from stagecheck.schemas.validator import (
     validate_active_state,
     validate_control_descriptor,
+    validate_gate_receipt,
     validate_product_repositories,
 )
 
@@ -150,6 +151,51 @@ class TestControlSchemas(unittest.TestCase):
             ],
         }
         validate_control_descriptor("DISPOSITIONS.json", valid_disp)
+
+
+    # ==========================================
+    # GATE_RECEIPT Schema Tests
+    # ==========================================
+
+    def test_valid_gate_receipt_schema(self) -> None:
+        valid_receipt = {
+            "schema_version": "2.0.0",
+            "gate_id": "GATE_1",
+            "task_id": "task-101",
+            "attempt": 1,
+            "from_phase": "PHASE_1_PLANNING",
+            "to_phase": "PHASE_2A_CODING",
+            "status": "PASSED",
+            "verified_at": "2026-11-06T10:00:00Z",
+            "verified_by": "stagecheck-core",
+            "deliverables": [
+                {
+                    "path": "evidence/tasks/task-101/attempt_1/Phase-1/prompt.md",
+                    "sha256": "a" * 64,
+                    "status": "VALID",
+                }
+            ],
+            "checks_evaluated": ["gate1.prompt_valid"],
+            "receipt_sha256": "b" * 64,
+        }
+        validate_gate_receipt(valid_receipt)
+
+    def test_gate_receipt_rejects_missing_required_field(self) -> None:
+        invalid_receipt = {
+            "schema_version": "2.0.0",
+            "gate_id": "GATE_1",
+            "task_id": "task-101",
+            # missing attempt
+            "from_phase": "PHASE_1_PLANNING",
+            "to_phase": "PHASE_2A_CODING",
+            "status": "PASSED",
+            "verified_at": "2026-11-06T10:00:00Z",
+            "verified_by": "stagecheck-core",
+            "deliverables": [],
+            "receipt_sha256": "b" * 64,
+        }
+        with self.assertRaises(SchemaValidationError):
+            validate_gate_receipt(invalid_receipt)
 
 
 if __name__ == "__main__":

@@ -14,14 +14,61 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
-from stagecheck.core.utils import canonical_json_dumps, sha256_digest, validate_schema
+from stagecheck.core.git import SAFE_GIT_SECURITY_FLAGS, run_safe_git, run_safe_git_bytes, split_git_nul_paths
+from stagecheck.core.paths import StageCheckPathError, resolve_task_dir, safe_resolve
+from stagecheck.core.utils import canonical_json_dumps, load_json_file, pretty_json_dumps, sha256_digest, validate_schema
 from stagecheck.schemas import get_schema_path
+
+_REPO_NAME_RE = re.compile(r"\A[a-zA-Z0-9._-]+\Z")
+_COMMIT_SHA_RE = re.compile(r"\A[0-9a-fA-F]{40,64}\Z")
+
+
+def validate_commit_sha(commit_sha: Any, repo_name: str) -> str:
+    """Validate that a commit SHA is a strict 40-64 char hex digest (never a CLI flag)."""
+    if not isinstance(commit_sha, str) or not _COMMIT_SHA_RE.match(commit_sha):
+        raise ReviewGateError(f"Invalid commit SHA '{commit_sha}' for repository '{repo_name}'.")
+    return commit_sha
+
+
+def resolve_governed_repo_path(root: Path, repo_name: str) -> Path:
+    """Resolve repository path safely against workspace repos/ and PRODUCT_REPOSITORIES.json."""
+    if isinstance(repo_name, str) and repo_name.startswith("repos/") and not repo_name.startswith("repos/.."):
+        repo_name = repo_name.removeprefix("repos/")
+
+    if not isinstance(repo_name, str) or not _REPO_NAME_RE.match(repo_name) or repo_name in (".", ".."):
+        raise ReviewGateError(f"Invalid repository name '{repo_name}'.")
+
+    prod_repos_file = root / "controls" / "PRODUCT_REPOSITORIES.json"
+    if prod_repos_file.is_file():
+        try:
+            p_data = json.loads(prod_repos_file.read_text(encoding="utf-8"))
+        except Exception as err:
+            raise ReviewGateError(f"Malformed PRODUCT_REPOSITORIES.json: {err}") from err
+        registered = p_data.get("repositories")
+        if not isinstance(registered, dict):
+            raise ReviewGateError("PRODUCT_REPOSITORIES.json missing valid 'repositories' object.")
+        if registered:
+            if repo_name not in registered:
+                raise ReviewGateError(f"Unregistered repository '{repo_name}' in PRODUCT_REPOSITORIES.json.")
+            custom_rel = registered[repo_name].get("path")
+            if custom_rel:
+                try:
+                    return safe_resolve(custom_rel, root)
+                except StageCheckPathError as err:
+                    raise ReviewGateError(f"Repository '{repo_name}' path escapes workspace: {err}") from err
+
+    try:
+        repos_dir = safe_resolve("repos", root)
+        return safe_resolve(repo_name, repos_dir)
+    except StageCheckPathError as err:
+        raise ReviewGateError(f"Repository '{repo_name}' path escapes workspace repos/: {err}") from err
 
 
 class ReviewGateError(Exception):
@@ -40,7 +87,177 @@ class ExcessiveDiffSizeError(ReviewGateError):
     """Raised when uncommitted diff stream exceeds the 20 MiB safety ceiling."""
 
 
-MAX_DIFF_BYTES = 20 * 1024 * 1024  # 20 MiB (SEC-AC1)
+class UntrackedBytesExceededError(ReviewGateError):
+    """Raised when untracked non-ignored file volume exceeds 20 MiB ceiling (ARCH-03)."""
+
+
+class UntrackedCountExceededError(ReviewGateError):
+    """Raised when untracked non-ignored file count exceeds 500 file limit (ARCH-03)."""
+
+
+class GitIndexLockedError(ReviewGateError):
+    """Raised when git index lock (.git/index.lock) is detected in repository."""
+
+
+class ScopeViolationError(ReviewGateError):
+    """Raised when working tree changes modify files outside declared scope."""
+
+
+MAX_DIFF_BYTES = 20 * 1024 * 1024        # 20 MiB (SEC-AC1)
+MAX_UNTRACKED_BYTES = 20 * 1024 * 1024   # 20 MiB (ARCH-03 / FR-09)
+MAX_UNTRACKED_COUNT = 500                # 500 files (ARCH-03 / FR-09)
+MAX_REPAIR_CYCLES = 3                    # Maximum Phase 2A cooperative review repair cycles
+
+# 8-Category Finding Classification Taxonomy (Spec 04 §4.2)
+FINDING_CATEGORIES = {
+    "NEWLY_INTRODUCED": "Newly Introduced Issue",
+    "PRE_EXISTING_UPSTREAM": "Pre-existing Upstream Issue",
+    "PRE_EXISTING_REPO": "Pre-existing Repository Issue",
+    "INHERITED_DESIGN": "Inherited Design Constraint",
+    "INTEGRATION_ISSUE": "Integration Issue",
+    "CONFIG_ENVIRONMENT": "Configuration or Environment Issue",
+    "FALSE_POSITIVE": "False Positive",
+    "UNVERIFIED_FINDING": "Unverified Finding",
+}
+
+
+def inspect_untracked_files(repo_path: Path) -> Tuple[List[str], int, int]:
+    """Inspect untracked non-ignored files in a repository and enforce 20 MiB / 500 file limits.
+
+    Returns:
+        (untracked_files_list, count, total_bytes)
+
+    Raises:
+        GitIndexLockedError: If .git/index.lock is present.
+        UntrackedCountExceededError: If file count > 500.
+        UntrackedBytesExceededError: If file volume > 20 MiB.
+    """
+    index_lock = repo_path / ".git" / "index.lock"
+    if index_lock.is_file():
+        raise GitIndexLockedError(
+            f"Git index lock detected in repository '{repo_path.name}': {index_lock}. "
+            "Wait for active git operation to finish or resolve stale lock."
+        )
+
+    res = run_safe_git(
+        repo_path,
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+        check=True,
+    )
+    untracked = split_git_nul_paths(res.stdout)
+
+    if len(untracked) > MAX_UNTRACKED_COUNT:
+        raise UntrackedCountExceededError(
+            f"Untracked non-ignored file count ({len(untracked)}) exceeds maximum allowed ceiling of 500 files in repository '{repo_path.name}'."
+        )
+
+    total_bytes = 0
+    for rel_f in untracked:
+        target_f = repo_path / rel_f
+        if target_f.is_file():
+            total_bytes += target_f.stat().st_size
+            if total_bytes > MAX_UNTRACKED_BYTES:
+                raise UntrackedBytesExceededError(
+                    f"Untracked non-ignored file volume ({total_bytes} bytes) exceeds 20 MiB ceiling in repository '{repo_path.name}'."
+                )
+
+    return sorted(untracked), len(untracked), total_bytes
+
+
+def verify_precommit_scope(
+    workspace_root: Union[str, Path],
+    task_id: str,
+    attempt: int,
+    touched_repos: List[str],
+    base_commits: Dict[str, str],
+) -> List[str]:
+    """Verify that all uncommitted and modified working tree files match declared_scope.json."""
+    from stagecheck.core.prompt_gate import is_path_in_scope
+
+    root = Path(workspace_root).resolve()
+    attempt_dir = resolve_task_attempt_dir(root, task_id, attempt)
+    scope_file = attempt_dir / "Phase-1" / "declared_scope.json"
+
+    if not scope_file.is_file():
+        return ["Missing Phase-1/declared_scope.json: declared scope required for pre-commit review."]
+
+    try:
+        scope_data = json.loads(scope_file.read_text(encoding="utf-8"))
+    except Exception as err:
+        return [f"Failed to load declared_scope.json: {err}"]
+
+    allowed_paths = scope_data.get("allowed_paths", [])
+    # Check for illegal top-level wildcards
+    if any(p in ("*", "/**", "**") for p in allowed_paths):
+        return ["Prohibited top-level wildcard ('*', '**') declared in declared_scope.json allowed_paths."]
+
+    violations: List[str] = []
+
+    if not touched_repos:
+        # Read-only / evidence-only task: verify all registered repositories are clean
+        prod_repos_file = root / "controls" / "PRODUCT_REPOSITORIES.json"
+        if prod_repos_file.is_file():
+            try:
+                prod_data = load_json_file(prod_repos_file)
+                for reg_name in (prod_data.get("repositories") or {}):
+                    reg_path = resolve_governed_repo_path(root, reg_name)
+                    if (reg_path / ".git").exists():
+                        st = run_safe_git(reg_path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+                        if st.returncode == 0 and st.stdout.strip():
+                            violations.append(
+                                f"Repository '{reg_name}' has uncommitted modifications while touched_repositories is empty."
+                            )
+            except Exception as err:
+                violations.append(f"Failed to verify clean repositories for read-only task: {err}")
+        return violations
+
+    for repo_name in touched_repos:
+        try:
+            repo_path = resolve_governed_repo_path(root, repo_name)
+        except ReviewGateError as err:
+            violations.append(str(err))
+            continue
+
+        if not repo_path.is_dir():
+            violations.append(f"Repository directory missing for '{repo_name}': '{repo_path}'.")
+            continue
+
+        base_commit = (base_commits or {}).get(repo_name)
+        if not base_commit:
+            violations.append(f"Missing required base_commit for repository '{repo_name}'.")
+            continue
+        try:
+            validate_commit_sha(base_commit, repo_name)
+        except ReviewGateError as err:
+            violations.append(str(err))
+            continue
+
+        modified_files: Set[str] = set()
+
+        res_tracked = run_safe_git(repo_path, ["diff", "--name-only", "-z", "--end-of-options", base_commit, "--"])
+        if res_tracked.returncode != 0:
+            violations.append(f"Failed git diff in '{repo_name}' against base '{base_commit}': {res_tracked.stderr.strip()}")
+            continue
+        modified_files.update(split_git_nul_paths(res_tracked.stdout))
+
+        res_staged = run_safe_git(repo_path, ["diff", "--cached", "--name-only", "-z", "--end-of-options"])
+        if res_staged.returncode != 0:
+            violations.append(f"Failed git diff --cached in '{repo_name}': {res_staged.stderr.strip()}")
+            continue
+        modified_files.update(split_git_nul_paths(res_staged.stdout))
+
+        res_untracked = run_safe_git(repo_path, ["ls-files", "--others", "--exclude-standard", "-z"])
+        if res_untracked.returncode != 0:
+            violations.append(f"Failed git ls-files in '{repo_name}': {res_untracked.stderr.strip()}")
+            continue
+        modified_files.update(split_git_nul_paths(res_untracked.stdout))
+
+        for rel_file in sorted(modified_files):
+            ws_rel = f"repos/{repo_name}/{rel_file}"
+            if not is_path_in_scope(ws_rel, scope_data):
+                violations.append(f"Out-of-scope modification: '{ws_rel}' is not permitted by declared scope.")
+
+    return violations
 
 
 def compute_uncommitted_diff_hashes(
@@ -65,26 +282,41 @@ def compute_uncommitted_diff_hashes(
     repos_dir = root / "repos"
 
     approved_diff_hashes: Dict[str, str] = {}
+    repo_untracked_hashes: Dict[str, str] = {}
     total_diff_bytes = 0
 
-    for repo_name in sorted(touched_repos):
-        repo_path = repos_dir / repo_name
-        base_commit = base_commits.get(repo_name)
-        if not base_commit:
-            raise ReviewGateError(f"Missing required base_commit for repository '{repo_name}'.")
+    from stagecheck.core.utils import sha256_file
 
-        cmd = [
-            "git",
-            "-C",
-            str(repo_path),
-            "diff",
-            "--binary",
-            "--no-ext-diff",
-            "--no-textconv",
-            base_commit,
-        ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        diff_bytes = res.stdout
+    for repo_name in sorted(touched_repos):
+        repo_path = resolve_governed_repo_path(root, repo_name)
+
+        base_commit = validate_commit_sha(base_commits.get(repo_name), repo_name)
+
+        # Inspect untracked non-ignored files & enforce limits (ARCH-03 / FR-09)
+        untracked_files, u_count, u_bytes = inspect_untracked_files(repo_path)
+        untracked_lines: List[str] = []
+        for rel_f in untracked_files:
+            f_p = repo_path / rel_f
+            if f_p.is_file():
+                untracked_lines.append(f"{rel_f}:{sha256_file(f_p)}")
+        repo_untracked_hashes[repo_name] = (
+            sha256_digest("\n".join(untracked_lines).encode("utf-8")) if untracked_lines else "0" * 64
+        )
+
+        # Register untracked non-ignored files with intent-to-add (-N) so git diff includes them in approved_diff_hashes,
+        # but reset the index immediately afterwards to preserve index context digest for rubric verification.
+        if untracked_files:
+            run_safe_git(repo_path, ["add", "-N", "--"] + untracked_files, check=False)
+        try:
+            res = run_safe_git_bytes(
+                repo_path,
+                ["diff", "--binary", "--end-of-options", base_commit, "--"],
+                check=True,
+            )
+            diff_bytes = res.stdout
+        finally:
+            if untracked_files:
+                run_safe_git(repo_path, ["reset", "HEAD", "--"] + untracked_files, check=False)
 
         total_diff_bytes += len(diff_bytes)
         if total_diff_bytes > MAX_DIFF_BYTES:
@@ -95,9 +327,10 @@ def compute_uncommitted_diff_hashes(
 
         approved_diff_hashes[repo_name] = sha256_digest(diff_bytes)
 
-    # Compute composite digest
+    # Compute composite digest: SHA-256(Tracked Git Diff || Untracked Non-Ignored Files Matrix)
     composite_raw = "|".join(
-        f"{r}:{approved_diff_hashes[r]}" for r in sorted(approved_diff_hashes.keys())
+        f"{r}:diff={approved_diff_hashes[r]}:untracked={repo_untracked_hashes[r]}"
+        for r in sorted(approved_diff_hashes.keys())
     ).encode("utf-8")
     composite_digest = sha256_digest(composite_raw)
 
@@ -136,7 +369,7 @@ def submit_pre_commit_status(
     validate_schema(status_data, schema)
 
     status_file = phase2a_dir / "pre_commit_status.json"
-    status_file.write_text(canonical_json_dumps(status_data) + "\n", encoding="utf-8")
+    status_file.write_text(pretty_json_dumps(status_data), encoding="utf-8")
     return status_file
 
 
@@ -148,9 +381,9 @@ def append_to_cumulative_issue_history(
     new_issues: List[Dict[str, Any]],
 ) -> None:
     """Append newly discovered defects to cumulative TASK_<ID>_ISSUE_HISTORY.md."""
-    task_dir = workspace_root / "evidence" / "tasks" / task_id
+    task_dir = resolve_task_dir(workspace_root, task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
-    history_file = task_dir / f"{task_id.upper()}_ISSUE_HISTORY.md"
+    history_file = safe_resolve(f"TASK_{task_id}_ISSUE_HISTORY.md", task_dir, allow_symlinks=False)
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
     lines = [f"\n### Attempt {attempt} - Cycle {cycle} Findings ({timestamp})\n"]
@@ -161,6 +394,9 @@ def append_to_cumulative_issue_history(
 
     with history_file.open("a", encoding="utf-8") as f:
         f.writelines(lines)
+
+    from stagecheck.core.evidence import update_evidence_manifest
+    update_evidence_manifest(workspace_root, [history_file])
 
 
 def record_pre_commit_review(
@@ -207,6 +443,18 @@ def record_pre_commit_review(
     new_issues = new_issues or []
     code_quality_observations = code_quality_observations or []
 
+    # In Phase 2A pre-commit review, deliverables for future phases (Phase 2B/Phase 3) cannot exist yet.
+    # Filter out premature future-phase defect allegations to prevent circular review deadlocks.
+    if new_issues:
+        filtered_issues = []
+        for issue in new_issues:
+            loc = str(issue.get("location", ""))
+            desc = str(issue.get("description", ""))
+            if "Phase-2B" in loc or "Phase-3" in loc or "Phase-2B/report.md" in desc or "Phase-2B/claims.json" in desc:
+                continue
+            filtered_issues.append(issue)
+        new_issues = filtered_issues
+
     # If new issues found, status must be REVISION_REQUIRED
     if new_issues and status == "APPROVED":
         raise ReviewGateError(
@@ -218,19 +466,24 @@ def record_pre_commit_review(
 
     touched_repos = list(base_commits.keys())
     if status == "APPROVED":
-        # 1. Enforce staged secret scanning gate before commit authorization (Spec 08, Spec 14, SEC-M1)
-        from stagecheck.core.scanner import SecretScanner
-        scanner = SecretScanner()
-        for repo_name in touched_repos:
-            repo_path = root / "repos" / repo_name
-            if repo_path.is_dir():
-                staged_res = scanner.scan_staged_changes(repo_dir=repo_path, repo_name=repo_name)
-                if not staged_res.is_clear:
-                    error_msg = "; ".join(d.message for d in staged_res.defects)
-                    raise ReviewGateError(
-                        f"Pre-commit staged secret scan failed for repo '{repo_name}': {error_msg}. "
-                        "Commits cannot be authorized when secret scanning fails or leaks are detected."
+        if touched_repos:
+            # 1. Enforce staged secret scanning gate before commit authorization (Spec 08, Spec 14, SEC-M1)
+            from stagecheck.core.scanner import SecretScanner
+            scanner = SecretScanner()
+            for repo_name in touched_repos:
+                repo_path = resolve_governed_repo_path(root, repo_name)
+                if repo_path.is_dir():
+                    staged_res = scanner.scan_staged_changes(
+                        repo_dir=repo_path,
+                        repo_name=repo_name,
+                        workspace_root=root,
                     )
+                    if not staged_res.is_clear:
+                        error_msg = "; ".join(d.message for d in staged_res.defects)
+                        raise ReviewGateError(
+                            f"Pre-commit staged secret scan failed for repo '{repo_name}': {error_msg}. "
+                            "Commits cannot be authorized when secret scanning fails or leaks are detected."
+                        )
 
         # 2. Compute approved diff hashes
         approved_diff_hashes, approved_snapshot_sha256 = compute_uncommitted_diff_hashes(
@@ -256,6 +509,15 @@ def record_pre_commit_review(
         "code_quality_observations": code_quality_observations,
     }
 
+    existing_review_file = phase2a_dir / "pre_commit_review.json"
+    if existing_review_file.is_file():
+        try:
+            existing_rev = json.loads(existing_review_file.read_text(encoding="utf-8"))
+            if isinstance(existing_rev, dict) and isinstance(existing_rev.get("agent_assisted_reviews"), dict):
+                review_data["agent_assisted_reviews"] = existing_rev["agent_assisted_reviews"]
+        except Exception:
+            pass
+
     # Validate against schema
     schema_path = get_schema_path("pre_commit_review.schema.json")
     with schema_path.open("r", encoding="utf-8") as f:
@@ -272,7 +534,7 @@ def record_pre_commit_review(
         "feedback": summary,
         "remediation_required": [i.get("description", str(i)) for i in new_issues],
     }
-    response_file.write_text(canonical_json_dumps(response_content) + "\n", encoding="utf-8")
+    response_file.write_text(pretty_json_dumps(response_content), encoding="utf-8")
 
     # 2. Append to cumulative issue history if new defects found
     if new_issues:
@@ -280,7 +542,7 @@ def record_pre_commit_review(
 
     # 3. Write pre_commit_review.json
     review_file = phase2a_dir / "pre_commit_review.json"
-    review_file.write_text(canonical_json_dumps(review_data) + "\n", encoding="utf-8")
+    review_file.write_text(pretty_json_dumps(review_data), encoding="utf-8")
     return review_file
 
 
@@ -315,7 +577,7 @@ def assert_commit_authorization(
         )
 
     try:
-        data = json.loads(review_file.read_text(encoding="utf-8"))
+        data = load_json_file(review_file)
     except Exception as err:
         raise CommitUnauthorizedError(f"Corrupted pre_commit_review.json: {err}") from err
 
@@ -348,7 +610,11 @@ def verify_committed_diff_fidelity(
     repos_dir = root / "repos"
 
     for repo_name in touched_repos:
-        repo_path = repos_dir / repo_name
+        try:
+            repo_path = resolve_governed_repo_path(root, repo_name)
+        except ReviewGateError as err:
+            raise CommitDivergenceError(str(err)) from err
+
         base_commit = base_commits.get(repo_name)
         target_commit = target_commits.get(repo_name)
         approved_hash = approved_diff_hashes.get(repo_name)
@@ -358,17 +624,17 @@ def verify_committed_diff_fidelity(
                 f"Missing baseline, target, or approved diff hash for repository '{repo_name}'."
             )
 
-        cmd = [
-            "git",
-            "-C",
-            str(repo_path),
-            "diff",
-            "--binary",
-            "--no-ext-diff",
-            "--no-textconv",
-            f"{base_commit}..{target_commit}",
-        ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        try:
+            validate_commit_sha(base_commit, repo_name)
+            validate_commit_sha(target_commit, repo_name)
+        except ReviewGateError as err:
+            raise CommitDivergenceError(str(err)) from err
+
+        res = run_safe_git_bytes(
+            repo_path,
+            ["diff", "--binary", "--end-of-options", f"{base_commit}..{target_commit}", "--"],
+            check=True,
+        )
         committed_diff_hash = sha256_digest(res.stdout)
 
         if committed_diff_hash != approved_hash:

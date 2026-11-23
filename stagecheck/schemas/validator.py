@@ -29,6 +29,22 @@ def get_active_state_schema() -> Dict[str, Any]:
     return load_json_file(schema_path)
 
 
+def get_gate_receipt_schema() -> Dict[str, Any]:
+    """Load and return the Gate Receipt Schema."""
+    schema_path = get_schema_path("gate_receipt.schema.json")
+    return load_json_file(schema_path)
+
+
+def validate_gate_receipt(data: Dict[str, Any]) -> None:
+    """Validate a Gate Receipt descriptor against gate_receipt.schema.json.
+
+    Raises:
+        SchemaValidationError: If data violates schema requirements.
+    """
+    schema = get_gate_receipt_schema()
+    validate_schema(data, schema)
+
+
 def get_control_descriptors_schema() -> Dict[str, Any]:
     """Load and return the multi-descriptor schemas."""
     schema_path = get_schema_path("control_descriptors.schema.json")
@@ -96,4 +112,38 @@ def validate_control_descriptor(descriptor_name: str, data: Dict[str, Any]) -> N
         raise SchemaValidationError(f"No schema definition found for: '{descriptor_name}'.")
 
     validate_schema(data, schema)
+
+
+def get_turn_status_schema() -> Dict[str, Any]:
+    """Load and return the Turn Status Schema."""
+    schema_path = get_schema_path("turn_status.schema.json")
+    return load_json_file(schema_path)
+
+
+def validate_turn_status(data: Dict[str, Any]) -> None:
+    """Validate a Turn Status descriptor against turn_status.schema.json.
+
+    Raises:
+        SchemaValidationError: If data violates schema requirements.
+    """
+    schema = get_turn_status_schema()
+    validate_schema(data, schema)
+
+
+def get_rubric_evaluation_schema() -> Dict[str, Any]:
+    """Load and return the Rubric Evaluation Schema."""
+    schema_path = get_schema_path("rubric_evaluation.schema.json")
+    return load_json_file(schema_path)
+
+
+def validate_rubric_evaluation(data: Dict[str, Any]) -> None:
+    """Validate a Rubric Evaluation descriptor against rubric_evaluation.schema.json.
+
+    Raises:
+        SchemaValidationError: If data violates schema requirements.
+    """
+    schema = get_rubric_evaluation_schema()
+    validate_schema(data, schema)
+
+
 
