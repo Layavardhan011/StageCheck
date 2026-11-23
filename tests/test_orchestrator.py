@@ -999,6 +999,57 @@ class TestNineStageVerification(unittest.TestCase):
         exit_code = main(["audit", "--task", self.task_id, "--workspace", str(self.workspace_root)])
         self.assertEqual(exit_code, 0)
 
+    def test_audit_writes_artifacts_under_readonly_attempt_and_task_directories(self) -> None:
+        """AuditOrchestrator writes Phase-3 deliverables even when attempt and task dirs are 0555."""
+        self._setup_valid_prompt_and_scope()
+        self._setup_valid_precommit_review()
+        self._setup_valid_delivery_report()
+
+        from stagecheck.core.gate_engine import GateId, generate_gate_receipt
+        from stagecheck.core.state import load_active_state, save_active_state
+        state = load_active_state(self.workspace_root)
+        state["task_id"] = self.task_id
+        state["attempt_index"] = self.attempt
+        state["phase"] = "PHASE_3_AUDIT"
+        receipt_path, receipt_data, _ = generate_gate_receipt(
+            workspace_root=self.workspace_root,
+            gate_id=GateId.GATE_2B,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            from_phase="PHASE_2A_CODING",
+            to_phase="PHASE_3_AUDIT",
+            deliverables=[],
+            checks_evaluated=["gate2b.prior_review_approved", "gate2b.delivery_report_exists"],
+        )
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.write_text(canonical_json_dumps(receipt_data), encoding="utf-8")
+        state["cleared_gates"] = {"GATE_1": "0" * 64, "GATE_2B": sha256_file(receipt_path)}
+        save_active_state(self.workspace_root, state)
+
+        # Freeze task and attempt directory to 0555
+        task_dir = self.workspace_root / "evidence" / "tasks" / self.task_id
+        attempt_dir = task_dir / f"attempt_{self.attempt}"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(str(attempt_dir), 0o555)
+        os.chmod(str(task_dir), 0o555)
+
+        try:
+            passed, result = run_audit(self.workspace_root, self.task_id, self.attempt)
+            self.assertTrue(passed)
+            self.assertEqual(result.get("status"), "PASSED")
+
+            phase3_dir = attempt_dir / "Phase-3"
+            self.assertTrue((phase3_dir / "verdict.json").is_file())
+            self.assertTrue((phase3_dir / "test_execution.json").is_file())
+            self.assertTrue((phase3_dir / "scanner_report.json").is_file())
+            self.assertTrue((phase3_dir / "rubric_evaluation.json").is_file())
+            self.assertTrue((task_dir / "verdict.json").is_file())
+        finally:
+            os.chmod(str(task_dir), 0o755)
+            os.chmod(str(attempt_dir), 0o755)
+            if (attempt_dir / "Phase-3").is_dir():
+                os.chmod(str(attempt_dir / "Phase-3"), 0o755)
+
 
 if __name__ == "__main__":
     unittest.main()

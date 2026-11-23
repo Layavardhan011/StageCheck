@@ -33,6 +33,7 @@ from stagecheck.core.evidence import (
 )
 from stagecheck.core.git import run_safe_git
 from stagecheck.core.paths import find_workspace_root, resolve_task_dir, safe_resolve, write_text_nofollow
+from stagecheck.core.permissions import controlled_write_transaction
 from stagecheck.core.utils import (
     canonical_json_dumps,
     pretty_json_dumps,
@@ -465,14 +466,13 @@ class AuditOrchestrator:
             },
         }
 
-        # Write Phase-3 directory artifacts safely without following symlinks
+        # Resolve target directories
         rel_phase3 = f"evidence/tasks/{ctx.task_id}/attempt_{ctx.attempt}/Phase-3"
         phase3_dir = safe_resolve(rel_phase3, self.workspace_root, allow_symlinks=False)
-        phase3_dir.mkdir(parents=True, exist_ok=True)
+        attempt_dir = safe_resolve(f"evidence/tasks/{ctx.task_id}/attempt_{ctx.attempt}", self.workspace_root, allow_symlinks=False)
+        task_root_dir = safe_resolve(f"evidence/tasks/{ctx.task_id}", self.workspace_root, allow_symlinks=False)
 
-        # 1. verdict.json
         verdict_path = safe_resolve(f"{rel_phase3}/verdict.json", self.workspace_root, allow_symlinks=False)
-        write_text_nofollow(verdict_path, pretty_json_dumps(verdict_data), append=False, mode=0o644)
 
         # 2. test_execution.json
         rerun_res = next((r.to_dict() for r in stage_results if r.stage_id == "rerun"), {})
@@ -486,7 +486,6 @@ class AuditOrchestrator:
             "stage_summary": rerun_res,
         }
         test_exec_path = safe_resolve(f"{rel_phase3}/test_execution.json", self.workspace_root, allow_symlinks=False)
-        write_text_nofollow(test_exec_path, pretty_json_dumps(test_exec_data), append=False, mode=0o644)
 
         # 3. scanner_report.json
         sec_res = next((r.to_dict() for r in stage_results if r.stage_id == "secrets"), {})
@@ -502,17 +501,30 @@ class AuditOrchestrator:
             "stage_summary": sec_res,
         }
         scanner_path = safe_resolve(f"{rel_phase3}/scanner_report.json", self.workspace_root, allow_symlinks=False)
-        write_text_nofollow(scanner_path, pretty_json_dumps(scanner_data), append=False, mode=0o644)
 
         # 4. rubric_evaluation.json
         rubric_path = safe_resolve(f"{rel_phase3}/rubric_evaluation.json", self.workspace_root, allow_symlinks=False)
-        write_text_nofollow(rubric_path, pretty_json_dumps(rubric_payload), append=False, mode=0o644)
 
-        # Also write task root verdict.json for high-level tools
-        task_root_dir = safe_resolve(f"evidence/tasks/{ctx.task_id}", self.workspace_root, allow_symlinks=False)
-        task_root_dir.mkdir(parents=True, exist_ok=True)
+        # Target path for task root verdict.json
         task_verdict_path = safe_resolve(f"evidence/tasks/{ctx.task_id}/verdict.json", self.workspace_root, allow_symlinks=False)
-        write_text_nofollow(task_verdict_path, pretty_json_dumps(verdict_data), append=False, mode=0o644)
+
+        # Write Phase-3 directory artifacts safely under controlled write transaction
+        with controlled_write_transaction(attempt_dir):
+            phase3_dir.mkdir(parents=True, exist_ok=True)
+            with controlled_write_transaction(phase3_dir):
+                # 1. verdict.json
+                write_text_nofollow(verdict_path, pretty_json_dumps(verdict_data), append=False, mode=0o644)
+                # 2. test_execution.json
+                write_text_nofollow(test_exec_path, pretty_json_dumps(test_exec_data), append=False, mode=0o644)
+                # 3. scanner_report.json
+                write_text_nofollow(scanner_path, pretty_json_dumps(scanner_data), append=False, mode=0o644)
+                # 4. rubric_evaluation.json
+                write_text_nofollow(rubric_path, pretty_json_dumps(rubric_payload), append=False, mode=0o644)
+
+        # Also write task root verdict.json for high-level tools under controlled write transaction
+        with controlled_write_transaction(task_root_dir):
+            task_root_dir.mkdir(parents=True, exist_ok=True)
+            write_text_nofollow(task_verdict_path, pretty_json_dumps(verdict_data), append=False, mode=0o644)
 
         # Update evidence manifest with all Phase-3 audit deliverables
         update_evidence_manifest(

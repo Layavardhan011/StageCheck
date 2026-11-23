@@ -374,8 +374,12 @@ def controlled_write_transaction(target_dir: Path) -> Generator[None, None, None
         yield
         return
 
-    # Temporarily elevate directory to 0755 and existing files to 0644
-    os.chmod(str(directory), MODE_DIR_RW)
+    # Check whether the directory itself was read-only
+    was_dir_ro = (directory.stat().st_mode & 0o200) == 0
+    if was_dir_ro:
+        os.chmod(str(directory), MODE_DIR_RW)
+
+    # Always elevate files in directory to writable so they can be overwritten
     for item in directory.iterdir():
         if item.is_symlink():
             continue
@@ -387,7 +391,7 @@ def controlled_write_transaction(target_dir: Path) -> Generator[None, None, None
     try:
         yield
     finally:
-        # Re-apply read-only mode to files and restore directory mode to 0555
+        # Re-apply read-only mode to files
         for item in directory.iterdir():
             if item.is_symlink():
                 continue
@@ -399,4 +403,8 @@ def controlled_write_transaction(target_dir: Path) -> Generator[None, None, None
                         os.chmod(str(item), MODE_FILE_RO)
                 except OSError:
                     pass
-        os.chmod(str(directory), MODE_DIR_RO)
+        if was_dir_ro or directory.name in ("controls", "evidence") or directory.name.startswith("Phase-") or directory.name.startswith("attempt_"):
+            try:
+                os.chmod(str(directory), MODE_DIR_RO)
+            except OSError:
+                pass
