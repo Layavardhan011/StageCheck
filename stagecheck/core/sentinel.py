@@ -358,9 +358,9 @@ class SentinelDaemon:
             import ctypes.util
             libc_name = ctypes.util.find_library("c") or "libc.so.6"
             try:
-                self._libc = ctypes.CDLL(libc_name)
+                self._libc = ctypes.CDLL(libc_name, use_errno=True)
             except OSError:
-                self._libc = ctypes.CDLL(None)
+                self._libc = ctypes.CDLL(None, use_errno=True)
 
     @contextlib.contextmanager
     def _acquire_daemon_lock(self):
@@ -760,8 +760,93 @@ class SentinelDaemon:
                 if wd >= 0:
                     self._watch_descriptors[wd] = cur_dir
 
+    def _run_polling_loop(self, ready_fd: Optional[int] = None, _lock_stack: Optional[Any] = None) -> None:
+        """Fallback event loop using mtime/stat polling when inotify is unavailable (zero sudo required)."""
+        sys.stderr.write("[INFO] Sentinel operating in filesystem polling mode (fallback for inotify limits).\n")
+        sys.stderr.flush()
+
+        # Write PID file atomically before notifying readiness
+        self.write_pid()
+        if _lock_stack is not None:
+            _lock_stack.close()
+
+        # Notify parent process that Sentinel is ready
+        if ready_fd is not None:
+            try:
+                os.write(ready_fd, f"READY {os.getpid()}\n".encode("utf-8"))
+            finally:
+                try:
+                    os.close(ready_fd)
+                except OSError:
+                    pass
+
+        watch_roots = [
+            self.root / "controls",
+            self.root / "specs",
+            self.root / "evidence",
+            self.root / "repos",
+        ]
+
+        def _scan_files() -> Dict[str, Tuple[int, int]]:
+            snapshot: Dict[str, Tuple[int, int]] = {}
+            for wroot in watch_roots:
+                if not wroot.is_dir() or wroot.is_symlink():
+                    continue
+                for dirpath, dirnames, filenames in os.walk(str(wroot)):
+                    dirnames[:] = [d for d in dirnames if d not in PRUNE_DIR_NAMES and not d.startswith(".")]
+                    for fname in filenames:
+                        if fname.startswith("."):
+                            continue
+                        fpath = Path(dirpath) / fname
+                        try:
+                            st = fpath.stat()
+                            rel = str(fpath.relative_to(self.root))
+                            snapshot[rel] = (st.st_mtime_ns, st.st_size)
+                        except OSError:
+                            pass
+            return snapshot
+
+        prev_snapshot = _scan_files()
+
+        while True:
+            try:
+                time.sleep(1.0)
+            except (InterruptedError, OSError):
+                break
+
+            current_snapshot = _scan_files()
+
+            # Detect created or modified files
+            for rel_path, stat_info in current_snapshot.items():
+                prev_info = prev_snapshot.get(rel_path)
+                if prev_info != stat_info:
+                    norm = _normalize_rel_event_path(rel_path)
+                    active_tx = self._is_active_transaction() if _is_tier1_rel_path(norm) else False
+                    tier, label = classify_event_path(self.root, rel_path, active_transaction=active_tx)
+                    self._log_event(rel_path, tier, label)
+
+            # Detect deleted files
+            for rel_path in prev_snapshot:
+                if rel_path not in current_snapshot:
+                    norm = _normalize_rel_event_path(rel_path)
+                    active_tx = self._is_active_transaction() if _is_tier1_rel_path(norm) else False
+                    tier, label = classify_event_path(self.root, rel_path, active_transaction=active_tx)
+                    self._log_event(rel_path, tier, label)
+
+            prev_snapshot = current_snapshot
+
+            # Check watchdog periodically for active agent phases
+            try:
+                from stagecheck.core.supervisor import evaluate_watchdog
+                self._in_process_transaction = True
+                evaluate_watchdog(self.root, timeout_seconds=1800.0)
+            except Exception:
+                pass
+            finally:
+                self._in_process_transaction = False
+
     def _run_loop(self, ready_fd: Optional[int] = None, _lock_stack: Optional[Any] = None) -> None:
-        """Main event loop using Linux inotify and epoll."""
+        """Main event loop using Linux inotify and epoll, falling back to polling if inotify fails."""
         self._init_libc()
         if not self._libc:
             sys.stderr.write("Failed to initialize libc for inotify.\n")
@@ -776,14 +861,15 @@ class SentinelDaemon:
         self._inotify_fd = self._libc.inotify_init1(IN_NONBLOCK | IN_CLOEXEC)
         if self._inotify_fd < 0:
             err = ctypes.get_errno() if hasattr(ctypes, "get_errno") else -1
-            sys.stderr.write(f"inotify_init1 failed with descriptor {self._inotify_fd} (errno: {err}).\n")
+            import errno
+            err_name = errno.errorcode.get(err, "UNKNOWN")
+            err_desc = os.strerror(err) if err > 0 else "Unknown error"
+            sys.stderr.write(
+                f"[WARN] inotify_init1 failed with descriptor {self._inotify_fd} (errno {err} {err_name}: {err_desc}).\n"
+                f"Falling back to resilient filesystem polling watcher (zero sudo required).\n"
+            )
             sys.stderr.flush()
-            if ready_fd is not None:
-                try:
-                    os.close(ready_fd)
-                except OSError:
-                    pass
-            return
+            return self._run_polling_loop(ready_fd=ready_fd, _lock_stack=_lock_stack)
 
         self._attach_recursive_watches()
         import gc
@@ -978,7 +1064,7 @@ if __name__ == "__main__":
     ready_pipe = args.ready_fd if args.ready_fd >= 0 else None
 
     def _handle_term(signum, frame):
-        sys.exit(0)
+        os._exit(0)
 
     signal.signal(signal.SIGTERM, _handle_term)
     signal.signal(signal.SIGINT, _handle_term)
