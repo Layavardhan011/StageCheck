@@ -40,34 +40,13 @@ from stagecheck.core.state import load_active_state, save_active_state
 from stagecheck.core.utils import sha256_file
 
 
-RELEVANT_PATH_PREFIXES = ("repos/",)
-RELEVANT_PATH_SUBSTRINGS = ("/Phase-1/", "/Phase-2A/", "/Phase-2B/")
-
-
-def _has_unsafe_log_control_chars(value: str) -> bool:
-    """Return True for ASCII/C1 control characters and Unicode line/paragraph separators."""
-    return any(
-        ord(ch) < 0x20 or (0x7F <= ord(ch) <= 0x9F) or ord(ch) in (0x2028, 0x2029)
-        for ch in value
-    )
-
-
-def is_relevant_sentinel_path(rel_path: str) -> bool:
-    """Check if a filesystem event path represents relevant agent work.
-
-    Only events under product repositories or active phase evidence directories
-    count as valid agent activity. Unrelated directories do NOT reset watchdog.
-    """
-    if not isinstance(rel_path, str):
-        return False
-    if _has_unsafe_log_control_chars(rel_path):
-        return False
-    norm = rel_path.strip()
-    if norm.startswith(RELEVANT_PATH_PREFIXES):
-        return True
-    if any(sub in norm for sub in RELEVANT_PATH_SUBSTRINGS):
-        return True
-    return False
+from stagecheck.core.sentinel import (
+    ACTIVE_WATCHDOG_PHASES,
+    RELEVANT_PATH_PREFIXES,
+    RELEVANT_PATH_SUBSTRINGS,
+    _has_unsafe_log_chars as _has_unsafe_log_control_chars,
+    is_relevant_sentinel_path,
+)
 
 
 def get_last_relevant_filesystem_timestamp(
@@ -154,16 +133,6 @@ def get_last_turn_heartbeat_timestamp(workspace_root: Path) -> Optional[datetime
         except Exception:
             pass
     return None
-
-
-ACTIVE_WATCHDOG_PHASES = (
-    "PHASE_1_PLANNING",
-    "PHASE_1_REPAIR",
-    "PHASE_2A_CODING",
-    "PHASE_2A_IMPLEMENTATION",
-    "PHASE_2B_COMMITTING",
-    "PHASE_2B_DELIVERY",
-)
 
 
 def _compute_watchdog_metrics(

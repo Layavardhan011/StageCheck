@@ -106,6 +106,37 @@ PRUNE_DIR_NAMES = {
     ".ruff_cache",
 }
 
+# Relevant path prefixes and substrings for watchdog activity tracking (FR-05 / Issue 4)
+RELEVANT_PATH_PREFIXES = ("repos/",)
+RELEVANT_PATH_SUBSTRINGS = ("/Phase-1/", "/Phase-2A/", "/Phase-2B/")
+
+ACTIVE_WATCHDOG_PHASES = (
+    "PHASE_1_PLANNING",
+    "PHASE_1_REPAIR",
+    "PHASE_2A_CODING",
+    "PHASE_2A_IMPLEMENTATION",
+    "PHASE_2B_COMMITTING",
+    "PHASE_2B_DELIVERY",
+)
+
+
+def is_relevant_sentinel_path(rel_path: str) -> bool:
+    """Check if a filesystem event path represents relevant agent work.
+
+    Only events under product repositories or active phase evidence directories
+    count as valid agent activity. Unrelated directories do NOT reset watchdog.
+    """
+    if not isinstance(rel_path, str):
+        return False
+    if _has_unsafe_log_chars(rel_path):
+        return False
+    norm = rel_path.strip()
+    if norm.startswith(RELEVANT_PATH_PREFIXES):
+        return True
+    if any(sub in norm for sub in RELEVANT_PATH_SUBSTRINGS):
+        return True
+    return False
+
 
 _ALLOWED_URGENCY = {"low", "normal", "critical"}
 
@@ -340,10 +371,9 @@ class SentinelDaemon:
 
         # Restore monotonic tracking from ACTIVE_STATE.json if present (DEC-027)
         state_file = self.root / "controls" / "ACTIVE_STATE.json"
-        if state_file.is_file():
+        if state_file.is_file() and not state_file.is_symlink():
             try:
-                from stagecheck.core.state import load_active_state
-                state = load_active_state(self.root)
+                state = json.loads(state_file.read_text(encoding="utf-8"))
                 last_ts_str = state.get("watchdog", {}).get("last_active_timestamp")
                 if last_ts_str:
                     last_ts = datetime.datetime.fromisoformat(last_ts_str.replace("Z", "+00:00"))
@@ -455,9 +485,12 @@ class SentinelDaemon:
             state_file = self.root / "controls" / "ACTIVE_STATE.json"
             if state_file.is_file() and not state_file.is_symlink():
                 try:
-                    from stagecheck.core.agents import load_registered_agents
                     state_data = json.loads(state_file.read_text(encoding="utf-8"))
-                    agents = load_registered_agents(state_data)
+                    agents = (
+                        state_data.get("protected", {}).get("registered_agents")
+                        or state_data.get("registered_agents")
+                        or []
+                    )
                     if len(agents) == 1:
                         print("[INFO] Single-Agent Mode Active: Independent AI review is NOT claimed.")
                 except Exception:
@@ -487,9 +520,12 @@ class SentinelDaemon:
             state_file = self.root / "controls" / "ACTIVE_STATE.json"
             if state_file.is_file() and not state_file.is_symlink():
                 try:
-                    from stagecheck.core.agents import load_registered_agents
                     state_data = json.loads(state_file.read_text(encoding="utf-8"))
-                    agents = load_registered_agents(state_data)
+                    agents = (
+                        state_data.get("protected", {}).get("registered_agents")
+                        or state_data.get("registered_agents")
+                        or []
+                    )
                     if len(agents) == 1:
                         print("[INFO] Single-Agent Mode Active: Independent AI review is NOT claimed.")
                 except Exception:
@@ -692,27 +728,21 @@ class SentinelDaemon:
         single_agent = False
 
         state_file = self.root / "controls" / "ACTIVE_STATE.json"
-        if state_file.is_file():
+        if state_file.is_file() and not state_file.is_symlink():
             try:
-                from stagecheck.core.agents import load_registered_agents
                 state_data = json.loads(state_file.read_text(encoding="utf-8"))
                 active_task = state_data.get("task_id", "None")
-                agents = load_registered_agents(state_data)
+                agents = (
+                    state_data.get("protected", {}).get("registered_agents")
+                    or state_data.get("registered_agents")
+                    or []
+                )
                 single_agent = len(agents) == 1
             except Exception:
                 pass
 
         if running and pid:
             rss_mb = get_process_rss_mib(pid)
-
-        return {
-            "running": running,
-            "pid": pid,
-            "rss_mb": round(rss_mb, 2),
-            "active_task": active_task,
-            "single_agent_mode": single_agent,
-            "log_file": str(self.log_file),
-        }
 
         return {
             "running": running,
@@ -837,9 +867,17 @@ class SentinelDaemon:
 
             # Check watchdog periodically for active agent phases
             try:
-                from stagecheck.core.supervisor import evaluate_watchdog
-                self._in_process_transaction = True
-                evaluate_watchdog(self.root, timeout_seconds=1800.0)
+                state_file = self.root / "controls" / "ACTIVE_STATE.json"
+                if state_file.is_file() and not state_file.is_symlink():
+                    try:
+                        st_data = json.loads(state_file.read_text(encoding="utf-8"))
+                        phase = st_data.get("phase", "IDLE")
+                    except Exception:
+                        phase = "IDLE"
+                    if phase in ACTIVE_WATCHDOG_PHASES:
+                        from stagecheck.core.supervisor import evaluate_watchdog
+                        self._in_process_transaction = True
+                        evaluate_watchdog(self.root, timeout_seconds=1800.0)
             except Exception:
                 pass
             finally:
@@ -906,20 +944,35 @@ class SentinelDaemon:
                     break
                 for fd, event in events:
                     if fd == self._inotify_fd and (event & select.EPOLLIN):
+                        processed_any = False
                         while True:
                             try:
                                 data = os.read(self._inotify_fd, 16384)
                                 if not data:
                                     break
                                 self._process_inotify_buffer(data)
+                                processed_any = True
                             except BlockingIOError:
                                 break
+                        if processed_any and self._libc and hasattr(self._libc, "malloc_trim"):
+                            try:
+                                self._libc.malloc_trim(0)
+                            except Exception:
+                                pass
 
                 # Check watchdog periodically for active agent phases
                 try:
-                    from stagecheck.core.supervisor import evaluate_watchdog
-                    self._in_process_transaction = True
-                    evaluate_watchdog(self.root, timeout_seconds=1800.0)
+                    state_file = self.root / "controls" / "ACTIVE_STATE.json"
+                    if state_file.is_file() and not state_file.is_symlink():
+                        try:
+                            st_data = json.loads(state_file.read_text(encoding="utf-8"))
+                            phase = st_data.get("phase", "IDLE")
+                        except Exception:
+                            phase = "IDLE"
+                        if phase in ACTIVE_WATCHDOG_PHASES:
+                            from stagecheck.core.supervisor import evaluate_watchdog
+                            self._in_process_transaction = True
+                            evaluate_watchdog(self.root, timeout_seconds=1800.0)
                 except Exception:
                     pass
                 finally:
@@ -1036,32 +1089,52 @@ class SentinelDaemon:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 os.close(fd)
                 return
-            with os.fdopen(fd, "a", encoding="utf-8") as f:
-                f.write(entry)
+            os.write(fd, entry.encode("utf-8"))
+            os.close(fd)
         except OSError:
             pass
 
         # Relevant path filtering (FR-05 / Issue 4)
-        from stagecheck.core.supervisor import is_relevant_sentinel_path
         if safe_rel == rel_path and not _has_unsafe_log_chars(rel_path) and is_relevant_sentinel_path(rel_path):
             self.last_activity_monotonic = time.monotonic()
 
 
 if __name__ == "__main__":
-    import argparse
-
     # Ensure package root is importable when invoked directly
     pkg_parent = str(Path(__file__).resolve().parents[2])
     if pkg_parent not in sys.path:
         sys.path.insert(0, pkg_parent)
 
-    parser = argparse.ArgumentParser(description="StageCheck Sentinel Background Daemon Runner")
-    parser.add_argument("--workspace", required=True, help="Workspace root path")
-    parser.add_argument("--ready-fd", type=int, default=-1, help="Readiness notification pipe fd")
-    args = parser.parse_args()
+    workspace_arg: Optional[str] = None
+    ready_fd_arg: Optional[int] = None
+    argv = sys.argv[1:]
+    idx = 0
+    while idx < len(argv):
+        arg = argv[idx]
+        if arg == "--workspace" and idx + 1 < len(argv):
+            workspace_arg = argv[idx + 1]
+            idx += 2
+        elif arg.startswith("--workspace="):
+            workspace_arg = arg.split("=", 1)[1]
+            idx += 1
+        elif arg == "--ready-fd" and idx + 1 < len(argv):
+            ready_fd_arg = int(argv[idx + 1])
+            idx += 2
+        elif arg.startswith("--ready-fd="):
+            ready_fd_arg = int(arg.split("=", 1)[1])
+            idx += 1
+        elif arg in ("-h", "--help"):
+            print("usage: sentinel.py --workspace WORKSPACE [--ready-fd READY_FD]")
+            sys.exit(0)
+        else:
+            idx += 1
 
-    daemon_inst = SentinelDaemon(args.workspace)
-    ready_pipe = args.ready_fd if args.ready_fd >= 0 else None
+    if not workspace_arg:
+        sys.stderr.write("Error: --workspace is required.\n")
+        sys.exit(1)
+
+    daemon_inst = SentinelDaemon(workspace_arg)
+    ready_pipe = ready_fd_arg if ready_fd_arg is not None and ready_fd_arg >= 0 else None
 
     def _handle_term(signum, frame):
         os._exit(0)
