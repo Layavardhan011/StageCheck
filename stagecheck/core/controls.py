@@ -109,20 +109,28 @@ def validate_controls_registry(
                 errors.append(err_msg)
         else:
             # Markdown files
-            try:
-                text = control_path.read_text(encoding="utf-8")
-                if not text.strip():
-                    err_msg = f"Mandatory markdown control '{name}' is empty."
-                    if strict:
-                        raise ControlsRegistryError(err_msg)
-                    errors.append(err_msg)
-                else:
-                    validated.append(name)
-            except Exception as err:
-                err_msg = f"Failed to read markdown control '{name}': {err}"
+            if control_path.is_symlink():
+                err_msg = f"Security policy violation: Markdown control '{name}' is a symbolic link."
                 if strict:
-                    raise ControlsRegistryError(err_msg) from err
+                    raise ControlsRegistryError(err_msg)
                 errors.append(err_msg)
+            else:
+                try:
+                    from stagecheck.core.paths import read_bytes_nofollow
+                    raw_bytes = read_bytes_nofollow(control_path, max_bytes=1024 * 1024)
+                    text = raw_bytes.decode("utf-8", errors="replace")
+                    if not text.strip():
+                        err_msg = f"Mandatory markdown control '{name}' is empty."
+                        if strict:
+                            raise ControlsRegistryError(err_msg)
+                        errors.append(err_msg)
+                    else:
+                        validated.append(name)
+                except Exception as err:
+                    err_msg = f"Failed to read markdown control '{name}': {err}"
+                    if strict:
+                        raise ControlsRegistryError(err_msg) from err
+                    errors.append(err_msg)
 
     is_valid = len(missing) == 0 and len(errors) == 0
     if strict and not is_valid:

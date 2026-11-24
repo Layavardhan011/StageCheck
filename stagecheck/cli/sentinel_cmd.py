@@ -52,6 +52,7 @@ def run_sentinel(
 
     elif action == "logs":
         import os
+        import stat
         log_file = Path(sentinel.status()["log_file"])
         if log_file.is_symlink():
             print(f"ERROR: Sentinel log '{log_file}' is a symbolic link.", file=sys.stderr)
@@ -59,20 +60,29 @@ def run_sentinel(
         if not log_file.is_file():
             print(f"No Sentinel logs found at '{log_file}'.")
             return 0
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         fd = os.open(str(log_file), flags)
-        with os.fdopen(fd, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            offset = max(0, size - 65536)
-            f.seek(offset, os.SEEK_SET)
-            raw = f.read()
-        if offset > 0 and b"\n" in raw:
-            raw = raw.split(b"\n", 1)[1]
-        lines = raw.decode("utf-8", errors="replace").split("\n")[-200:]
-        content = "\n".join(lines).strip()
-        print(content if content else "Sentinel log file is empty.")
-        return 0
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                print(f"ERROR: Sentinel log '{log_file}' is not a regular file.", file=sys.stderr)
+                return 1
+            os.set_blocking(fd, True)
+            with os.fdopen(fd, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                offset = max(0, size - 65536)
+                f.seek(offset, os.SEEK_SET)
+                raw = f.read()
+            if offset > 0 and b"\n" in raw:
+                raw = raw.split(b"\n", 1)[1]
+            lines = raw.decode("utf-8", errors="replace").split("\n")[-200:]
+            content = "\n".join(lines).strip()
+            print(content if content else "Sentinel log file is empty.")
+            return 0
+        except Exception as err:
+            print(f"ERROR: Failed to read Sentinel log '{log_file}': {err}", file=sys.stderr)
+            return 1
 
     else:
         print(f"Unknown sentinel action '{action}'. Choices: start, stop, status, logs.", file=sys.stderr)

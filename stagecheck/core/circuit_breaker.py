@@ -449,10 +449,11 @@ def reset_circuit_breaker(
 
             # Pre-capture repository baseline snapshot for the new attempt
             prod_repos_file = controls_dir / "PRODUCT_REPOSITORIES.json"
-            if prod_repos_file.is_file():
+            if prod_repos_file.is_file() and not prod_repos_file.is_symlink():
                 try:
                     from stagecheck.core.branch_governance import capture_multi_repo_task_baseline
-                    prod_data = json.loads(prod_repos_file.read_text(encoding="utf-8"))
+                    from stagecheck.core.utils import load_json_file
+                    prod_data = load_json_file(prod_repos_file)
                     registered = list((prod_data.get("repositories") or {}).keys())
                     if registered:
                         capture_multi_repo_task_baseline(

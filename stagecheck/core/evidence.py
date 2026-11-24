@@ -556,12 +556,12 @@ def update_code_quality_ledger(
     report_file = ev_dir / "CODE_QUALITY_REPORT.json"
 
     data: Dict[str, Any] = {"Code Quality issue": []}
-    if report_file.is_file():
+    if report_file.is_file() and not report_file.is_symlink():
         try:
-            with open(report_file, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-                if isinstance(loaded, dict) and "Code Quality issue" in loaded:
-                    data = loaded
+            from stagecheck.core.utils import load_json_file
+            loaded = load_json_file(report_file)
+            if isinstance(loaded, dict) and "Code Quality issue" in loaded:
+                data = loaded
         except Exception:
             pass
 

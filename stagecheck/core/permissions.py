@@ -199,12 +199,14 @@ def log_teardown_audit_event(
             if pid_str.isdigit():
                 cand_pid = int(pid_str)
                 if cand_pid > 1:
-                    sentinel_pid = cand_pid
-                    import signal
-                    try:
-                        os.kill(sentinel_pid, signal.SIGTERM)
-                    except OSError:
-                        pass
+                    from stagecheck.core.sentinel import _is_sentinel_process
+                    if _is_sentinel_process(cand_pid):
+                        sentinel_pid = cand_pid
+                        import signal
+                        try:
+                            os.kill(sentinel_pid, signal.SIGTERM)
+                        except OSError:
+                            pass
             sentinel_pid_file.unlink(missing_ok=True)
         except Exception:
             pass

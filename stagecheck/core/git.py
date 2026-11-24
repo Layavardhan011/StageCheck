@@ -144,8 +144,14 @@ def _resolve_git_config_files(repo_path: Path) -> List[Path]:
         _append_safe_cfg(configs, git_entry / "config")
         _append_safe_cfg(configs, git_entry / "config.worktree")
     elif git_entry.is_file():
+        if git_entry.is_symlink():
+            raise GitError(
+                f"Security policy violation [UNSAFE_GIT_CONFIG]: Symlinked gitdir pointer '{git_entry}' prohibited."
+            )
         try:
-            text = git_entry.read_text(encoding="utf-8", errors="replace").strip()
+            from stagecheck.core.paths import read_bytes_nofollow
+            raw_bytes = read_bytes_nofollow(git_entry, max_bytes=8192)
+            text = raw_bytes.decode("utf-8", errors="replace").strip()
         except OSError as err:
             raise GitError(f"Failed to read gitdir pointer '{git_entry}': {err}") from err
         if text.startswith("gitdir:"):
@@ -164,7 +170,11 @@ def _resolve_git_config_files(repo_path: Path) -> List[Path]:
                     f"Security policy violation [UNSAFE_GIT_CONFIG]: Symlinked commondir '{commondir_file}' prohibited."
                 )
             if commondir_file.is_file():
-                raw_common = commondir_file.read_text(encoding="utf-8", errors="replace").strip()
+                try:
+                    raw_common_bytes = read_bytes_nofollow(commondir_file, max_bytes=8192)
+                    raw_common = raw_common_bytes.decode("utf-8", errors="replace").strip()
+                except OSError as err:
+                    raise GitError(f"Failed to read commondir pointer '{commondir_file}': {err}") from err
                 common_dir = (git_dir / raw_common).resolve() if not os.path.isabs(raw_common) else Path(raw_common).resolve()
                 git_dirs.append(common_dir)
                 _append_safe_cfg(configs, common_dir / "config")
@@ -297,9 +307,14 @@ def _iter_git_config_entries(
 
 def assert_safe_repo_git_config(repo_path: Path) -> None:
     """Parse repository-local git config strictly and fail closed on unsafe or redirective keys."""
+    from stagecheck.core.paths import read_bytes_nofollow
+
     for cfg_path in _resolve_git_config_files(repo_path):
+        if cfg_path.is_symlink():
+            raise GitError(f"Security policy violation [UNSAFE_GIT_CONFIG]: Symlinked git config '{cfg_path}' prohibited.")
         try:
-            raw_text = cfg_path.read_text(encoding="utf-8")
+            raw_bytes = read_bytes_nofollow(cfg_path, max_bytes=1024 * 1024)
+            raw_text = raw_bytes.decode("utf-8", errors="replace")
         except Exception as err:
             raise GitError(f"Unsafe or unparseable repository git config '{cfg_path}': {err}") from err
 

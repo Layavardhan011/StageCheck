@@ -386,14 +386,16 @@ def resolve_runner_category(binary_name: str) -> Optional[str]:
 
 def validate_npm_package_json(cwd: Path, target_script: str) -> None:
     """Validate package.json existence, JSON format, required 'test' script, and target script."""
+    from stagecheck.core.utils import load_json_file
+
     pkg_file = cwd / "package.json"
-    if not pkg_file.is_file():
+    if not pkg_file.is_file() or pkg_file.is_symlink():
         raise InvalidPackageJsonError(
-            f"Security policy violation [PACKAGE_JSON_MISSING]: package.json not found in '{cwd}'.",
+            f"Security policy violation [PACKAGE_JSON_MISSING]: package.json not found or symlinked in '{cwd}'.",
             exit_code=126,
         )
     try:
-        data = json.loads(pkg_file.read_text(encoding="utf-8"))
+        data = load_json_file(pkg_file)
     except Exception as err:
         raise InvalidPackageJsonError(
             f"Security policy violation [PACKAGE_JSON_MALFORMED]: package.json in '{cwd}' is invalid JSON: {err}",
