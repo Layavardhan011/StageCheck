@@ -187,6 +187,8 @@ def log_teardown_audit_event(
     """Append structured teardown record to evidence/teardown.log and stop Sentinel daemon."""
     root = Path(workspace_root).resolve()
     evidence_dir = root / "evidence"
+    if evidence_dir.is_symlink():
+        raise PermissionError(f"Security policy violation: evidence directory '{evidence_dir}' cannot be a symbolic link.")
     evidence_dir.mkdir(parents=True, exist_ok=True)
     teardown_log = evidence_dir / "teardown.log"
 

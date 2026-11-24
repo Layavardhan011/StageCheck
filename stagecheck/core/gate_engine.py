@@ -1925,6 +1925,8 @@ def handle_audit_verdict(
         # Initialize next attempt Phase-1 directory
         next_attempt_dir = resolve_task_attempt_dir(root, task_id, next_attempt)
         next_phase1 = next_attempt_dir / "Phase-1"
+        if next_phase1.is_symlink() or next_attempt_dir.is_symlink():
+            raise GateError("Security policy violation: Attempt directory components cannot be symbolic links.")
         task_root_dir = next_attempt_dir.parent
         with controlled_write_transaction(task_root_dir):
             next_phase1.mkdir(parents=True, exist_ok=True)

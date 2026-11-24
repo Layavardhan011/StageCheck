@@ -214,6 +214,8 @@ def create_source_zip_preserving_modes(
     """Create a ZIP archive that preserves UNIX POSIX file modes in ZipInfo.external_attr."""
     root = Path(source_root).resolve()
     out_zip = Path(zip_path).resolve()
+    if out_zip.parent.is_symlink():
+        raise PermissionError(f"Security policy violation: Zip parent directory '{out_zip.parent}' cannot be a symbolic link.")
     out_zip.parent.mkdir(parents=True, exist_ok=True)
 
     candidates: List[str]
@@ -252,6 +254,8 @@ def extract_zip_preserving_modes(
     """Extract a ZIP archive safely and restore recorded POSIX executable modes."""
     archive = Path(zip_path).resolve()
     dest = Path(dest_dir).resolve()
+    if dest.is_symlink():
+        raise PermissionError(f"Security policy violation: Destination directory '{dest}' cannot be a symbolic link.")
     dest.mkdir(parents=True, exist_ok=True)
     extracted: List[Path] = []
     req_set = set(required_executables)

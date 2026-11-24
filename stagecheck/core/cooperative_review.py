@@ -353,7 +353,22 @@ def submit_pre_commit_status(
     root = Path(workspace_root).resolve()
     attempt_dir = resolve_task_attempt_dir(root, task_id, attempt, ensure_exists=True)
     phase2a_dir = attempt_dir / "Phase-2A"
-    phase2a_dir.mkdir(parents=True, exist_ok=True)
+    if phase2a_dir.is_symlink():
+        raise ReviewGateError(f"Security policy violation: Phase-2A directory '{phase2a_dir}' cannot be a symbolic link.")
+    p2a_is_ro = not os.access(attempt_dir, os.W_OK)
+    if p2a_is_ro:
+        try:
+            _safe_chmod(attempt_dir, 0o755)
+        except OSError:
+            pass
+    try:
+        phase2a_dir.mkdir(parents=True, exist_ok=True)
+    finally:
+        if p2a_is_ro:
+            try:
+                _safe_chmod(attempt_dir, 0o555)
+            except OSError:
+                pass
 
     status_data = {
         "schema_version": "2.0",
@@ -450,7 +465,22 @@ def record_pre_commit_review(
     root = Path(workspace_root).resolve()
     attempt_dir = resolve_task_attempt_dir(root, task_id, attempt, ensure_exists=True)
     phase2a_dir = attempt_dir / "Phase-2A"
-    phase2a_dir.mkdir(parents=True, exist_ok=True)
+    if phase2a_dir.is_symlink():
+        raise ReviewGateError(f"Security policy violation: Phase-2A directory '{phase2a_dir}' cannot be a symbolic link.")
+    p2a_is_ro = not os.access(attempt_dir, os.W_OK)
+    if p2a_is_ro:
+        try:
+            _safe_chmod(attempt_dir, 0o755)
+        except OSError:
+            pass
+    try:
+        phase2a_dir.mkdir(parents=True, exist_ok=True)
+    finally:
+        if p2a_is_ro:
+            try:
+                _safe_chmod(attempt_dir, 0o555)
+            except OSError:
+                pass
 
     pre_existing_issues = pre_existing_issues or []
     architectural_intents = architectural_intents or []

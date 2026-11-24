@@ -259,6 +259,8 @@ def _save_replay_ledger(workspace_root: Path, ledger: Dict[str, Any]) -> None:
     from stagecheck.core.permissions import _safe_chmod
 
     evidence_dir = workspace_root.resolve() / "evidence"
+    if evidence_dir.is_symlink():
+        raise DispositionReplayError(f"Security policy violation: evidence directory '{evidence_dir}' cannot be a symbolic link.")
     evidence_dir.mkdir(parents=True, exist_ok=True)
     path = _replay_ledger_path(workspace_root)
     is_ev_ro = not os.access(evidence_dir, os.W_OK)

@@ -425,6 +425,8 @@ def index_seal_in_manifest(
     """
     ws = Path(workspace_root).resolve()
     manifest_file = ws / "evidence" / "EVIDENCE_MANIFEST.json"
+    if manifest_file.parent.is_symlink():
+        raise SealingError(f"Security policy violation: evidence directory '{manifest_file.parent}' cannot be a symbolic link.")
     manifest_file.parent.mkdir(parents=True, exist_ok=True)
 
     seal_file = resolve_task_attempt_dir(ws, task_id, attempt_index) / "seal.json"
