@@ -311,6 +311,8 @@ def scaffold_agent_instructions(
     """Scaffold instructions/ directory and role instruction markdown files (Specs 03, 08)."""
     root = Path(workspace_root).resolve()
     instructions_dir = root / "instructions"
+    if instructions_dir.is_symlink():
+        raise ScaffoldingError(f"Security policy violation: instructions directory '{instructions_dir}' cannot be a symbolic link.")
     instructions_dir.mkdir(parents=True, exist_ok=True)
 
     norm_a1 = validate_agent_slug(agent1_name.strip().lower())
@@ -432,6 +434,8 @@ def scaffold_task_plan(
     """Scaffold initial specs/TASK_PLAN.json roadmap (Specs 04, 10 / GAP-05)."""
     root = Path(workspace_root).resolve()
     specs_dir = root / "specs"
+    if specs_dir.is_symlink():
+        raise ScaffoldingError(f"Security policy violation: specs directory '{specs_dir}' cannot be a symbolic link.")
     specs_dir.mkdir(parents=True, exist_ok=True)
 
     plan_file = specs_dir / "TASK_PLAN.json"
@@ -485,6 +489,8 @@ def reconcile_specs_directory(
     """
     root = Path(workspace_root).resolve()
     specs_dir = root / "specs"
+    if specs_dir.is_symlink():
+        raise ScaffoldingError(f"Security policy violation: specs directory '{specs_dir}' cannot be a symbolic link.")
     specs_dir.mkdir(parents=True, exist_ok=True)
 
     reconciled_paths: Dict[str, Path] = {}
@@ -673,7 +679,10 @@ def reconcile_controls(
         reconciled_paths[filename] = file_path
 
     # Ensure qualification directory (evals) is scaffolded
-    (root / "evals").mkdir(parents=True, exist_ok=True)
+    evals_dir = root / "evals"
+    if evals_dir.is_symlink():
+        raise ScaffoldingError(f"Security policy violation: evals directory '{evals_dir}' cannot be a symbolic link.")
+    evals_dir.mkdir(parents=True, exist_ok=True)
 
     return reconciled_paths
 
@@ -754,7 +763,10 @@ def scaffold_controls_atomic(
             final_paths[filename] = dest_file
 
         # Ensure qualification directory (evals) is scaffolded
-        (root / "evals").mkdir(parents=True, exist_ok=True)
+        evals_dir = root / "evals"
+        if evals_dir.is_symlink():
+            raise ScaffoldingError(f"Security policy violation: evals directory '{evals_dir}' cannot be a symbolic link.")
+        evals_dir.mkdir(parents=True, exist_ok=True)
 
         return final_paths
 

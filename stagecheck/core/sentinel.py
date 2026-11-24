@@ -499,7 +499,10 @@ class SentinelDaemon:
     def start(self, daemon: bool = True, timeout: float = 10.0, ready_fd: Optional[int] = None) -> int:
         """Start the Sentinel daemon in background or foreground with IPC readiness protocol."""
         self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / "evidence").mkdir(parents=True, exist_ok=True)
+        ev_dir = self.root / "evidence"
+        if ev_dir.is_symlink():
+            raise SentinelError(f"Security policy violation: evidence directory '{ev_dir}' cannot be a symbolic link.")
+        ev_dir.mkdir(parents=True, exist_ok=True)
 
         if not daemon:
             lock_stack = contextlib.ExitStack()

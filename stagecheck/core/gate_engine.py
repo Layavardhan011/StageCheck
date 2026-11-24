@@ -691,21 +691,34 @@ def evaluate_gate_2b_criteria(
     if p2b_dir.is_dir() and not p2b_dir.is_symlink():
         witnesses_dir = p2b_dir / "witnesses"
         rerun_dir = p2b_dir / "rerun_outputs"
-        try:
-            witnesses_dir.mkdir(parents=True, exist_ok=True)
-            rerun_dir.mkdir(parents=True, exist_ok=True)
-            for item in list(p2b_dir.iterdir()):
-                if item.is_file() and not item.is_symlink() and item.name not in primary_phase2b_files:
-                    if (
-                        item.name.endswith((".txt", ".log", "_output", "_stderr", "_stdout"))
-                        or item.name.startswith("git_")
-                        or item.name.startswith("test_")
-                    ):
-                        dest = witnesses_dir / item.name
-                        if not dest.exists():
-                            item.rename(dest)
-        except OSError:
-            pass
+        if not witnesses_dir.is_symlink() and not rerun_dir.is_symlink():
+            p2b_is_ro = not os.access(p2b_dir, os.W_OK)
+            if p2b_is_ro:
+                try:
+                    _safe_chmod(p2b_dir, 0o755)
+                except OSError:
+                    pass
+            try:
+                witnesses_dir.mkdir(parents=True, exist_ok=True)
+                rerun_dir.mkdir(parents=True, exist_ok=True)
+                for item in list(p2b_dir.iterdir()):
+                    if item.is_file() and not item.is_symlink() and item.name not in primary_phase2b_files:
+                        if (
+                            item.name.endswith((".txt", ".log", "_output", "_stderr", "_stdout"))
+                            or item.name.startswith("git_")
+                            or item.name.startswith("test_")
+                        ):
+                            dest = witnesses_dir / item.name
+                            if not dest.exists() and not dest.is_symlink():
+                                item.rename(dest)
+            except OSError:
+                pass
+            finally:
+                if p2b_is_ro:
+                    try:
+                        _safe_chmod(p2b_dir, 0o555)
+                    except OSError:
+                        pass
 
     # 4. Discover repositories to evaluate
     from stagecheck.core.cooperative_review import resolve_governed_repo_path

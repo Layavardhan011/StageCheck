@@ -555,6 +555,8 @@ def update_code_quality_ledger(
 ) -> Path:
     """Record non-blocking maintainability/quality findings in evidence/CODE_QUALITY_REPORT.json (GAP-F2)."""
     ev_dir = Path(workspace_root).resolve() / "evidence"
+    if ev_dir.is_symlink():
+        raise EvidenceTamperError(f"Security policy violation: evidence directory '{ev_dir}' cannot be a symbolic link.")
     ev_dir.mkdir(parents=True, exist_ok=True)
     report_file = ev_dir / "CODE_QUALITY_REPORT.json"
 
