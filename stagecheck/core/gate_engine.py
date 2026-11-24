@@ -1443,7 +1443,7 @@ def _write_receipt_no_follow(workspace_root: Path, receipt_path: Path, content_s
         raise GateError(f"Refusing to follow symlinked receipt path '{safe_target}'.")
     if safe_target.exists():
         try:
-            safe_target.chmod(0o644)
+            _safe_chmod(safe_target, 0o644)
         except OSError:
             pass
     fd = os.open(safe_target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
@@ -1452,7 +1452,7 @@ def _write_receipt_no_follow(workspace_root: Path, receipt_path: Path, content_s
     finally:
         os.close(fd)
     try:
-        safe_target.chmod(0o444)
+        _safe_chmod(safe_target, 0o444)
     except OSError:
         pass
 
@@ -1611,7 +1611,7 @@ def _advance_gate_atomic_locked(
             parent_dir.mkdir(parents=True, exist_ok=True)
             if not os.access(parent_dir, os.W_OK):
                 try:
-                    os.chmod(str(parent_dir), 0o755)
+                    _safe_chmod(parent_dir, 0o755)
                 except OSError:
                     pass
 
@@ -1707,7 +1707,7 @@ def _advance_gate_atomic_locked(
         parent_is_ro = not os.access(parent_dir, os.W_OK)
         if parent_is_ro:
             try:
-                os.chmod(str(parent_dir), 0o755)
+                _safe_chmod(parent_dir, 0o755)
             except OSError:
                 pass
 
@@ -1772,7 +1772,7 @@ def _advance_gate_atomic_locked(
         # Rollback
         if created_receipt and receipt_path.exists():
             try:
-                receipt_path.chmod(0o644)
+                _safe_chmod(receipt_path, 0o644)
                 receipt_path.unlink()
             except Exception:
                 pass

@@ -31,7 +31,7 @@ from stagecheck.core.paths import (
     validate_task_id,
     write_text_nofollow,
 )
-from stagecheck.core.permissions import controlled_write_transaction
+from stagecheck.core.permissions import _safe_chmod, controlled_write_transaction
 from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_file
 
 
@@ -743,12 +743,12 @@ def add_disposition(
     evidence_dir = ws / "evidence"
     is_ev_ro = evidence_dir.is_dir() and not os.access(evidence_dir, os.W_OK)
     if is_ev_ro:
-        os.chmod(evidence_dir, 0o755)
+        _safe_chmod(evidence_dir, 0o755)
     try:
         task_dir.mkdir(parents=True, exist_ok=True)
     finally:
         if is_ev_ro:
-            os.chmod(evidence_dir, 0o555)
+            _safe_chmod(evidence_dir, 0o555)
     history_file = safe_resolve(f"TASK_{task_id}_ISSUE_HISTORY.md", task_dir, allow_symlinks=False)
     if history_file.is_symlink():
         raise DispositionError(f"Refusing to follow symlinked issue history '{history_file}'.")

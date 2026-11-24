@@ -95,14 +95,14 @@ def update_evidence_manifest(
     manifest_dir = manifest_path.parent
     is_ro = not os.access(manifest_dir, os.W_OK)
     if is_ro:
-        os.chmod(manifest_dir, 0o755)
+        _safe_chmod(manifest_dir, 0o755)
 
     try:
         write_text_nofollow(manifest_path, pretty_json_dumps(manifest), append=False, mode=0o644)
-        manifest_path.chmod(0o444)
+        _safe_chmod(manifest_path, 0o444)
     finally:
         if is_ro:
-            os.chmod(manifest_dir, 0o555)
+            _safe_chmod(manifest_dir, 0o555)
 
     return manifest_path
 
@@ -306,7 +306,7 @@ def create_task_seal(
         p3_is_ro = not os.access(p3_dir, os.W_OK)
         if p3_is_ro:
             try:
-                os.chmod(str(p3_dir), 0o755)
+                _safe_chmod(p3_dir, 0o755)
             except OSError:
                 pass
         try:

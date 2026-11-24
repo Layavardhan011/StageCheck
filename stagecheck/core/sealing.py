@@ -35,6 +35,7 @@ from stagecheck.core.paths import (
     PathOutsideBoundaryError,
     PathTraversalError,
     SymlinkPathEscapeError,
+    read_bytes_nofollow,
     validate_attempt_root_symlinks,
 )
 from stagecheck.core.permissions import (
@@ -385,7 +386,7 @@ def verify_attempt_merkle_seal(
                 .get(f"attempt_{expected_attempt}")
             )
             if indexed is not None:
-                actual_seal_sha = hashlib.sha256(seal_file.read_bytes()).hexdigest()
+                actual_seal_sha = hashlib.sha256(read_bytes_nofollow(seal_file)).hexdigest()
                 if indexed.get("seal_sha256") != actual_seal_sha:
                     violations.append("EVIDENCE_MANIFEST.json seal_sha256 does not match seal.json.")
                 if indexed.get("merkle_root_sha256") != expected_merkle_root:
@@ -427,7 +428,7 @@ def index_seal_in_manifest(
     manifest_file.parent.mkdir(parents=True, exist_ok=True)
 
     seal_file = resolve_task_attempt_dir(ws, task_id, attempt_index) / "seal.json"
-    seal_bytes = seal_file.read_bytes()
+    seal_bytes = read_bytes_nofollow(seal_file)
     seal_sha256 = hashlib.sha256(seal_bytes).hexdigest()
 
     with controlled_write_transaction(manifest_file.parent):
@@ -464,12 +465,12 @@ def index_seal_in_manifest(
         from stagecheck.core.paths import write_text_nofollow
         if manifest_file.exists():
             try:
-                manifest_file.chmod(0o644)
+                _safe_chmod(manifest_file, 0o644)
             except OSError:
                 pass
         write_text_nofollow(manifest_file, json.dumps(manifest_data, indent=2, sort_keys=True) + "\n", append=False, mode=0o444)
         try:
-            manifest_file.chmod(0o444)
+            _safe_chmod(manifest_file, 0o444)
         except OSError:
             pass
 

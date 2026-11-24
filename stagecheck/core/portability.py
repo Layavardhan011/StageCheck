@@ -13,6 +13,9 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from stagecheck.core.paths import read_bytes_nofollow
+from stagecheck.core.permissions import _safe_chmod
+
 # Prohibited personal or host-specific path patterns
 PROHIBITED_PATTERNS = [
     (re.compile(r"/home/magnus(?:\b|/|\\)"), "Personal author home directory (/home/magnus)"),
@@ -189,10 +192,10 @@ def restore_executable_permissions(
     missing: List[str] = []
     for rel in rel_paths:
         target = root / rel
-        if not target.is_file():
+        if target.is_symlink() or not target.is_file():
             missing.append(rel)
             continue
-        os.chmod(target, target_mode)
+        _safe_chmod(target, target_mode)
         restored.append(rel)
     verification = verify_executable_permissions(root, rel_paths)
     return {
@@ -229,14 +232,14 @@ def create_source_zip_preserving_modes(
         for rel in candidates:
             full = (root / rel).resolve()
             full.relative_to(root)
-            if not full.is_file():
+            if full.is_symlink() or not full.is_file():
                 continue
             st = full.lstat()
             zinfo = zipfile.ZipInfo(rel)
             zinfo.create_system = 3  # UNIX POSIX mode attributes
             file_mode = stat.S_IMODE(st.st_mode)
             zinfo.external_attr = (stat.S_IFREG | file_mode) << 16
-            zf.writestr(zinfo, full.read_bytes())
+            zf.writestr(zinfo, read_bytes_nofollow(full))
 
     return out_zip
 
@@ -282,7 +285,7 @@ def extract_zip_preserving_modes(
 
             posix_mode = (info.external_attr >> 16) & 0o777
             if info.create_system == 3 and posix_mode:
-                os.chmod(target, posix_mode)
+                _safe_chmod(target, posix_mode)
             elif info.filename in req_set:
                 raise PermissionError(
                     f"Archive entry '{info.filename}' lacks preserved POSIX executable permissions."

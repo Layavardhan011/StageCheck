@@ -9,7 +9,7 @@ from typing import Any, Dict, Union
 
 from stagecheck.core.agents_md import write_agents_contract
 from stagecheck.core.evidence import update_evidence_manifest
-from stagecheck.core.permissions import controlled_write_transaction
+from stagecheck.core.permissions import _safe_chmod, controlled_write_transaction
 from stagecheck.core.utils import load_json_file, pretty_json_dumps
 from stagecheck.schemas.validator import validate_active_state
 
@@ -47,7 +47,7 @@ def save_active_state(
     if is_runtime_lock_held(root):
         with controlled_write_transaction(controls_dir):
             write_text_nofollow(state_file, pretty_json_dumps(state_data), append=False, mode=0o644)
-            state_file.chmod(0o444)
+            _safe_chmod(state_file, 0o444)
 
             if update_contract:
                 try:
@@ -64,7 +64,7 @@ def save_active_state(
         with acquire_runtime_lock(root):
             with controlled_write_transaction(controls_dir):
                 write_text_nofollow(state_file, pretty_json_dumps(state_data), append=False, mode=0o644)
-                state_file.chmod(0o444)
+                _safe_chmod(state_file, 0o444)
 
                 if update_contract:
                     try:
