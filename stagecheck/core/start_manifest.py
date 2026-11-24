@@ -71,6 +71,10 @@ def generate_start_manifest(
     """
     root = Path(workspace_root).resolve()
     specs_dir = root / "specs"
+    if specs_dir.is_symlink():
+        raise SpecManifestSecurityError(
+            f"Symbolic link prohibited in specifications directory: '{specs_dir}'."
+        )
     specs_dir.mkdir(parents=True, exist_ok=True)
 
     _check_specs_symlinks(specs_dir)

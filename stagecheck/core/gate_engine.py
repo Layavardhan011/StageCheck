@@ -1567,8 +1567,8 @@ def _advance_gate_atomic_locked(
     )
 
     # Pre-check receipt directory and symlink containment before creating dirs/files
-    receipt_path.parent.mkdir(parents=True, exist_ok=True)
     safe_resolve(receipt_path.relative_to(root).as_posix(), root, allow_symlinks=False)
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Specialized transactional execution for Gate 4 sealing per DEC-025
     if gate_id == GateId.GATE_4:

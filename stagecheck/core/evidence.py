@@ -502,10 +502,19 @@ def append_issue_history(
     defects: List[Dict[str, Any]],
 ) -> Path:
     """Append verification results to cumulative TASK_<ID>_ISSUE_HISTORY.md ledger."""
-    task_dir = resolve_task_dir(workspace_root, task_id)
-    safe_resolve(f"evidence/tasks/{task_id}", workspace_root, allow_symlinks=False)
-    task_dir.mkdir(parents=True, exist_ok=True)
-    history_file = safe_resolve(f"evidence/tasks/{task_id}/TASK_{task_id}_ISSUE_HISTORY.md", workspace_root, allow_symlinks=False)
+    ws = Path(workspace_root).resolve()
+    evidence_dir = ws / "evidence"
+    is_ev_ro = evidence_dir.is_dir() and not os.access(evidence_dir, os.W_OK)
+    if is_ev_ro:
+        _safe_chmod(evidence_dir, 0o755)
+    try:
+        task_dir = resolve_task_dir(ws, task_id)
+        safe_resolve(f"evidence/tasks/{task_id}", ws, allow_symlinks=False)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        history_file = safe_resolve(f"evidence/tasks/{task_id}/TASK_{task_id}_ISSUE_HISTORY.md", ws, allow_symlinks=False)
+    finally:
+        if is_ev_ro:
+            _safe_chmod(evidence_dir, 0o555)
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     lines = [

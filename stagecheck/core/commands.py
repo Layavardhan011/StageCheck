@@ -796,7 +796,12 @@ def execute_secure_command(
 
     # Persist logs if requested
     if log_dir:
-        log_path = Path(log_dir).resolve()
+        raw_log_path = Path(log_dir)
+        if raw_log_path.is_symlink():
+            raise CommandSecurityError(f"Refusing to write execution logs to symlinked directory '{log_dir}'.")
+        log_path = raw_log_path.resolve()
+        if log_path.is_symlink():
+            raise CommandSecurityError(f"Refusing to write execution logs to symlinked directory '{log_path}'.")
         log_path.mkdir(parents=True, exist_ok=True)
         from stagecheck.core.paths import write_text_nofollow
         write_text_nofollow(log_path / "stdout.log", stdout_str, append=False, mode=0o644)

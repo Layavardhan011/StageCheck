@@ -3809,8 +3809,20 @@ def update_rubric_artifacts(
     task_id = rubric_payload["task_id"]
     attempt = rubric_payload["attempt"]
 
-    p2a_dir = resolve_task_attempt_dir(root, task_id, attempt) / "Phase-2A"
-    p2a_dir.mkdir(parents=True, exist_ok=True)
+    attempt_dir = resolve_task_attempt_dir(root, task_id, attempt)
+    p2a_dir = attempt_dir / "Phase-2A"
+    if p2a_dir.is_symlink():
+        raise RubricEvaluationError(f"Refusing to save rubric evaluation to symlinked directory '{p2a_dir}'.")
+    is_ro = attempt_dir.is_dir() and not os.access(attempt_dir, os.W_OK)
+    if is_ro:
+        from stagecheck.core.permissions import _safe_chmod
+        _safe_chmod(attempt_dir, 0o755)
+    try:
+        p2a_dir.mkdir(parents=True, exist_ok=True)
+    finally:
+        if is_ro:
+            from stagecheck.core.permissions import _safe_chmod
+            _safe_chmod(attempt_dir, 0o555)
 
     rubric_file = p2a_dir / "rubric_evaluation.json"
     from stagecheck.core.paths import write_text_nofollow

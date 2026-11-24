@@ -363,10 +363,10 @@ def run_init(
         print(f"ERROR: [init.scaffolding_failed] {err}", file=sys.stderr)
         # Clean up any partially scaffolded directories if controls was not created
         instructions_dir = workspace_root / "instructions"
-        if instructions_dir.is_dir() and not controls_dir.is_dir():
+        if instructions_dir.is_dir() and not instructions_dir.is_symlink() and not controls_dir.is_dir():
             shutil.rmtree(instructions_dir, ignore_errors=True)
         specs_dir = workspace_root / "specs"
-        if specs_dir.is_dir() and not controls_dir.is_dir():
+        if specs_dir.is_dir() and not specs_dir.is_symlink() and not controls_dir.is_dir():
             shutil.rmtree(specs_dir, ignore_errors=True)
         return 1
     except Exception as err:
