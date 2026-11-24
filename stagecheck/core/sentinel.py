@@ -393,7 +393,8 @@ class SentinelDaemon:
         state_file = self.root / "controls" / "ACTIVE_STATE.json"
         if state_file.is_file() and not state_file.is_symlink():
             try:
-                state = json.loads(state_file.read_text(encoding="utf-8"))
+                from stagecheck.core.state import load_active_state
+                state = load_active_state(self.root)
                 last_ts_str = state.get("watchdog", {}).get("last_active_timestamp")
                 if last_ts_str:
                     last_ts = datetime.datetime.fromisoformat(last_ts_str.replace("Z", "+00:00"))
@@ -1097,17 +1098,22 @@ class SentinelDaemon:
             size = self.log_file.stat().st_size
             if size < self._MAX_LOG_BYTES:
                 return
-            with self.log_file.open("rb") as f:
-                f.seek(max(0, size - self._ROTATE_KEEP_BYTES), os.SEEK_SET)
-                tail = f.read()
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(str(self.log_file), flags)
+            try:
+                with os.fdopen(fd, "rb") as f:
+                    f.seek(max(0, size - self._ROTATE_KEEP_BYTES), os.SEEK_SET)
+                    tail = f.read()
+            except Exception:
+                return
             if b"\n" in tail:
                 tail = tail.split(b"\n", 1)[1]
             flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(str(self.log_file), flags)
+            w_fd = os.open(str(self.log_file), flags)
             try:
-                os.write(fd, tail)
+                os.write(w_fd, tail)
             finally:
-                os.close(fd)
+                os.close(w_fd)
         except OSError:
             pass
 

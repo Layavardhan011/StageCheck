@@ -138,9 +138,10 @@ class TopologyWorktreeManager:
     def _load_registered_repos(self) -> Dict[str, Dict[str, Any]]:
         """Load declared repositories from controls/PRODUCT_REPOSITORIES.json or auto-discover."""
         prod_repos_file = self.workspace_root / "controls" / "PRODUCT_REPOSITORIES.json"
-        if prod_repos_file.is_file():
+        if prod_repos_file.is_file() and not prod_repos_file.is_symlink():
             try:
-                data = json.loads(prod_repos_file.read_text(encoding="utf-8"))
+                from stagecheck.core.utils import load_json_file
+                data = load_json_file(prod_repos_file)
                 return data.get("repositories", {})
             except Exception:
                 pass

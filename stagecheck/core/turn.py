@@ -77,9 +77,9 @@ def check_and_record_turn_rate_limit(
         now = time.time()
         timestamps: List[float] = []
 
-        if tracker_file.is_file():
+        if tracker_file.is_file() and not tracker_file.is_symlink():
             try:
-                raw = json.loads(tracker_file.read_text(encoding="utf-8"))
+                raw = load_json_file(tracker_file)
                 if isinstance(raw, list):
                     timestamps = [float(ts) for ts in raw]
             except Exception:

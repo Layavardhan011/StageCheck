@@ -244,7 +244,8 @@ def _load_replay_ledger(workspace_root: Path) -> Dict[str, Any]:
     if not path.is_file():
         return {"schema_version": "1.0", "nonces": {}, "disposition_ids": {}}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        from stagecheck.core.utils import load_json_file
+        data = load_json_file(path)
         if not isinstance(data, dict):
             raise ValueError("ledger root must be an object")
         data.setdefault("nonces", {})
@@ -575,14 +576,16 @@ def get_dispositions_path(workspace_root: Path) -> Path:
 def load_dispositions(workspace_root: Path) -> Dict[str, Any]:
     """Load or initialize controls/DISPOSITIONS.json."""
     disp_path = get_dispositions_path(workspace_root)
+    if disp_path.is_symlink():
+        raise DispositionError("controls/DISPOSITIONS.json cannot be a symbolic link.")
     if not disp_path.is_file():
         return {
             "schema_version": "2.0",
             "dispositions": [],
         }
     try:
-        with open(disp_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        from stagecheck.core.utils import load_json_file
+        return load_json_file(disp_path)
     except Exception as err:
         raise DispositionError(f"Failed to load controls/DISPOSITIONS.json: {err}") from err
 
@@ -955,7 +958,8 @@ def resume_after_disposition(
                         f"Verdict file not found or symlinked for task '{task_id}' at '{verdict_file}'."
                     )
                 try:
-                    verdict = json.loads(verdict_file.read_text(encoding="utf-8"))
+                    from stagecheck.core.utils import load_json_file
+                    verdict = load_json_file(verdict_file)
                     if not isinstance(verdict, dict):
                         raise ValueError("verdict.json root must be a JSON object.")
                 except Exception as err:

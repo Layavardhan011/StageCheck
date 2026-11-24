@@ -633,14 +633,16 @@ def get_repo_remote_push_urls(repo_path: Union[str, Path]) -> List[str]:
 
 def get_approved_remote_urls(workspace_root: Union[str, Path]) -> Set[str]:
     """Resolve approved push URLs from protected workspace controls (controls/ only)."""
+    from stagecheck.core.utils import load_json_file
+
     root = Path(workspace_root).resolve()
     approved: Set[str] = set()
 
     # 1. controls/remotes.json (protected under 0555/0444 controls/)
     c_remotes = root / "controls" / "remotes.json"
-    if c_remotes.is_file():
+    if c_remotes.is_file() and not c_remotes.is_symlink():
         try:
-            data = json.loads(c_remotes.read_text(encoding="utf-8"))
+            data = load_json_file(c_remotes)
             for u in data.get("approved_push_urls", []):
                 approved.add(u)
         except Exception:
@@ -648,9 +650,9 @@ def get_approved_remote_urls(workspace_root: Union[str, Path]) -> Set[str]:
 
     # 2. controls/PRODUCT_REPOSITORIES.json (AGENTS.md SHA-256 bound)
     prod_repos = root / "controls" / "PRODUCT_REPOSITORIES.json"
-    if prod_repos.is_file():
+    if prod_repos.is_file() and not prod_repos.is_symlink():
         try:
-            data = json.loads(prod_repos.read_text(encoding="utf-8"))
+            data = load_json_file(prod_repos)
             for u in data.get("approved_push_urls", []):
                 approved.add(u)
             for repo_meta in data.get("repositories", {}).values():
