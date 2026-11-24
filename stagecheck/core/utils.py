@@ -6,6 +6,7 @@ agent slug validation, and robust JSON handling.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -228,11 +229,22 @@ def strict_json_loads(content: str, source: str = "<memory>") -> Any:
 def load_json_file(path: Union[str, Path]) -> Any:
     """Load and parse JSON from a file with strict RFC 8259 enforcement."""
     file_path = Path(path)
+    if file_path.is_symlink():
+        raise JSONParseError(f"Security policy violation: Refusing to read symlinked JSON file '{file_path}'.")
     if not file_path.is_file():
         raise FileNotFoundError(f"JSON file does not exist: {file_path}")
 
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        content = file_path.read_text(encoding="utf-8")
+        fd = os.open(str(file_path), flags)
+    except OSError as err:
+        if err.errno == errno.ELOOP:
+            raise JSONParseError(f"Security policy violation: Refusing to follow symlink '{file_path}'.") from err
+        raise FileNotFoundError(f"Cannot securely open JSON file '{file_path}': {err}") from err
+
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as f:
+            content = f.read()
         return strict_json_loads(content, source=str(file_path))
     except UnicodeDecodeError as err:
         raise JSONParseError(f"UTF-8 decoding failed for '{file_path}': {err}") from err

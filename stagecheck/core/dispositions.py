@@ -108,7 +108,8 @@ def _load_active_state_safe(workspace_root: Path) -> Dict[str, Any]:
     if not state_file.is_file() or state_file.is_symlink():
         return {}
     try:
-        data = json.loads(state_file.read_text(encoding="utf-8"))
+        from stagecheck.core.utils import load_json_file
+        data = load_json_file(state_file)
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -159,7 +160,10 @@ def parse_owner_grants(workspace_root: Path) -> Dict[str, Set[str]]:
         raise UnauthorizedDispositionError("Missing controls/OWNER_GRANTS.md; cannot verify human waiver grants.")
 
     try:
-        text = grants_path.read_text(encoding="utf-8")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(grants_path), flags)
+        with os.fdopen(fd, "r", encoding="utf-8") as f:
+            text = f.read()
     except Exception as err:
         raise UnauthorizedDispositionError(f"Failed to read controls/OWNER_GRANTS.md: {err}") from err
 

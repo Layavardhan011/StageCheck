@@ -38,6 +38,7 @@ from stagecheck.core.paths import (
     validate_attempt_root_symlinks,
 )
 from stagecheck.core.permissions import controlled_write_transaction, elevate_permissions_for_teardown
+from stagecheck.core.utils import load_json_file
 
 
 class SealingError(Exception):
@@ -366,9 +367,11 @@ def verify_attempt_merkle_seal(
 
     # Cross-check verdict against Phase-3/verdict.json if present
     verdict_file = attempt_path / "Phase-3" / "verdict.json"
-    if verdict_file.is_file():
+    if verdict_file.is_symlink():
+        violations.append(f"Security policy violation: Phase-3/verdict.json is a symlink: '{verdict_file}'.")
+    elif verdict_file.is_file():
         try:
-            disk_verdict = json.loads(verdict_file.read_text(encoding="utf-8"))
+            disk_verdict = load_json_file(verdict_file)
             if seal_data.get("verdict") != disk_verdict:
                 violations.append("Seal verdict metadata diverges from Phase-3/verdict.json.")
         except Exception as err:
@@ -376,9 +379,11 @@ def verify_attempt_merkle_seal(
 
     # Cross-check EVIDENCE_MANIFEST.json if indexed for this task/attempt
     manifest_file = ws_root / "evidence" / "EVIDENCE_MANIFEST.json"
-    if manifest_file.is_file():
+    if manifest_file.is_symlink():
+        violations.append(f"Security policy violation: evidence/EVIDENCE_MANIFEST.json is a symlink: '{manifest_file}'.")
+    elif manifest_file.is_file():
         try:
-            manifest_data = json.loads(manifest_file.read_text(encoding="utf-8"))
+            manifest_data = load_json_file(manifest_file)
             indexed = (
                 manifest_data.get("sealed_tasks", {})
                 .get(expected_task_id, {})
@@ -431,9 +436,11 @@ def index_seal_in_manifest(
     seal_sha256 = hashlib.sha256(seal_bytes).hexdigest()
 
     with controlled_write_transaction(manifest_file.parent):
+        if manifest_file.is_symlink():
+            raise SealingError(f"Security policy violation: Refusing to read symlinked EVIDENCE_MANIFEST.json '{manifest_file}'.")
         if manifest_file.is_file():
             try:
-                manifest_data = json.loads(manifest_file.read_text(encoding="utf-8"))
+                manifest_data = load_json_file(manifest_file)
                 if not isinstance(manifest_data, dict):
                     raise SealingError("EVIDENCE_MANIFEST.json root must be a JSON object.")
             except Exception as err:

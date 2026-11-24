@@ -46,9 +46,9 @@ def resolve_governed_repo_path(root: Path, repo_name: str) -> Path:
         raise ReviewGateError(f"Invalid repository name '{repo_name}'.")
 
     prod_repos_file = root / "controls" / "PRODUCT_REPOSITORIES.json"
-    if prod_repos_file.is_file():
+    if prod_repos_file.is_file() and not prod_repos_file.is_symlink():
         try:
-            p_data = json.loads(prod_repos_file.read_text(encoding="utf-8"))
+            p_data = load_json_file(prod_repos_file)
         except Exception as err:
             raise ReviewGateError(f"Malformed PRODUCT_REPOSITORIES.json: {err}") from err
         registered = p_data.get("repositories")
@@ -181,8 +181,11 @@ def verify_precommit_scope(
     if not scope_file.is_file():
         return ["Missing Phase-1/declared_scope.json: declared scope required for pre-commit review."]
 
+    if scope_file.is_symlink():
+        return [f"Phase-1 declared_scope.json is an insecure symbolic link: '{scope_file}'"]
+
     try:
-        scope_data = json.loads(scope_file.read_text(encoding="utf-8"))
+        scope_data = load_json_file(scope_file)
     except Exception as err:
         return [f"Failed to load declared_scope.json: {err}"]
 
@@ -512,9 +515,9 @@ def record_pre_commit_review(
     }
 
     existing_review_file = phase2a_dir / "pre_commit_review.json"
-    if existing_review_file.is_file():
+    if existing_review_file.is_file() and not existing_review_file.is_symlink():
         try:
-            existing_rev = json.loads(existing_review_file.read_text(encoding="utf-8"))
+            existing_rev = load_json_file(existing_review_file)
             if isinstance(existing_rev, dict) and isinstance(existing_rev.get("agent_assisted_reviews"), dict):
                 review_data["agent_assisted_reviews"] = existing_rev["agent_assisted_reviews"]
         except Exception:

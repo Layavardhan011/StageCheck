@@ -506,7 +506,8 @@ class SentinelDaemon:
             state_file = self.root / "controls" / "ACTIVE_STATE.json"
             if state_file.is_file() and not state_file.is_symlink():
                 try:
-                    state_data = json.loads(state_file.read_text(encoding="utf-8"))
+                    from stagecheck.core.state import load_active_state
+                    state_data = load_active_state(self.root)
                     agents = (
                         state_data.get("protected", {}).get("registered_agents")
                         or state_data.get("registered_agents")
@@ -541,7 +542,8 @@ class SentinelDaemon:
             state_file = self.root / "controls" / "ACTIVE_STATE.json"
             if state_file.is_file() and not state_file.is_symlink():
                 try:
-                    state_data = json.loads(state_file.read_text(encoding="utf-8"))
+                    from stagecheck.core.state import load_active_state
+                    state_data = load_active_state(self.root)
                     agents = (
                         state_data.get("protected", {}).get("registered_agents")
                         or state_data.get("registered_agents")
@@ -761,7 +763,8 @@ class SentinelDaemon:
         state_file = self.root / "controls" / "ACTIVE_STATE.json"
         if state_file.is_file() and not state_file.is_symlink():
             try:
-                state_data = json.loads(state_file.read_text(encoding="utf-8"))
+                from stagecheck.core.state import load_active_state
+                state_data = load_active_state(self.root)
                 active_task = state_data.get("task_id", "None")
                 agents = (
                     state_data.get("protected", {}).get("registered_agents")
@@ -901,7 +904,8 @@ class SentinelDaemon:
                 state_file = self.root / "controls" / "ACTIVE_STATE.json"
                 if state_file.is_file() and not state_file.is_symlink():
                     try:
-                        st_data = json.loads(state_file.read_text(encoding="utf-8"))
+                        from stagecheck.core.state import load_active_state
+                        st_data = load_active_state(self.root)
                         phase = st_data.get("phase", "IDLE")
                     except Exception:
                         phase = "IDLE"
@@ -999,7 +1003,8 @@ class SentinelDaemon:
                     state_file = self.root / "controls" / "ACTIVE_STATE.json"
                     if state_file.is_file() and not state_file.is_symlink():
                         try:
-                            st_data = json.loads(state_file.read_text(encoding="utf-8"))
+                            from stagecheck.core.state import load_active_state
+                            st_data = load_active_state(self.root)
                             phase = st_data.get("phase", "IDLE")
                         except Exception:
                             phase = "IDLE"
