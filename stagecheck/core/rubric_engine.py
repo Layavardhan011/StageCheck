@@ -2249,7 +2249,7 @@ def _collect_rubric_context(
                             if declared_scope and not is_path_in_scope(ws_rel, declared_scope):
                                 if ws_rel not in out_of_scope_files:
                                     out_of_scope_files.append(ws_rel)
-                    diff_patch = run_safe_git(r_dir, ["diff", "-U0", f"{base_sha}..{cur_sha}"])
+                    diff_patch = run_safe_git(r_dir, ["diff", "-U0", "--end-of-options", f"{base_sha}..{cur_sha}", "--"])
                     if diff_patch.returncode == 0:
                         for dline in diff_patch.stdout.splitlines():
                             if dline.startswith("-") and not dline.startswith("---") and ("assert" in dline or "pytest.raises" in dline):

@@ -151,7 +151,8 @@ def write_agents_contract(workspace_root: Path) -> Path:
     contract_content = render_agents_contract(controls_dir)
 
     agents_md_path = root / "AGENTS.md"
-    agents_md_path.write_text(contract_content, encoding="utf-8")
+    from stagecheck.core.paths import write_text_nofollow
+    write_text_nofollow(agents_md_path, contract_content, append=False, mode=0o644)
     return agents_md_path
 
 

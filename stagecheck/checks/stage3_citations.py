@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from stagecheck.checks.base import AuditContext, Defect, StageResult
-from stagecheck.core.paths import StageCheckPathError, safe_resolve
+from stagecheck.core.paths import StageCheckPathError, read_bytes_nofollow, safe_resolve
 
 MAX_CITATION_FILE_SIZE = 20 * 1024 * 1024  # 20 MiB
 
@@ -132,7 +132,8 @@ def run_stage3_citations(ctx: AuditContext) -> StageResult:
                         continue
 
                     try:
-                        content_lines = target_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+                        raw_bytes = read_bytes_nofollow(target_file, max_bytes=MAX_CITATION_FILE_SIZE)
+                        content_lines = raw_bytes.decode("utf-8", errors="ignore").splitlines()
                         start_line = lines[0]
                         end_line = lines[1]
                         total_lines = len(content_lines)

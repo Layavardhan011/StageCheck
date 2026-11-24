@@ -106,7 +106,7 @@ def _detect_timeout_masking(workspace_root: Path, task_id: str, attempt: int) ->
         if not base_head:
             continue
 
-        res = run_safe_git(repo_dir, ["diff", "-U0", f"{base_head}..HEAD"])
+        res = run_safe_git(repo_dir, ["diff", "-U0", "--end-of-options", f"{base_head}..HEAD", "--"])
         if res.returncode != 0:
             continue
 
@@ -362,11 +362,19 @@ def reset_circuit_breaker(
         raise ResetAttemptsError("ACTIVE_STATE.json not found in controls directory.")
 
     if require_tty and not confirmed:
-        if not sys.stdin.isatty():
+        if not sys.stdin.isatty() or "pytest" in sys.modules or "unittest" in sys.modules:
             raise ResetAttemptsError(
                 "Non-interactive reset-attempts blocked: resetting circuit breaker requires an "
                 "interactive terminal or explicit human confirmation (--yes)."
             )
+        try:
+            choice = input(
+                f"\nConfirm resetting circuit breaker on task '{task_id}'? [YES/NO] (Default: NO): "
+            ).strip().upper()
+        except (EOFError, OSError):
+            choice = "NO"
+        if choice not in ("YES", "Y"):
+            raise ResetAttemptsError("Circuit breaker reset cancelled by operator.")
 
     from stagecheck.core.dispositions import UnauthorizedDispositionError, is_human_identity, parse_owner_grants
     from stagecheck.core.state import load_active_state, save_active_state

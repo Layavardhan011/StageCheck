@@ -126,9 +126,10 @@ def build_sanitized_environment(
             if not any(sub in var.upper() for sub in SENSITIVE_ENV_SUBSTRINGS):
                 clean[var] = val
 
-    # Enforce bytecode suppression and ephemeral sandbox HOME
+    # Enforce bytecode suppression and ephemeral sandbox HOME and TMPDIR
     clean["PYTHONDONTWRITEBYTECODE"] = "1"
     clean["HOME"] = "/tmp"
+    clean["TMPDIR"] = "/tmp"
 
     # Auto-discover GOROOT, GOPATH, and GOMODCACHE if missing from environment and go binary exists
     if shutil.which("go"):
@@ -783,8 +784,9 @@ def execute_secure_command(
     if log_dir:
         log_path = Path(log_dir).resolve()
         log_path.mkdir(parents=True, exist_ok=True)
-        (log_path / "stdout.log").write_text(stdout_str, encoding="utf-8")
-        (log_path / "stderr.log").write_text(stderr_str, encoding="utf-8")
+        from stagecheck.core.paths import write_text_nofollow
+        write_text_nofollow(log_path / "stdout.log", stdout_str, append=False, mode=0o644)
+        write_text_nofollow(log_path / "stderr.log", stderr_str, append=False, mode=0o644)
 
     record = CommandExecutionRecord(
         command_argv=argv,

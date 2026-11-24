@@ -378,7 +378,19 @@ def _build_safe_git_command(
             if flag not in effective_args:
                 effective_args.insert(1, flag)
 
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    # SEC-02: Strict environment allowlist to prevent dynamic linker injection (LD_PRELOAD)
+    # and accidental host secret leakage (tokens, passwords, keys) to git child processes.
+    allowlisted_git_env = {
+        "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "TERM", "TZ", "TMPDIR", "HOME",
+    }
+    sensitive_git_substrings = (
+        "TOKEN", "KEY", "SECRET", "PASSWORD", "AUTH", "PRELOAD", "LIBRARY_PATH",
+    )
+    clean_env = {
+        k: v for k, v in os.environ.items()
+        if (k in allowlisted_git_env or k.startswith("GIT_AUTHOR_") or k.startswith("GIT_COMMITTER_"))
+        and not any(sub in k.upper() for sub in sensitive_git_substrings)
+    }
     clean_env.update(
         {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),

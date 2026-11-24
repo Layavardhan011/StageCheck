@@ -236,7 +236,8 @@ def capture_multi_repo_task_baseline(
         }
 
     # Write record
-    baseline_file.write_text(pretty_json_dumps(baselines), encoding="utf-8")
+    from stagecheck.core.paths import write_text_nofollow
+    write_text_nofollow(baseline_file, pretty_json_dumps(baselines), append=False, mode=0o644)
     return baselines
 
 

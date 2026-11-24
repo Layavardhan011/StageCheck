@@ -10,8 +10,13 @@ import contextlib
 import fcntl
 import os
 import stat
+import threading
 from pathlib import Path
-from typing import Generator, Optional
+from typing import Dict, Generator, Optional, Tuple
+
+# Tracking for runtime locks currently held by thread: (thread_ident, lock_path) -> fd
+_HELD_RUNTIME_LOCKS: Dict[Tuple[int, Path], int] = {}
+_LOCK_TRACK_MUTEX = threading.Lock()
 
 
 class LockError(Exception):
@@ -93,6 +98,15 @@ def acquire_bootstrap_lock(workspace_root: Path) -> Generator[int, None, None]:
         os.close(fd)
 
 
+def is_runtime_lock_held(target_dir: Path) -> bool:
+    """Return True if the current thread holds .stagecheck.lock for target workspace."""
+    resolved = Path(target_dir).resolve()
+    ws_root = resolved.parent if resolved.name == "controls" else resolved
+    lock_file = (ws_root / ".stagecheck.lock").resolve()
+    with _LOCK_TRACK_MUTEX:
+        return (threading.get_ident(), lock_file) in _HELD_RUNTIME_LOCKS
+
+
 @contextlib.contextmanager
 def acquire_runtime_lock(target_dir: Path) -> Generator[int, None, None]:
     """Acquire the shared exclusive non-blocking runtime lock on .stagecheck.lock.
@@ -111,7 +125,15 @@ def acquire_runtime_lock(target_dir: Path) -> Generator[int, None, None]:
     """
     resolved = Path(target_dir).resolve()
     ws_root = resolved.parent if resolved.name == "controls" else resolved
-    lock_file = ws_root / ".stagecheck.lock"
+    lock_file = (ws_root / ".stagecheck.lock").resolve()
+    lock_key = (threading.get_ident(), lock_file)
+
+    # If already held by this thread or another, fail closed with LockCollisionError
+    with _LOCK_TRACK_MUTEX:
+        if lock_key in _HELD_RUNTIME_LOCKS:
+            raise LockCollisionError(
+                "Workspace runtime is locked by an active StageCheck operation (.stagecheck.lock held)."
+            )
 
     # Atomic creation and descriptor acquisition with mode 0600 (reject symlinks & non-regular files)
     if lock_file.is_symlink():
@@ -131,6 +153,9 @@ def acquire_runtime_lock(target_dir: Path) -> Generator[int, None, None]:
                 "Workspace runtime is locked by an active StageCheck operation (.stagecheck.lock held)."
             ) from err
 
+        with _LOCK_TRACK_MUTEX:
+            _HELD_RUNTIME_LOCKS[lock_key] = fd
+
         try:
             os.utime(fd, None)
         except OSError:
@@ -139,6 +164,8 @@ def acquire_runtime_lock(target_dir: Path) -> Generator[int, None, None]:
         yield fd
 
     finally:
+        with _LOCK_TRACK_MUTEX:
+            _HELD_RUNTIME_LOCKS.pop(lock_key, None)
         try:
             os.utime(fd, None)
         except OSError:
