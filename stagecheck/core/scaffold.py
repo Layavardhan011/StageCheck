@@ -650,6 +650,8 @@ def reconcile_controls(
     """
     root = Path(workspace_root).resolve()
     controls_dir = root / "controls"
+    if controls_dir.is_symlink():
+        raise ScaffoldingError(f"controls directory cannot be a symbolic link: '{controls_dir}'")
     controls_dir.mkdir(parents=True, exist_ok=True)
 
     descriptors = build_control_descriptors(
@@ -738,6 +740,8 @@ def scaffold_controls_atomic(
                 fault_injector(filename)
 
         # 2. Commit transaction: move staged files into controls/
+        if controls_dir.is_symlink():
+            raise ScaffoldingError(f"controls directory cannot be a symbolic link: '{controls_dir}'")
         controls_dir.mkdir(parents=True, exist_ok=True)
         created_in_controls = True
 
@@ -787,6 +791,8 @@ def scaffold_remotes_config(
 
     root = Path(workspace_root).resolve()
     controls_dir = root / "controls"
+    if controls_dir.is_symlink():
+        raise ScaffoldingError(f"controls directory cannot be a symbolic link: '{controls_dir}'")
     controls_dir.mkdir(parents=True, exist_ok=True)
     remotes_path = safe_resolve("controls/remotes.json", root, allow_symlinks=False)
 

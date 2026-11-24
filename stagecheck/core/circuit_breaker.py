@@ -242,11 +242,20 @@ def write_escalation_report(
 ) -> Path:
     """Generate diagnostic escalation_report.md under evidence/tasks/<task_id>/."""
     from stagecheck.core.paths import find_workspace_root, resolve_task_dir, safe_resolve, write_text_nofollow
+    from stagecheck.core.permissions import _safe_chmod
     ws_root = Path(workspace_root).resolve()
-    safe_resolve(f"evidence/tasks/{task_id}", ws_root, allow_symlinks=False)
-    task_dir = resolve_task_dir(ws_root, task_id)
-    task_dir.mkdir(parents=True, exist_ok=True)
-    report_file = safe_resolve(f"evidence/tasks/{task_id}/escalation_report.md", ws_root, allow_symlinks=False)
+    evidence_dir = ws_root / "evidence"
+    is_ev_ro = evidence_dir.is_dir() and not os.access(evidence_dir, os.W_OK)
+    if is_ev_ro:
+        _safe_chmod(evidence_dir, 0o755)
+    try:
+        safe_resolve(f"evidence/tasks/{task_id}", ws_root, allow_symlinks=False)
+        task_dir = resolve_task_dir(ws_root, task_id)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        report_file = safe_resolve(f"evidence/tasks/{task_id}/escalation_report.md", ws_root, allow_symlinks=False)
+    finally:
+        if is_ev_ro:
+            _safe_chmod(evidence_dir, 0o555)
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     lines = [
@@ -307,6 +316,8 @@ def trip_circuit_breaker(
     from stagecheck.core.state import load_active_state, save_active_state
 
     controls_dir = workspace_root / "controls"
+    if controls_dir.is_symlink():
+        raise CircuitBreakerError(f"Refusing to trip breaker on symlinked controls directory: '{controls_dir}'")
     controls_dir.mkdir(parents=True, exist_ok=True)
     with acquire_runtime_lock(controls_dir):
         with controlled_write_transaction(controls_dir):

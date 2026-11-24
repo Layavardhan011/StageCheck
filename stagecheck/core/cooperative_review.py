@@ -383,8 +383,18 @@ def append_to_cumulative_issue_history(
     new_issues: List[Dict[str, Any]],
 ) -> None:
     """Append newly discovered defects to cumulative TASK_<ID>_ISSUE_HISTORY.md."""
-    task_dir = resolve_task_dir(workspace_root, task_id)
-    task_dir.mkdir(parents=True, exist_ok=True)
+    evidence_dir = workspace_root / "evidence"
+    is_ev_ro = evidence_dir.is_dir() and not os.access(evidence_dir, os.W_OK)
+    if is_ev_ro:
+        from stagecheck.core.permissions import _safe_chmod
+        _safe_chmod(evidence_dir, 0o755)
+    try:
+        task_dir = resolve_task_dir(workspace_root, task_id)
+        task_dir.mkdir(parents=True, exist_ok=True)
+    finally:
+        if is_ev_ro:
+            from stagecheck.core.permissions import _safe_chmod
+            _safe_chmod(evidence_dir, 0o555)
     history_file = safe_resolve(f"TASK_{task_id}_ISSUE_HISTORY.md", task_dir, allow_symlinks=False)
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()

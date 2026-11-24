@@ -6,6 +6,7 @@ routing with strict path containment, and normalized turn tracking.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -194,13 +195,23 @@ def resolve_task_attempt_dir(
         ) from err
 
     if ensure_exists:
-        task_dir = target_dir.parent
-        if task_dir.is_dir():
-            from stagecheck.core.permissions import controlled_write_transaction
-            with controlled_write_transaction(task_dir):
+        evidence_dir = root / "evidence"
+        is_ev_ro = evidence_dir.is_dir() and not os.access(evidence_dir, os.W_OK)
+        if is_ev_ro:
+            from stagecheck.core.permissions import _safe_chmod
+            _safe_chmod(evidence_dir, 0o755)
+        try:
+            task_dir = target_dir.parent
+            if task_dir.is_dir():
+                from stagecheck.core.permissions import controlled_write_transaction
+                with controlled_write_transaction(task_dir):
+                    target_dir.mkdir(parents=True, exist_ok=True)
+            else:
                 target_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            target_dir.mkdir(parents=True, exist_ok=True)
+        finally:
+            if is_ev_ro:
+                from stagecheck.core.permissions import _safe_chmod
+                _safe_chmod(evidence_dir, 0o555)
 
     return target_dir
 
@@ -241,13 +252,23 @@ def resolve_agent_response_dir(
         )
 
     if ensure_exists:
-        task_dir = target_dir.parent
-        if task_dir.is_dir():
-            from stagecheck.core.permissions import controlled_write_transaction
-            with controlled_write_transaction(task_dir):
+        evidence_dir = root / "evidence"
+        is_ev_ro = evidence_dir.is_dir() and not os.access(evidence_dir, os.W_OK)
+        if is_ev_ro:
+            from stagecheck.core.permissions import _safe_chmod
+            _safe_chmod(evidence_dir, 0o755)
+        try:
+            task_dir = target_dir.parent
+            if task_dir.is_dir():
+                from stagecheck.core.permissions import controlled_write_transaction
+                with controlled_write_transaction(task_dir):
+                    target_dir.mkdir(parents=True, exist_ok=True)
+            else:
                 target_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            target_dir.mkdir(parents=True, exist_ok=True)
+        finally:
+            if is_ev_ro:
+                from stagecheck.core.permissions import _safe_chmod
+                _safe_chmod(evidence_dir, 0o555)
 
     return target_dir
 

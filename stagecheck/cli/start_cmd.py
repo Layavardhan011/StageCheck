@@ -3,6 +3,7 @@
 Initializes a task under exclusive transaction locking, resets state to Attempt 1
 in PHASE_1_PLANNING, and scaffolds task attempt evidence directory.
 """
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -103,7 +104,17 @@ def run_start(workspace: Optional[Path] = None, task: Optional[str] = None) -> i
                 save_active_state(ws_root, state)
 
                 task_phase1_dir = task_dir / "attempt_1" / "Phase-1"
-                task_phase1_dir.mkdir(parents=True, exist_ok=True)
+                evidence_dir = ws_root / "evidence"
+                is_ev_ro = evidence_dir.is_dir() and not os.access(evidence_dir, os.W_OK)
+                if is_ev_ro:
+                    from stagecheck.core.permissions import _safe_chmod
+                    _safe_chmod(evidence_dir, 0o755)
+                try:
+                    task_phase1_dir.mkdir(parents=True, exist_ok=True)
+                finally:
+                    if is_ev_ro:
+                        from stagecheck.core.permissions import _safe_chmod
+                        _safe_chmod(evidence_dir, 0o555)
 
                 # Capture baseline for registered repositories
                 prod_repos_file = controls_dir / "PRODUCT_REPOSITORIES.json"
