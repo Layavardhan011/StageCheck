@@ -12,6 +12,7 @@ import hmac
 import json
 import os
 import re
+import stat
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -234,9 +235,25 @@ def evaluate_gate_1_criteria(
     criteria: List[GateCriterion] = []
     deliverables: List[Dict[str, str]] = []
 
-    # 1. prompt.md
+    # 1. prompt.md (SEC-21: atomic descriptor-level open with O_NOFOLLOW)
     prompt_file = p1_dir / "prompt.md"
-    if prompt_file.is_symlink() or not prompt_file.is_file():
+    content = ""
+    prompt_read_ok = False
+    if not prompt_file.is_symlink():
+        try:
+            fd = os.open(str(prompt_file), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                st = os.fstat(fd)
+                if stat.S_ISREG(st.st_mode):
+                    with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as f:
+                        content = f.read()
+                    prompt_read_ok = True
+            finally:
+                os.close(fd)
+        except OSError:
+            prompt_read_ok = False
+
+    if not prompt_read_ok:
         criteria.append(GateCriterion(
             criterion_id="gate1.prompt_exists",
             description="Phase 1 prompt blueprint exists and is readable",
@@ -244,7 +261,6 @@ def evaluate_gate_1_criteria(
             message=f"Missing or symlinked required artifact: '{prompt_file.relative_to(workspace_root)}'",
         ))
     else:
-        content = prompt_file.read_text(encoding="utf-8")
         if not content.strip():
             criteria.append(GateCriterion(
                 criterion_id="gate1.prompt_non_empty",
@@ -1214,9 +1230,23 @@ def evaluate_gate_4_criteria(
                         )
                     )
 
-    # 2. Verdict check
+    # 2. Verdict check (SEC-21: atomic descriptor-level open with O_NOFOLLOW)
     verdict_file = attempt_dir / "Phase-3" / "verdict.json"
-    if not verdict_file.is_file() or verdict_file.is_symlink():
+    verdict_data = None
+    if not verdict_file.is_symlink():
+        try:
+            fd = os.open(str(verdict_file), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                st = os.fstat(fd)
+                if stat.S_ISREG(st.st_mode):
+                    with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as f:
+                        verdict_data = json.loads(f.read())
+            finally:
+                os.close(fd)
+        except Exception:
+            verdict_data = None
+
+    if verdict_data is None:
         criteria.append(
             GateCriterion(
                 criterion_id="G4-VERDICT-PASSED",
@@ -1226,46 +1256,35 @@ def evaluate_gate_4_criteria(
             )
         )
     else:
-        try:
-            verdict_data = json.loads(verdict_file.read_text(encoding="utf-8"))
-            v_status = verdict_data.get("status") or verdict_data.get("result")
-            counts_obj = verdict_data.get("counts") if isinstance(verdict_data.get("counts"), dict) else {}
-            blocking_count = max(
-                int(counts_obj.get("blocking", 0) or 0),
-                int(verdict_data.get("blocking_defects_count", 0) or 0),
+        v_status = verdict_data.get("status") or verdict_data.get("result")
+        counts_obj = verdict_data.get("counts") if isinstance(verdict_data.get("counts"), dict) else {}
+        blocking_count = max(
+            int(counts_obj.get("blocking", 0) or 0),
+            int(verdict_data.get("blocking_defects_count", 0) or 0),
+        )
+        if v_status in ("PASSED", "CLEAR") and blocking_count == 0:
+            criteria.append(
+                GateCriterion(
+                    criterion_id="G4-VERDICT-PASSED",
+                    description="Phase 3 audit verdict status verification",
+                    status="MET",
+                    message=f"Phase 3 verdict verified with status {v_status}",
+                )
             )
-            if v_status in ("PASSED", "CLEAR") and blocking_count == 0:
-                criteria.append(
-                    GateCriterion(
-                        criterion_id="G4-VERDICT-PASSED",
-                        description="Phase 3 audit verdict status verification",
-                        status="MET",
-                        message=f"Phase 3 verdict verified with status {v_status}",
-                    )
-                )
-            else:
-                criteria.append(
-                    GateCriterion(
-                        criterion_id="G4-VERDICT-PASSED",
-                        description="Phase 3 audit verdict status verification",
-                        status="FAILED",
-                        message=f"Phase 3 verdict is not PASSED (status: '{v_status}', blocking defects: {blocking_count})",
-                    )
-                )
-            deliverables.append({
-                "path": str(verdict_file.relative_to(workspace_root)),
-                "sha256": sha256_file(verdict_file),
-                "status": "VALID",
-            })
-        except Exception as err:
+        else:
             criteria.append(
                 GateCriterion(
                     criterion_id="G4-VERDICT-PASSED",
                     description="Phase 3 audit verdict status verification",
                     status="FAILED",
-                    message=f"Malformed verdict.json: {err}",
+                    message=f"Phase 3 verdict is not PASSED (status: '{v_status}', blocking defects: {blocking_count})",
                 )
             )
+        deliverables.append({
+            "path": str(verdict_file.relative_to(workspace_root)),
+            "sha256": sha256_file(verdict_file),
+            "status": "VALID",
+        })
 
     return criteria, deliverables
 
@@ -1559,11 +1578,18 @@ def _advance_gate_atomic_locked(
 
         verdict_file = attempt_dir / "Phase-3" / "verdict.json"
         verdict_data: Dict[str, Any] = {}
-        if verdict_file.is_file():
+        if verdict_file.is_file() and not verdict_file.is_symlink():
             try:
-                verdict_data = json.loads(verdict_file.read_text(encoding="utf-8"))
+                fd = os.open(str(verdict_file), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    st = os.fstat(fd)
+                    if stat.S_ISREG(st.st_mode):
+                        with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as f:
+                            verdict_data = json.loads(f.read())
+                finally:
+                    os.close(fd)
             except Exception:
-                pass
+                verdict_data = {}
 
         manifest_path = root / "evidence" / "EVIDENCE_MANIFEST.json"
         state_path = root / "controls" / "ACTIVE_STATE.json"
