@@ -172,9 +172,19 @@ class SecretScanner:
             )
             launch_cmd, _ = prepare_isolated_command(cmd, policy, mandatory=True)
 
+        # Sanitize scanner environment (SEC-09): purge dynamic linker overrides and ambient secrets
+        safe_env = dict(env if env is not None else os.environ)
+        for drop in ("LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH"):
+            safe_env.pop(drop, None)
+        safe_env = {
+            k: v for k, v in safe_env.items()
+            if not any(token in k.upper() for token in ("TOKEN", "SECRET", "KEY", "AUTH", "PASS"))
+            and not k.startswith("GITLEAKS_")
+        }
+
         return subprocess.run(
             launch_cmd,
-            env=env,
+            env=safe_env,
             capture_output=True,
             text=True,
             check=False,

@@ -459,15 +459,15 @@ def index_seal_in_manifest(
                 "indexed_at": datetime.now(timezone.utc).isoformat(),
             }
 
-        temp_manifest = manifest_file.with_suffix(".tmp")
-        temp_manifest.write_text(json.dumps(manifest_data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        from stagecheck.core.paths import write_text_nofollow
+        if manifest_file.exists():
+            try:
+                manifest_file.chmod(0o644)
+            except OSError:
+                pass
+        write_text_nofollow(manifest_file, json.dumps(manifest_data, indent=2, sort_keys=True) + "\n", append=False, mode=0o444)
         try:
-            os.chmod(temp_manifest, 0o444)
-        except OSError:
-            pass
-        temp_manifest.replace(manifest_file)
-        try:
-            os.chmod(manifest_file, 0o444)
+            manifest_file.chmod(0o444)
         except OSError:
             pass
 

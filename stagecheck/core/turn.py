@@ -13,6 +13,7 @@ import datetime
 import fcntl
 import json
 import os
+import stat
 import sys
 import threading
 import time
@@ -23,7 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.gate_engine import normalize_phase
 from stagecheck.core.locking import acquire_runtime_lock
-from stagecheck.core.paths import find_workspace_root
+from stagecheck.core.paths import find_workspace_root, write_text_nofollow
 from stagecheck.core.state import load_active_state, save_active_state
 from stagecheck.core.utils import canonical_json_dumps, load_json_file
 from stagecheck.schemas.validator import validate_turn_status
@@ -64,9 +65,14 @@ def check_and_record_turn_rate_limit(
     tracker_file = workspace_root / ".stagecheck_turn_tracker.json"
     lock_file = workspace_root / ".stagecheck_turn_tracker.lock"
 
-    # Synchronize read-modify-write across concurrent agent processes and threads
-    fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o600)
+    # Synchronize read-modify-write across concurrent agent processes and threads (SEC-11)
+    if lock_file.is_symlink():
+        raise PermissionError(f"Turn lock '{lock_file}' is an insecure symbolic link.")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(lock_file), flags, 0o600)
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise PermissionError(f"Turn lock '{lock_file}' is not a regular file.")
         fcntl.flock(fd, fcntl.LOCK_EX)
         now = time.time()
         timestamps: List[float] = []
@@ -88,13 +94,10 @@ def check_and_record_turn_rate_limit(
             return False, retry_after
 
         recent.append(now)
-        tmp_file = tracker_file.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
         try:
-            tmp_file.write_text(json.dumps(recent), encoding="utf-8")
-            os.replace(tmp_file, tracker_file)
+            write_text_nofollow(tracker_file, json.dumps(recent), append=False, mode=0o644)
         except Exception:
-            if tmp_file.exists():
-                tmp_file.unlink(missing_ok=True)
+            pass
 
         return True, 0.0
     finally:

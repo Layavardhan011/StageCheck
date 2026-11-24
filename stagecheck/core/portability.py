@@ -255,10 +255,27 @@ def extract_zip_preserving_modes(
             if info.is_dir():
                 continue
             target = (dest / info.filename).resolve()
-            target.relative_to(dest)
+            try:
+                target.relative_to(dest)
+            except ValueError:
+                raise PermissionError(f"Archive entry '{info.filename}' attempts path traversal outside destination.")
             target.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info, "r") as src, open(target, "wb") as dst:
-                dst.write(src.read())
+            if target.is_symlink():
+                raise PermissionError(f"Refusing to extract into symbolic link target '{target}'.")
+
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(str(target), flags, 0o644)
+            try:
+                with zf.open(info, "r") as src, os.fdopen(fd, "wb", closefd=False) as dst:
+                    total_written = 0
+                    max_file_size = 50 * 1024 * 1024  # 50 MB limit per entry to prevent decompression bombs
+                    while chunk := src.read(64 * 1024):
+                        total_written += len(chunk)
+                        if total_written > max_file_size:
+                            raise ValueError(f"Decompression bomb detected: file '{info.filename}' exceeds limit.")
+                        dst.write(chunk)
+            finally:
+                os.close(fd)
 
             posix_mode = (info.external_attr >> 16) & 0o777
             if info.create_system == 3 and posix_mode:

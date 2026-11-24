@@ -10,10 +10,11 @@ from __future__ import annotations
 import datetime
 import os
 import re
+import stat
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from stagecheck.core.paths import safe_resolve
+from stagecheck.core.paths import safe_resolve, write_text_nofollow
 from stagecheck.core.utils import sha256_file
 
 
@@ -117,9 +118,7 @@ def generate_start_manifest(
     ])
 
     manifest_content = "".join(manifest_lines)
-    tmp_manifest = specs_dir / f".{START_MANIFEST_FILENAME}.tmp"
-    tmp_manifest.write_text(manifest_content, encoding="utf-8")
-    os.replace(str(tmp_manifest), str(manifest_file))
+    write_text_nofollow(manifest_file, manifest_content, append=False, mode=0o644)
     return manifest_file
 
 
@@ -132,7 +131,20 @@ def parse_start_manifest(workspace_root: Union[str, Path]) -> Dict[str, str]:
     if manifest_file.is_symlink():
         raise SpecManifestSecurityError(f"START_MANIFEST.md is a symlink: '{manifest_file}'")
 
-    text = manifest_file.read_text(encoding="utf-8")
+    # Read manifest using O_NOFOLLOW descriptor to prevent TOCTOU symlink swap (SEC-10)
+    try:
+        fd = os.open(str(manifest_file), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise SpecManifestSecurityError(f"START_MANIFEST.md is not a regular file: '{manifest_file}'")
+            with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as f:
+                text = f.read()
+        finally:
+            os.close(fd)
+    except OSError as e:
+        raise SpecManifestSecurityError(f"Cannot securely read START_MANIFEST.md: {e}") from e
+
     entries: Dict[str, str] = {}
 
     # Parse Markdown table rows: | `file` | `specs/file` | `hash` | ... |

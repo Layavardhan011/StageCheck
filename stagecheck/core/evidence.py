@@ -573,12 +573,10 @@ def update_code_quality_ledger(
         os.chmod(ev_dir, 0o755)
 
     try:
-        tmp_file = report_file.with_suffix(".tmp")
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            f.write(pretty_json_dumps(data))
+        from stagecheck.core.paths import write_text_nofollow
         if report_file.exists():
             report_file.chmod(0o644)
-        os.replace(tmp_file, report_file)
+        write_text_nofollow(report_file, pretty_json_dumps(data), append=False, mode=0o644)
         report_file.chmod(0o444)
     finally:
         if is_ro:

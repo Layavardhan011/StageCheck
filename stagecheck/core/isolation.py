@@ -244,13 +244,18 @@ def build_bwrap_argv(
             val = os.environ.get(env_key)
             if not val and env_key in ("GOROOT", "GOPATH", "GOMODCACHE") and shutil.which("go"):
                 try:
-                    res = subprocess.run(["go", "env", env_key], capture_output=True, text=True, timeout=5)
+                    minimal_env = {"PATH": os.environ.get("PATH", ""), "HOME": "/tmp"}
+                    res = subprocess.run(["go", "env", env_key], env=minimal_env, capture_output=True, text=True, timeout=5)
                     if res.returncode == 0 and res.stdout.strip():
                         val = res.stdout.strip()
                 except Exception:
                     pass
             if val:
                 tc_path = Path(val).resolve()
+                # SEC-13: Validate tc_path does not resolve to sensitive credentials or configurations
+                sensitive_dirs = (".ssh", ".gnupg", ".config", ".aws", ".azure", ".kube")
+                if any(part in tc_path.parts for part in sensitive_dirs):
+                    continue
                 if (
                     tc_path.is_dir()
                     and tc_path not in seen_toolchain

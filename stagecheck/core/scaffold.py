@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from stagecheck.core.git import RepoBaseline
+from stagecheck.core.paths import write_text_nofollow
 from stagecheck.core.start_manifest import generate_start_manifest
 from stagecheck.core.utils import (
     canonical_json_dumps,
@@ -396,7 +397,7 @@ def scaffold_agent_instructions(
                 f"- MUST NOT modify control descriptors in `controls/*` or edit `.stagecheck.lock`.\n"
                 f"- MUST NOT alter Gitleaks configuration or create `.gitleaksignore` override files.\n"
             )
-            single_path.write_text(single_content, encoding="utf-8")
+            write_text_nofollow(single_path, single_content, append=False, mode=0o644)
         paths[single_path.name] = single_path
     else:
         # Dual-agent separate instructions
@@ -407,7 +408,7 @@ def scaffold_agent_instructions(
                 f"Role: `prompt_and_audit`.\n\n"
                 + DEFAULT_AGENT1_INSTRUCTIONS_MD[DEFAULT_AGENT1_INSTRUCTIONS_MD.find("## Purpose"):]
             )
-            a1_path.write_text(a1_content, encoding="utf-8")
+            write_text_nofollow(a1_path, a1_content, append=False, mode=0o644)
         paths[a1_path.name] = a1_path
 
         a2_path = instructions_dir / f"{norm_a2}_code_implementation.md"
@@ -417,7 +418,7 @@ def scaffold_agent_instructions(
                 f"Role: `code_implementation`.\n\n"
                 + DEFAULT_AGENT2_INSTRUCTIONS_MD[DEFAULT_AGENT2_INSTRUCTIONS_MD.find("## Purpose"):]
             )
-            a2_path.write_text(a2_content, encoding="utf-8")
+            write_text_nofollow(a2_path, a2_content, append=False, mode=0o644)
         paths[a2_path.name] = a2_path
 
     return paths
@@ -462,9 +463,7 @@ def scaffold_task_plan(
                 }
             ],
         }
-        tmp_plan = specs_dir / ".TASK_PLAN.json.tmp"
-        tmp_plan.write_text(deterministic_json_dumps(initial_plan), encoding="utf-8")
-        os.replace(str(tmp_plan), str(plan_file))
+        write_text_nofollow(plan_file, deterministic_json_dumps(initial_plan), append=False, mode=0o644)
 
     return plan_file
 
@@ -506,9 +505,7 @@ def reconcile_specs_directory(
             "## 1. System Overview\nDocument core system modules and execution boundaries.\n\n"
             "## 2. Protocol Invariants\nDefine non-negotiable blockchain and security invariants.\n"
         )
-        tmp_arch = specs_dir / ".ARCHITECTURE.md.tmp"
-        tmp_arch.write_text(arch_content, encoding="utf-8")
-        os.replace(str(tmp_arch), str(arch_file))
+        write_text_nofollow(arch_file, arch_content, append=False, mode=0o644)
     reconciled_paths["ARCHITECTURE.md"] = arch_file
 
     # 3. Handle START_MANIFEST.md
@@ -667,7 +664,7 @@ def reconcile_controls(
     for filename, content in descriptors.items():
         file_path = controls_dir / filename
         if not file_path.exists():
-            file_path.write_text(content, encoding="utf-8")
+            write_text_nofollow(file_path, content, append=False, mode=0o644)
             if filename.endswith(".json"):
                 data = json.loads(content)
                 validate_control_descriptor(filename, data)
@@ -817,9 +814,7 @@ def scaffold_remotes_config(
 
     if changed:
         data["approved_push_urls"] = urls
-        tmp_path = controls_dir / ".remotes.json.tmp"
-        tmp_path.write_text(pretty_json_dumps(data), encoding="utf-8")
-        os.replace(str(tmp_path), str(remotes_path))
+        write_text_nofollow(remotes_path, pretty_json_dumps(data), append=False, mode=0o644)
 
     return remotes_path
 

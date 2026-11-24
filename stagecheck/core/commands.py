@@ -131,25 +131,26 @@ def build_sanitized_environment(
     clean["HOME"] = "/tmp"
     clean["TMPDIR"] = "/tmp"
 
-    # Auto-discover GOROOT, GOPATH, and GOMODCACHE if missing from environment and go binary exists
+    # Auto-discover GOROOT, GOPATH, and GOMODCACHE with minimal environment (SEC-13)
     if shutil.which("go"):
+        minimal_go_env = {"PATH": os.environ.get("PATH", ""), "HOME": "/tmp"}
         if "GOROOT" not in clean:
             try:
-                res = subprocess.run(["go", "env", "GOROOT"], capture_output=True, text=True, timeout=5)
+                res = subprocess.run(["go", "env", "GOROOT"], env=minimal_go_env, capture_output=True, text=True, timeout=5)
                 if res.returncode == 0 and res.stdout.strip():
                     clean["GOROOT"] = res.stdout.strip()
             except Exception:
                 pass
         if "GOPATH" not in clean:
             try:
-                res = subprocess.run(["go", "env", "GOPATH"], capture_output=True, text=True, timeout=5)
+                res = subprocess.run(["go", "env", "GOPATH"], env=minimal_go_env, capture_output=True, text=True, timeout=5)
                 if res.returncode == 0 and res.stdout.strip():
                     clean["GOPATH"] = res.stdout.strip()
             except Exception:
                 pass
         if "GOMODCACHE" not in clean:
             try:
-                res = subprocess.run(["go", "env", "GOMODCACHE"], capture_output=True, text=True, timeout=5)
+                res = subprocess.run(["go", "env", "GOMODCACHE"], env=minimal_go_env, capture_output=True, text=True, timeout=5)
                 if res.returncode == 0 and res.stdout.strip():
                     clean["GOMODCACHE"] = res.stdout.strip()
             except Exception:

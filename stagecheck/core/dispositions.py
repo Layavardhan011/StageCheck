@@ -29,6 +29,7 @@ from stagecheck.core.paths import (
     resolve_task_dir,
     safe_resolve,
     validate_task_id,
+    write_text_nofollow,
 )
 from stagecheck.core.permissions import controlled_write_transaction
 from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_file
@@ -260,9 +261,7 @@ def _save_replay_ledger(workspace_root: Path, ledger: Dict[str, Any]) -> None:
     if was_file_ro:
         os.chmod(path, 0o644)
     try:
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(pretty_json_dumps(ledger), encoding="utf-8")
-        os.replace(tmp, path)
+        write_text_nofollow(path, pretty_json_dumps(ledger), append=False, mode=0o644)
     finally:
         if was_file_ro and path.exists():
             os.chmod(path, 0o444)
@@ -717,11 +716,8 @@ def add_disposition(
             new_list.append(new_entry)
             disp_data["dispositions"] = new_list
 
-            # Atomic replace
-            tmp_disp = disp_path.with_suffix(".tmp")
-            with open(tmp_disp, "w", encoding="utf-8") as f:
-                f.write(pretty_json_dumps(disp_data))
-            os.replace(tmp_disp, disp_path)
+            # Atomic replace via write_text_nofollow (SEC-08)
+            write_text_nofollow(disp_path, pretty_json_dumps(disp_data), append=False, mode=0o644)
 
             # 3. Re-render AGENTS.md to update SHA-256 table binding
             write_agents_contract(ws)
@@ -761,8 +757,8 @@ def add_disposition(
         f"- **Rationale:** {rationale}\n",
         f"- **SHA-256 Digest:** `{disp_hash}`\n",
     ]
-    with open(history_file, "a", encoding="utf-8") as f:
-        f.write("".join(event_lines))
+    with controlled_write_transaction(task_dir):
+        write_text_nofollow(history_file, "".join(event_lines), append=True, mode=0o644)
 
     update_evidence_manifest(workspace_root, [history_file])
 
@@ -852,10 +848,8 @@ def revoke_disposition(
                     f"(disposition_id={disposition_id}, defect_id={defect_id})."
                 )
 
-            tmp_disp = disp_path.with_suffix(".tmp")
-            with open(tmp_disp, "w", encoding="utf-8") as f:
-                f.write(pretty_json_dumps(disp_data))
-            os.replace(tmp_disp, disp_path)
+            # Atomic replace via write_text_nofollow (SEC-08)
+            write_text_nofollow(disp_path, pretty_json_dumps(disp_data), append=False, mode=0o644)
             write_agents_contract(ws)
 
     record_waiver_in_replay_ledger(ws, revoked_entry, status_override="REVOKED", finalized=True)
