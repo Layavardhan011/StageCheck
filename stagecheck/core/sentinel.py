@@ -14,10 +14,8 @@ import contextlib
 import ctypes
 import datetime
 import fcntl
-import html
 import json
 import os
-import re
 import select
 import signal
 import stat
@@ -25,10 +23,12 @@ import struct
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 
 class SentinelError(Exception):
@@ -153,6 +153,9 @@ def send_desktop_notification(
     and terminates CLI options with '--'.
     Fails silently if notify-send or desktop environment is absent.
     """
+    import html
+    import subprocess
+
     safe_urgency = urgency if urgency in _ALLOWED_URGENCY else "normal"
     safe_icon = icon if isinstance(icon, str) and not icon.startswith("-") else "dialog-information"
     safe_title = html.escape(str(title), quote=True)
@@ -362,6 +365,7 @@ class SentinelDaemon:
         self.root = Path(workspace_root).resolve()
         self.pid_file = self.root / ".stagecheck_sentinel.pid"
         self._daemon_lock_file = self.root / ".stagecheck_sentinel.lock"
+        self._runtime_lock_file = self.root / ".stagecheck.lock"
         self.log_file = self.root / "evidence" / "sentinel.log"
         self._libc: Optional[ctypes.CDLL] = None
         self._inotify_fd: Optional[int] = None
@@ -385,12 +389,13 @@ class SentinelDaemon:
 
     def _init_libc(self) -> None:
         if self._libc is None:
-            import ctypes.util
-            libc_name = ctypes.util.find_library("c") or "libc.so.6"
             try:
-                self._libc = ctypes.CDLL(libc_name, use_errno=True)
+                self._libc = ctypes.CDLL("libc.so.6", use_errno=True)
             except OSError:
                 self._libc = ctypes.CDLL(None, use_errno=True)
+            if hasattr(self._libc, "malloc_trim"):
+                self._libc.malloc_trim.argtypes = [ctypes.c_size_t]
+                self._libc.malloc_trim.restype = ctypes.c_int
 
     @contextlib.contextmanager
     def _acquire_daemon_lock(self):
@@ -575,6 +580,8 @@ class SentinelDaemon:
                 env.pop(key, None)
 
             env["PYTHONNOUSERSITE"] = "1"
+            env["PYTHONNODEBUGRANGES"] = "1"
+            env["MALLOC_ARENA_MAX"] = "2"
 
             cmd = [
                 python_bin,
@@ -586,6 +593,8 @@ class SentinelDaemon:
                 "--ready-fd",
                 str(w_pipe),
             ]
+
+            import subprocess
 
             process: Optional[subprocess.Popen] = None
             try:
@@ -954,11 +963,14 @@ class SentinelDaemon:
                                 processed_any = True
                             except BlockingIOError:
                                 break
-                        if processed_any and self._libc and hasattr(self._libc, "malloc_trim"):
-                            try:
-                                self._libc.malloc_trim(0)
-                            except Exception:
-                                pass
+                        if processed_any:
+                            import gc
+                            gc.collect()
+                            if self._libc and hasattr(self._libc, "malloc_trim"):
+                                try:
+                                    self._libc.malloc_trim(0)
+                                except Exception:
+                                    pass
 
                 # Check watchdog periodically for active agent phases
                 try:
@@ -989,7 +1001,9 @@ class SentinelDaemon:
         """Return True if an authorized StageCheck runtime lock transaction is active or just completed."""
         if self._in_process_transaction:
             return True
-        lock_file = self.root / ".stagecheck.lock"
+        lock_file = getattr(self, "_runtime_lock_file", None)
+        if lock_file is None:
+            lock_file = self.root / ".stagecheck.lock"
         if lock_file.is_symlink() or not lock_file.is_file():
             return False
         try:

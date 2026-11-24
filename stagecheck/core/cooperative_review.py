@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.git import SAFE_GIT_SECURITY_FLAGS, run_safe_git, run_safe_git_bytes, split_git_nul_paths
-from stagecheck.core.paths import StageCheckPathError, resolve_task_dir, safe_resolve
+from stagecheck.core.paths import StageCheckPathError, resolve_task_dir, safe_resolve, write_text_nofollow
 from stagecheck.core.utils import canonical_json_dumps, load_json_file, pretty_json_dumps, sha256_digest, validate_schema
 from stagecheck.schemas import get_schema_path
 
@@ -369,7 +369,7 @@ def submit_pre_commit_status(
     validate_schema(status_data, schema)
 
     status_file = phase2a_dir / "pre_commit_status.json"
-    status_file.write_text(pretty_json_dumps(status_data), encoding="utf-8")
+    write_text_nofollow(status_file, pretty_json_dumps(status_data), append=False, mode=0o644)
     return status_file
 
 
@@ -392,8 +392,10 @@ def append_to_cumulative_issue_history(
         desc = issue.get("description", issue.get("message", "Issue description"))
         lines.append(f"- **[{code}]**: {desc}\n")
 
-    with history_file.open("a", encoding="utf-8") as f:
-        f.writelines(lines)
+    from stagecheck.core.permissions import controlled_write_transaction
+
+    with controlled_write_transaction(task_dir):
+        write_text_nofollow(history_file, "".join(lines), append=True, mode=0o644)
 
     from stagecheck.core.evidence import update_evidence_manifest
     update_evidence_manifest(workspace_root, [history_file])
@@ -534,7 +536,7 @@ def record_pre_commit_review(
         "feedback": summary,
         "remediation_required": [i.get("description", str(i)) for i in new_issues],
     }
-    response_file.write_text(pretty_json_dumps(response_content), encoding="utf-8")
+    write_text_nofollow(response_file, pretty_json_dumps(response_content), append=False, mode=0o644)
 
     # 2. Append to cumulative issue history if new defects found
     if new_issues:
@@ -542,7 +544,7 @@ def record_pre_commit_review(
 
     # 3. Write pre_commit_review.json
     review_file = phase2a_dir / "pre_commit_review.json"
-    review_file.write_text(pretty_json_dumps(review_data), encoding="utf-8")
+    write_text_nofollow(review_file, pretty_json_dumps(review_data), append=False, mode=0o644)
     return review_file
 
 

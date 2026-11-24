@@ -194,7 +194,13 @@ def resolve_task_attempt_dir(
         ) from err
 
     if ensure_exists:
-        target_dir.mkdir(parents=True, exist_ok=True)
+        task_dir = target_dir.parent
+        if task_dir.is_dir():
+            from stagecheck.core.permissions import controlled_write_transaction
+            with controlled_write_transaction(task_dir):
+                target_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            target_dir.mkdir(parents=True, exist_ok=True)
 
     return target_dir
 
@@ -235,7 +241,13 @@ def resolve_agent_response_dir(
         )
 
     if ensure_exists:
-        target_dir.mkdir(parents=True, exist_ok=True)
+        task_dir = target_dir.parent
+        if task_dir.is_dir():
+            from stagecheck.core.permissions import controlled_write_transaction
+            with controlled_write_transaction(task_dir):
+                target_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            target_dir.mkdir(parents=True, exist_ok=True)
 
     return target_dir
 

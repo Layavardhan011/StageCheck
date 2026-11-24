@@ -1902,8 +1902,11 @@ def handle_audit_verdict(
             save_active_state(root, state)
 
         # Initialize next attempt Phase-1 directory
-        next_phase1 = resolve_task_attempt_dir(root, task_id, next_attempt) / "Phase-1"
-        next_phase1.mkdir(parents=True, exist_ok=True)
+        next_attempt_dir = resolve_task_attempt_dir(root, task_id, next_attempt)
+        next_phase1 = next_attempt_dir / "Phase-1"
+        task_root_dir = next_attempt_dir.parent
+        with controlled_write_transaction(task_root_dir):
+            next_phase1.mkdir(parents=True, exist_ok=True)
 
         return {
             "action": "ATTEMPT_INCREMENTED",

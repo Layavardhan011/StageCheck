@@ -291,13 +291,14 @@ def create_task_seal(
     # Verify task_id/attempt symlink safety and write seal atomically (O_NOFOLLOW)
     if seal_path.is_symlink():
         raise EvidenceTamperError(f"Refusing to follow symlinked seal file '{seal_path}'.")
-    tmp_seal = seal_path.with_suffix(f".tmp.{os.getpid()}")
-    tmp_fd = os.open(tmp_seal, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-    try:
-        os.write(tmp_fd, pretty_json_dumps(seal_data).encode("utf-8"))
-    finally:
-        os.close(tmp_fd)
-    os.replace(tmp_seal, seal_path)
+    with controlled_write_transaction(attempt_dir):
+        tmp_seal = seal_path.with_suffix(f".tmp.{os.getpid()}")
+        tmp_fd = os.open(tmp_seal, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        try:
+            os.write(tmp_fd, pretty_json_dumps(seal_data).encode("utf-8"))
+        finally:
+            os.close(tmp_fd)
+        os.replace(tmp_seal, seal_path)
 
     # Also update Phase-3 copy if Phase-3 directory exists
     p3_dir = attempt_dir / "Phase-3"
@@ -535,7 +536,8 @@ def append_issue_history(
         lines.append("All 9 verification stages passed with zero defects.\n")
 
     content_to_append = "".join(lines)
-    write_text_nofollow(history_file, content_to_append, append=True, mode=0o644)
+    with controlled_write_transaction(task_dir):
+        write_text_nofollow(history_file, content_to_append, append=True, mode=0o644)
 
     # Index history file in evidence manifest
     update_evidence_manifest(workspace_root, [history_file])
