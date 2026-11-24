@@ -33,7 +33,7 @@ from stagecheck.core.git import (
 )
 from stagecheck.core.locking import acquire_runtime_lock
 from stagecheck.core.paths import StageCheckPathError, safe_resolve, sha256_file_nofollow, validate_task_id
-from stagecheck.core.permissions import freeze_phase_directory
+from stagecheck.core.permissions import _safe_chmod, freeze_phase_directory
 from stagecheck.core.state import load_active_state, save_active_state
 from stagecheck.core.utils import (
     canonical_json_dumps,
@@ -1641,25 +1641,16 @@ def _advance_gate_atomic_locked(
             if not master_seal_path.is_symlink():
                 task_dir = master_seal_path.parent
                 if task_dir.is_dir() and not os.access(task_dir, os.W_OK):
-                    try:
-                        os.chmod(task_dir, 0o755)
-                    except OSError:
-                        pass
+                    _safe_chmod(task_dir, 0o755)
                 if master_seal_path.exists():
-                    try:
-                        os.chmod(master_seal_path, 0o644)
-                    except OSError:
-                        pass
+                    _safe_chmod(master_seal_path, 0o644)
                 seal_bytes = (json.dumps(seal_record, indent=2, sort_keys=True) + "\n").encode("utf-8")
                 m_fd = os.open(master_seal_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
                 try:
                     os.write(m_fd, seal_bytes)
                 finally:
                     os.close(m_fd)
-                try:
-                    os.chmod(master_seal_path, 0o444)
-                except OSError:
-                    pass
+                _safe_chmod(master_seal_path, 0o444)
                 journal.record_staged_write(master_seal_path)
 
             # Write Phase-3/seal.json copy for phase-level visibility
@@ -1668,24 +1659,15 @@ def _advance_gate_atomic_locked(
                 p3_seal_path = p3_dir / "seal.json"
                 if not p3_seal_path.is_symlink():
                     if not os.access(p3_dir, os.W_OK):
-                        try:
-                            os.chmod(p3_dir, 0o755)
-                        except OSError:
-                            pass
+                        _safe_chmod(p3_dir, 0o755)
                     if p3_seal_path.exists():
-                        try:
-                            os.chmod(p3_seal_path, 0o644)
-                        except OSError:
-                            pass
+                        _safe_chmod(p3_seal_path, 0o644)
                     p3_fd = os.open(p3_seal_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
                     try:
                         os.write(p3_fd, seal_bytes)
                     finally:
                         os.close(p3_fd)
-                    try:
-                        os.chmod(p3_seal_path, 0o444)
-                    except OSError:
-                        pass
+                    _safe_chmod(p3_seal_path, 0o444)
                     journal.record_staged_write(p3_seal_path)
 
             # Index seal downstream in EVIDENCE_MANIFEST.json

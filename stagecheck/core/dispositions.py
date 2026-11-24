@@ -256,22 +256,24 @@ def _load_replay_ledger(workspace_root: Path) -> Dict[str, Any]:
 
 
 def _save_replay_ledger(workspace_root: Path, ledger: Dict[str, Any]) -> None:
+    from stagecheck.core.permissions import _safe_chmod
+
     evidence_dir = workspace_root.resolve() / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
     path = _replay_ledger_path(workspace_root)
     is_ev_ro = not os.access(evidence_dir, os.W_OK)
     if is_ev_ro:
-        os.chmod(evidence_dir, 0o755)
+        _safe_chmod(evidence_dir, 0o755)
     was_file_ro = path.exists() and not os.access(path, os.W_OK)
     if was_file_ro:
-        os.chmod(path, 0o644)
+        _safe_chmod(path, 0o644)
     try:
         write_text_nofollow(path, pretty_json_dumps(ledger), append=False, mode=0o644)
     finally:
         if was_file_ro and path.exists():
-            os.chmod(path, 0o444)
+            _safe_chmod(path, 0o444)
         if is_ev_ro:
-            os.chmod(evidence_dir, 0o555)
+            _safe_chmod(evidence_dir, 0o555)
 
 
 def record_waiver_in_replay_ledger(

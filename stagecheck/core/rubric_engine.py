@@ -268,7 +268,7 @@ def _get_raw_matrix_entries(force_reload: bool = False) -> List[Dict[str, Any]]:
     ):
         return _MATRIX_CACHE
 
-    data = json.loads(matrix_path.read_text(encoding="utf-8"))
+    data = load_json_file(matrix_path)
     if not isinstance(data, list):
         raise ValueError(
             f"Audit matrix integrity error: expected JSON list in '{matrix_path}', found {type(data).__name__}."

@@ -37,7 +37,11 @@ from stagecheck.core.paths import (
     SymlinkPathEscapeError,
     validate_attempt_root_symlinks,
 )
-from stagecheck.core.permissions import controlled_write_transaction, elevate_permissions_for_teardown
+from stagecheck.core.permissions import (
+    _safe_chmod,
+    controlled_write_transaction,
+    elevate_permissions_for_teardown,
+)
 from stagecheck.core.utils import load_json_file
 
 
@@ -247,16 +251,10 @@ def compute_attempt_merkle_seal(
         if os.path.islink(seal_file):
             raise SymlinkInEvidenceError(f"Target seal file '{seal_file}' is a symbolic link.")
         # Ensure parent directory is writable to create or overwrite seal.json
-        try:
-            os.chmod(attempt_path, 0o755)
-        except OSError:
-            pass
+        _safe_chmod(attempt_path, 0o755)
 
         if seal_file.exists():
-            try:
-                os.chmod(seal_file, 0o644)
-            except OSError:
-                pass
+            _safe_chmod(seal_file, 0o644)
 
         seal_bytes = (json.dumps(seal_record, indent=2, sort_keys=True) + "\n").encode("utf-8")
         out_fd = os.open(seal_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
@@ -264,10 +262,7 @@ def compute_attempt_merkle_seal(
             os.write(out_fd, seal_bytes)
         finally:
             os.close(out_fd)
-        try:
-            os.chmod(seal_file, 0o444)
-        except OSError:
-            pass
+        _safe_chmod(seal_file, 0o444)
 
     return seal_record
 

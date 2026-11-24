@@ -26,7 +26,7 @@ from stagecheck.core.paths import (
     sha256_file_nofollow,
     write_text_nofollow,
 )
-from stagecheck.core.permissions import controlled_write_transaction
+from stagecheck.core.permissions import _safe_chmod, controlled_write_transaction
 from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest, strict_json_loads
 
 
@@ -314,21 +314,18 @@ def create_task_seal(
             if p3_seal.is_symlink():
                 raise EvidenceTamperError(f"Refusing to follow symlinked Phase-3 seal '{p3_seal}'.")
             if p3_seal.exists():
-                os.chmod(str(p3_seal), 0o644)
+                _safe_chmod(p3_seal, 0o644)
             p3_fd = os.open(p3_seal, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
             try:
                 os.write(p3_fd, pretty_json_dumps(seal_data).encode("utf-8"))
             finally:
                 os.close(p3_fd)
-            os.chmod(str(p3_seal), stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+            _safe_chmod(p3_seal, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
         except OSError:
             pass
         finally:
             if p3_is_ro:
-                try:
-                    os.chmod(str(p3_dir), 0o555)
-                except OSError:
-                    pass
+                _safe_chmod(p3_dir, 0o555)
 
     # If final PASSED outcome, write master task seal at task root
     if outcome == "PASSED":
@@ -336,10 +333,7 @@ def create_task_seal(
         if master_seal.is_symlink():
             raise EvidenceTamperError(f"Refusing to follow symlinked master seal '{master_seal}'.")
         if master_seal.exists():
-            try:
-                os.chmod(str(master_seal), 0o644)
-            except OSError:
-                pass
+            _safe_chmod(master_seal, 0o644)
         m_fd = os.open(master_seal, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
         try:
             os.write(m_fd, pretty_json_dumps(seal_data).encode("utf-8"))
@@ -353,7 +347,7 @@ def create_task_seal(
     update_evidence_manifest(workspace_root, files_to_index)
 
     # Lock read-only mode 0444
-    os.chmod(seal_path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    _safe_chmod(seal_path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
 
     return seal_path
 
@@ -570,17 +564,17 @@ def update_code_quality_ledger(
 
     is_ro = not os.access(ev_dir, os.W_OK)
     if is_ro:
-        os.chmod(ev_dir, 0o755)
+        _safe_chmod(ev_dir, 0o755)
 
     try:
         from stagecheck.core.paths import write_text_nofollow
         if report_file.exists():
-            report_file.chmod(0o644)
+            _safe_chmod(report_file, 0o644)
         write_text_nofollow(report_file, pretty_json_dumps(data), append=False, mode=0o644)
-        report_file.chmod(0o444)
+        _safe_chmod(report_file, 0o444)
     finally:
         if is_ro:
-            os.chmod(ev_dir, 0o555)
+            _safe_chmod(ev_dir, 0o555)
 
     update_evidence_manifest(workspace_root, [report_file])
     return report_file

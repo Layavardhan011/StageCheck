@@ -264,12 +264,9 @@ def freeze_prompt_and_scope(
     write_text_nofollow(verified_record_path, pretty_json_dumps(record_data), append=False, mode=0o644)
 
     # Apply read-only mode to frozen regular Phase-1 files (defense-in-depth)
+    from stagecheck.core.permissions import _safe_chmod
     for p in [prompt_path, scope_path, verified_record_path]:
-        if not p.is_symlink():
-            try:
-                os.chmod(str(p), 0o444)
-            except OSError:
-                pass
+        _safe_chmod(p, 0o444)
 
     return verified_record_path
 

@@ -27,6 +27,7 @@ from stagecheck.core.permissions import (
     MODE_DIR_RW,
     MODE_FILE_RW,
     _is_active_task_state,
+    _safe_chmod,
     apply_at_rest_permissions,
     assert_safe_teardown_preconditions,
     controlled_write_transaction,
@@ -159,10 +160,10 @@ def run_init(
                     print("Reconciling existing workspace (self-healing mode)...")
 
                 # Elevate only controls/ (never evidence/tasks/ sealed subtrees)
-                os.chmod(str(controls_dir), MODE_DIR_RW)
+                _safe_chmod(controls_dir, MODE_DIR_RW)
                 for item in controls_dir.iterdir():
-                    if item.is_file() and not item.name.endswith(".lock"):
-                        os.chmod(str(item), MODE_FILE_RW)
+                    if item.is_file() and not item.is_symlink() and not item.name.endswith(".lock"):
+                        _safe_chmod(item, MODE_FILE_RW)
 
             # Step 2b: Interactive or flag-based agent selection (Spec 04)
             resolved_a1 = agent1
