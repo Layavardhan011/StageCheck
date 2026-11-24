@@ -783,7 +783,7 @@ def scaffold_remotes_config(
 ) -> Path:
     """Scaffold or reconcile controls/remotes.json and optionally approve push URLs."""
     from stagecheck.core.paths import safe_resolve
-    from stagecheck.core.utils import pretty_json_dumps, strict_json_loads
+    from stagecheck.core.utils import load_json_file, pretty_json_dumps, strict_json_loads
 
     root = Path(workspace_root).resolve()
     controls_dir = root / "controls"
@@ -794,7 +794,10 @@ def scaffold_remotes_config(
     if remotes_path.exists():
         if remotes_path.is_symlink() or not remotes_path.is_file():
             raise ScaffoldingError(f"Unsafe controls/remotes.json path: '{remotes_path}'")
-        parsed = strict_json_loads(remotes_path.read_text(encoding="utf-8"), source=str(remotes_path))
+        try:
+            parsed = load_json_file(remotes_path)
+        except Exception as err:
+            raise ScaffoldingError(f"Failed to read controls/remotes.json: {err}") from err
         if not isinstance(parsed, dict) or not isinstance(parsed.get("approved_push_urls", []), list):
             raise ScaffoldingError("controls/remotes.json must be a JSON object with 'approved_push_urls' list.")
         data = dict(parsed)

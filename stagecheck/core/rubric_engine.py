@@ -87,16 +87,31 @@ _SECRET_RE = re.compile(
 )
 
 
+def _read_manifest_lower(repo: Path, filename: str) -> str:
+    target = repo / filename
+    if not target.is_file() or target.is_symlink():
+        return ""
+    try:
+        from stagecheck.core.paths import read_bytes_nofollow
+        return read_bytes_nofollow(target, max_bytes=1024 * 1024).decode("utf-8", errors="ignore").lower()
+    except Exception:
+        return ""
+
+
 def _has_blockchain_protocol(ws: Path, repo: Path) -> bool:
     """Detect deterministically whether a repository implements blockchain/MultiversX/DRWA protocol logic."""
     if not repo.is_dir():
         return False
+    from stagecheck.core.paths import read_bytes_nofollow
     for manifest_name in ("go.mod", "Cargo.toml", "package.json", "requirements.txt", "pyproject.toml"):
         mf = repo / manifest_name
         if mf.is_file() and not mf.is_symlink():
-            text = mf.read_text(encoding="utf-8", errors="ignore").lower()
-            if any(m in text for m in _BLOCKCHAIN_MARKERS):
-                return True
+            try:
+                text = read_bytes_nofollow(mf, max_bytes=1024 * 1024).decode("utf-8", errors="ignore").lower()
+                if any(m in text for m in _BLOCKCHAIN_MARKERS):
+                    return True
+            except Exception:
+                pass
     # Also check shallow source indicators for Go/Rust shard/metachain/vm modules
     if (repo / "go.mod").is_file() or (repo / "Cargo.toml").is_file():
         for root_dir, dirs, _ in os.walk(repo):
@@ -110,17 +125,23 @@ def _has_blockchain_protocol(ws: Path, repo: Path) -> bool:
 # Deterministic structural exemption predicates (FR-03 / DEC-026)
 EXEMPTION_PREDICATES: Dict[str, Callable[[Path, Path], bool]] = {
     "PREDICATE_NO_REACT_DEPENDENCY": lambda ws, repo: not (repo / "package.json").is_file()
-    or "react" not in (repo / "package.json").read_text(encoding="utf-8", errors="ignore").lower(),
+    or (repo / "package.json").is_symlink()
+    or "react" not in _read_manifest_lower(repo, "package.json"),
     "PREDICATE_NO_FLASK_DEPENDENCY": lambda ws, repo: not (repo / "requirements.txt").is_file()
-    or "flask" not in (repo / "requirements.txt").read_text(encoding="utf-8", errors="ignore").lower(),
+    or (repo / "requirements.txt").is_symlink()
+    or "flask" not in _read_manifest_lower(repo, "requirements.txt"),
     "PREDICATE_BACKEND_ONLY_REPO": lambda ws, repo: not any(repo.rglob("*.tsx"))
     and not any(repo.rglob("*.jsx")),
-    "PREDICATE_NO_NODE_PACKAGE": lambda ws, repo: not (repo / "package.json").is_file(),
-    "PREDICATE_NO_PYTHON_PACKAGE": lambda ws, repo: not (repo / "requirements.txt").is_file()
-    and not (repo / "pyproject.toml").is_file(),
-    "PREDICATE_NO_GO_MODULE": lambda ws, repo: not (repo / "go.mod").is_file(),
-    "PREDICATE_NO_RUST_CRATE": lambda ws, repo: not (repo / "Cargo.toml").is_file(),
-    "PREDICATE_NO_DOCKER": lambda ws, repo: not (repo / "Dockerfile").is_file(),
+    "PREDICATE_NO_NODE_PACKAGE": lambda ws, repo: not (repo / "package.json").is_file()
+    or (repo / "package.json").is_symlink(),
+    "PREDICATE_NO_PYTHON_PACKAGE": lambda ws, repo: (not (repo / "requirements.txt").is_file() or (repo / "requirements.txt").is_symlink())
+    and (not (repo / "pyproject.toml").is_file() or (repo / "pyproject.toml").is_symlink()),
+    "PREDICATE_NO_GO_MODULE": lambda ws, repo: not (repo / "go.mod").is_file()
+    or (repo / "go.mod").is_symlink(),
+    "PREDICATE_NO_RUST_CRATE": lambda ws, repo: not (repo / "Cargo.toml").is_file()
+    or (repo / "Cargo.toml").is_symlink(),
+    "PREDICATE_NO_DOCKER": lambda ws, repo: not (repo / "Dockerfile").is_file()
+    or (repo / "Dockerfile").is_symlink(),
     "PREDICATE_NO_BLOCKCHAIN_PROTOCOL": lambda ws, repo: not _has_blockchain_protocol(ws, repo),
 }
 

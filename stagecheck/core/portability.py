@@ -58,6 +58,8 @@ def audit_portability(
 
         for fname in files:
             fpath = Path(root_str) / fname
+            if fpath.is_symlink():
+                continue
             suffix = fpath.suffix.lower()
 
             if suffix not in AUDITED_EXTENSIONS and not (include_docs and suffix in {".md", ".rst", ".txt"}):
@@ -68,7 +70,8 @@ def audit_portability(
                 continue
 
             try:
-                content = fpath.read_text(encoding="utf-8", errors="ignore")
+                from stagecheck.core.paths import read_bytes_nofollow
+                content = read_bytes_nofollow(fpath, max_bytes=10 * 1024 * 1024).decode("utf-8", errors="ignore")
                 for line_num, line in enumerate(content.splitlines(), 1):
                     for pattern, description in PROHIBITED_PATTERNS:
                         if pattern.search(line):

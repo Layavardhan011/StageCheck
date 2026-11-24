@@ -195,7 +195,9 @@ def log_teardown_audit_event(
     sentinel_pid_file = root / ".stagecheck_sentinel.pid"
     if sentinel_pid_file.is_file() and not sentinel_pid_file.is_symlink():
         try:
-            pid_str = sentinel_pid_file.read_text(encoding="utf-8").strip()
+            from stagecheck.core.paths import read_bytes_nofollow
+            pid_raw = read_bytes_nofollow(sentinel_pid_file, max_bytes=64)
+            pid_str = pid_raw.decode("utf-8", errors="replace").strip()
             if pid_str.isdigit():
                 cand_pid = int(pid_str)
                 if cand_pid > 1:

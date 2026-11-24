@@ -184,7 +184,7 @@ def compute_attempt_merkle_seal(
                     p_vdata: Dict[str, Any] = {"result": "FAILED", "note": "Unsealed failed prior attempt"}
                     if p_vfile.is_file() and not os.path.islink(p_vfile):
                         try:
-                            p_vdata = json.loads(p_vfile.read_text(encoding="utf-8"))
+                            p_vdata = load_json_file(p_vfile)
                         except Exception:
                             pass
                     p_seal_rec = compute_attempt_merkle_seal(

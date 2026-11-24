@@ -465,7 +465,9 @@ class SentinelDaemon:
             raise SentinelError("Security violation: .stagecheck_sentinel.pid is a symbolic link.")
 
         try:
-            content = self.pid_file.read_text(encoding="utf-8").strip()
+            from stagecheck.core.paths import read_bytes_nofollow
+            raw = read_bytes_nofollow(self.pid_file, max_bytes=64)
+            content = raw.decode("utf-8", errors="replace").strip()
             return int(content) if content.isdigit() else None
         except Exception:
             return None
@@ -476,7 +478,9 @@ class SentinelDaemon:
         if not pid or pid <= 1:
             if self.pid_file.is_file() and not self.pid_file.is_symlink():
                 try:
-                    content = self.pid_file.read_text(encoding="utf-8").strip()
+                    from stagecheck.core.paths import read_bytes_nofollow
+                    raw = read_bytes_nofollow(self.pid_file, max_bytes=64)
+                    content = raw.decode("utf-8", errors="replace").strip()
                     if not content.isdigit():
                         self.pid_file.unlink(missing_ok=True)
                 except Exception:

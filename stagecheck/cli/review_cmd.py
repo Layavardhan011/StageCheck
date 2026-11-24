@@ -33,7 +33,7 @@ def _validate_and_bind_precommit_status(
 ) -> tuple[list[str], dict[str, str], int]:
     """Validate pre_commit_status.json against schema and authoritative PRODUCT_REPOSITORIES.json baselines."""
     schema_path = get_schema_path("pre_commit_status.schema.json")
-    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema = load_json_file(schema_path)
     validate_schema(data, schema)
 
     if data.get("task_id") != task or int(data.get("attempt", 0)) != attempt:
