@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -159,16 +161,32 @@ def sha256_canonical(obj: Any) -> str:
 
 
 def sha256_file(path: Union[str, Path]) -> str:
-    """Compute the SHA-256 digest of a file in 64 KiB chunks."""
+    """Compute the SHA-256 digest of a file in 64 KiB chunks (SEC-17 non-blocking)."""
     file_path = Path(path)
     if not file_path.is_file():
         raise FileNotFoundError(f"File not found for SHA-256 calculation: {file_path}")
 
-    hasher = hashlib.sha256()
-    with open(file_path, "rb") as stream:
-        while chunk := stream.read(65536):
-            hasher.update(chunk)
-    return hasher.hexdigest()
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(str(file_path), flags)
+    except OSError as err:
+        raise FileNotFoundError(f"Cannot securely open file for SHA-256 calculation: {file_path}") from err
+
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise UtilityError(f"Refusing to hash non-regular file '{file_path}'.")
+        try:
+            os.set_blocking(fd, True)
+        except (OSError, AttributeError):
+            pass
+        hasher = hashlib.sha256()
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            while chunk := stream.read(65536):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    finally:
+        os.close(fd)
 
 
 # ==========================================

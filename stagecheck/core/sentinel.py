@@ -358,6 +358,22 @@ def classify_event_path(
     return 4, "UNCLASSIFIED_EVENT"
 
 
+def _is_sentinel_process(pid: int) -> bool:
+    """Verify that the target process is a legitimate StageCheck Sentinel daemon (SEC-16)."""
+    if pid <= 1:
+        return False
+    proc_cmd = Path(f"/proc/{pid}/cmdline")
+    if proc_cmd.is_file():
+        try:
+            cmdline = proc_cmd.read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="ignore").lower()
+            return "sentinel" in cmdline and ("stagecheck" in cmdline or "_sentinel_entry" in cmdline)
+        except (OSError, PermissionError):
+            return False
+    if not Path("/proc").is_dir():
+        return True
+    return False
+
+
 class SentinelDaemon:
     """Continuous background supervisor managing inotify watches and PID state."""
 
@@ -695,6 +711,12 @@ class SentinelDaemon:
             running, pid = self.is_running()
             if not running or not pid:
                 print("Sentinel daemon is not running.")
+                return 0
+
+            # SEC-16: Reject termination signals if PID does not match a verified Sentinel process
+            if not _is_sentinel_process(pid):
+                print(f"Warning: Process {pid} is not a verified StageCheck Sentinel daemon. Refusing to signal.")
+                self.pid_file.unlink(missing_ok=True)
                 return 0
 
             print(f"Stopping Sentinel daemon (PID {pid})...")

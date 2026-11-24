@@ -489,6 +489,17 @@ def validate_command_security(argv: List[str], cwd: Optional[Path] = None) -> No
                     f"Security policy violation [UNTRUSTED_BINARY_PATH]: Runner resolves inside working directory '{resolved_bin}'.",
                     exit_code=126,
                 )
+            try:
+                from stagecheck.core.paths import find_workspace_root
+                ws_root = find_workspace_root(cwd_resolved)
+                if ws_root and resolved_path.is_relative_to(ws_root.resolve()):
+                    raise ForbiddenCommandFlagError(
+                        f"Security policy violation [UNTRUSTED_BINARY_PATH]: Runner resolves inside workspace root '{resolved_bin}'.",
+                        exit_code=126,
+                    )
+            except Exception as e:
+                if isinstance(e, ForbiddenCommandFlagError):
+                    raise
 
     args = argv[1:]
     sep_idx = args.index("--") if "--" in args else len(args)
