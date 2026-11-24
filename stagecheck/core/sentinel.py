@@ -242,6 +242,8 @@ def _is_path_in_scope(rel_path: str, declared_scope: Dict[str, Any]) -> bool:
 
 def get_process_rss_mib(pid: int) -> float:
     """Return current resident memory (RSS) for a process in MiB."""
+    if pid <= 0:
+        return 0.0
     statm_path = Path(f"/proc/{pid}/statm")
     if not statm_path.is_file():
         return 0.0

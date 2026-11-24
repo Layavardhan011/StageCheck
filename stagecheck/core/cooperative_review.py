@@ -367,8 +367,7 @@ def submit_pre_commit_status(
     }
 
     schema_path = get_schema_path("pre_commit_status.schema.json")
-    with schema_path.open("r", encoding="utf-8") as f:
-        schema = json.load(f)
+    schema = load_json_file(schema_path)
     validate_schema(status_data, schema)
 
     status_file = phase2a_dir / "pre_commit_status.json"
@@ -525,8 +524,7 @@ def record_pre_commit_review(
 
     # Validate against schema
     schema_path = get_schema_path("pre_commit_review.schema.json")
-    with schema_path.open("r", encoding="utf-8") as f:
-        schema = json.load(f)
+    schema = load_json_file(schema_path)
     validate_schema(review_data, schema)
 
     # 1. Write response.json for Agent 2 feedback

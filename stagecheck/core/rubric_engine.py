@@ -352,10 +352,15 @@ def load_270_rule_catalog() -> List[RubricRule]:
 
     for domain_name, filename in manuals:
         filepath = instr_dir / filename
-        if not filepath.is_file():
-            raise FileNotFoundError(f"Missing required rubric manual: '{filename}'.")
+        if not filepath.is_file() or filepath.is_symlink():
+            raise FileNotFoundError(f"Missing or symlinked required rubric manual: '{filename}'.")
 
-        lines = filepath.read_text(encoding="utf-8").splitlines()
+        try:
+            from stagecheck.core.paths import read_bytes_nofollow
+            raw = read_bytes_nofollow(filepath, max_bytes=5 * 1024 * 1024)
+            lines = raw.decode("utf-8", errors="replace").splitlines()
+        except OSError as err:
+            raise FileNotFoundError(f"Cannot securely read rubric manual '{filename}': {err}") from err
         current_rule_id = ""
         current_title = ""
         current_question = ""
@@ -1725,20 +1730,26 @@ def _scan_dependencies(repo_dir: Path) -> List[str]:
     unpinned: List[str] = []
     req_file = repo_dir / "requirements.txt"
     if req_file.is_file() and not req_file.is_symlink():
-        for raw in req_file.read_text(encoding="utf-8", errors="ignore").splitlines():
-            line = raw.split("#", 1)[0].strip()
-            if not line or line.startswith(("-r", "--", "-e")):
-                continue
-            m = _PIN_SPEC_RE.match(line)
-            if m:
-                op = m.group(2)
-                if op != "==":
-                    unpinned.append(f"{repo_dir.name}/{req_file.name}: {line}")
+        try:
+            from stagecheck.core.paths import read_bytes_nofollow
+            raw_bytes = read_bytes_nofollow(req_file, max_bytes=1024 * 1024)
+            for raw in raw_bytes.decode("utf-8", errors="ignore").splitlines():
+                line = raw.split("#", 1)[0].strip()
+                if not line or line.startswith(("-r", "--", "-e")):
+                    continue
+                m = _PIN_SPEC_RE.match(line)
+                if m:
+                    op = m.group(2)
+                    if op != "==":
+                        unpinned.append(f"{repo_dir.name}/{req_file.name}: {line}")
+        except Exception:
+            pass
 
     pkg_file = repo_dir / "package.json"
     if pkg_file.is_file() and not pkg_file.is_symlink():
         try:
-            pkg = json.loads(pkg_file.read_text(encoding="utf-8", errors="ignore"))
+            from stagecheck.core.utils import load_json_file
+            pkg = load_json_file(pkg_file)
             for section in ("dependencies", "devDependencies"):
                 deps = pkg.get(section)
                 if isinstance(deps, dict):
@@ -1878,7 +1889,8 @@ def _analyze_python_repo_files(
             try:
                 if fpath.stat().st_size > 512 * 1024:
                     continue
-                src = fpath.read_text(encoding="utf-8", errors="ignore")
+                from stagecheck.core.paths import read_bytes_nofollow
+                src = read_bytes_nofollow(fpath, max_bytes=512 * 1024).decode("utf-8", errors="ignore")
             except OSError:
                 continue
 
@@ -2242,8 +2254,13 @@ def _collect_rubric_context(
                             except ValueError:
                                 symlink_escapes.append(ws_rel)
                         if fpath.is_file() and not fpath.is_symlink() and fpath.stat().st_size <= 1024 * 1024:
-                            if _SECRET_RE.search(fpath.read_text(encoding="utf-8", errors="ignore")):
-                                secrets_found.append(ws_rel)
+                            try:
+                                from stagecheck.core.paths import read_bytes_nofollow
+                                raw = read_bytes_nofollow(fpath, max_bytes=1024 * 1024)
+                                if _SECRET_RE.search(raw.decode("utf-8", errors="ignore")):
+                                    secrets_found.append(ws_rel)
+                            except Exception:
+                                pass
                 # Priority: attempt repo_baseline.json > PRODUCT_REPOSITORIES.json baseline_head
                 base_sha = None
                 baseline_file = attempt_dir / "repo_baseline.json"

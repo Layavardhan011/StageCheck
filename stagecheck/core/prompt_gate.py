@@ -106,8 +106,7 @@ def validate_declared_scope(
 
     # 1. Validate against schema
     schema_path = get_schema_path("declared_scope.schema.json")
-    with schema_path.open("r", encoding="utf-8") as f:
-        schema = json.load(f)
+    schema = load_json_file(schema_path)
     try:
         validate_schema(declared_scope_data, schema)
     except Exception as err:
@@ -258,8 +257,7 @@ def freeze_prompt_and_scope(
 
     # Validate against schema
     schema_path = get_schema_path("prompt_verified.schema.json")
-    with schema_path.open("r", encoding="utf-8") as f:
-        rec_schema = json.load(f)
+    rec_schema = load_json_file(schema_path)
     validate_schema(record_data, rec_schema)
 
     # Write atomically without following symlinks
