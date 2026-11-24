@@ -41,7 +41,8 @@ from stagecheck.core.scaffold import (
     scaffold_remotes_config,
     scaffold_task_plan,
 )
-from stagecheck.core.utils import AgentSlugError, pretty_json_dumps, validate_agent_slug
+from stagecheck.core.paths import write_text_nofollow
+from stagecheck.core.utils import AgentSlugError, load_json_file, pretty_json_dumps, validate_agent_slug
 
 
 def _prompt_for_agent(prompt_text: str) -> Optional[str]:
@@ -146,9 +147,11 @@ def run_init(
                         )
                     print("Re-initializing existing workspace (--force). Preserving prior dispositions...")
                     disp_file = controls_dir / "DISPOSITIONS.json"
+                    if disp_file.is_symlink():
+                        raise ScaffoldingError("controls/DISPOSITIONS.json is a symlink: refusing to read.")
                     if disp_file.is_file():
                         try:
-                            existing_dispositions = json.loads(disp_file.read_text(encoding="utf-8"))
+                            existing_dispositions = load_json_file(disp_file)
                         except Exception:
                             pass
                 else:
@@ -291,7 +294,7 @@ def run_init(
             # Preserve previous dispositions if force reinit
             if existing_dispositions:
                 disp_file = controls_dir / "DISPOSITIONS.json"
-                disp_file.write_text(pretty_json_dumps(existing_dispositions), encoding="utf-8")
+                write_text_nofollow(disp_file, pretty_json_dumps(existing_dispositions), append=False, mode=0o644)
 
             # Step 5: Render and write AGENTS.md binding contract
             print("Rendering root AGENTS.md contract with initial SHA-256 table...")
@@ -313,9 +316,9 @@ def run_init(
             # Step 6b: Pre-scaffold qualification directory (evals)
             qual_file = controls_dir / "QUALIFICATION_ROOT.json"
             qual_root_name = "evals"
-            if qual_file.is_file():
+            if qual_file.is_file() and not qual_file.is_symlink():
                 try:
-                    q_data = json.loads(qual_file.read_text(encoding="utf-8"))
+                    q_data = load_json_file(qual_file)
                     qual_root_name = q_data.get("qualification_root", "evals")
                 except Exception:
                     pass

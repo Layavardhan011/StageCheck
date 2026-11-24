@@ -142,8 +142,9 @@ def pretty_json_dumps(obj: Any, indent: int = 2) -> str:
 
 def write_json_file(path: Union[str, Path], data: Any, indent: int = 2) -> None:
     """Write data to a file formatted as readable JSON with 2-space indentation and trailing newline."""
+    from stagecheck.core.paths import write_text_nofollow
     file_path = Path(path)
-    file_path.write_text(pretty_json_dumps(data, indent=indent), encoding="utf-8")
+    write_text_nofollow(file_path, pretty_json_dumps(data, indent=indent), append=False, mode=0o644)
 
 
 def sha256_digest(data: Union[str, bytes]) -> str:
