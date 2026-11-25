@@ -9,17 +9,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.init_cmd import run_init
-from stagecheck.core.branch_governance import capture_multi_repo_task_baseline
-from stagecheck.core.circuit_breaker import CircuitBreakerEvaluation, reset_circuit_breaker, trip_circuit_breaker
-from stagecheck.core.cooperative_review import record_pre_commit_review, submit_pre_commit_status
-from stagecheck.core.dispositions import add_disposition, resume_after_disposition
-from stagecheck.core.evidence import create_task_seal, update_code_quality_ledger, update_evidence_manifest
-from stagecheck.core.orchestrator import AuditOrchestrator, run_audit
-from stagecheck.core.permissions import elevate_permissions_for_teardown
-from stagecheck.core.prompt_gate import freeze_prompt_and_scope
-from stagecheck.core.state import load_active_state, save_active_state
-from stagecheck.core.utils import pretty_json_dumps
+from governance.cli.init_cmd import run_init
+from governance.core.branch_governance import capture_multi_repo_task_baseline
+from governance.core.circuit_breaker import CircuitBreakerEvaluation, reset_circuit_breaker, trip_circuit_breaker
+from governance.core.cooperative_review import record_pre_commit_review, submit_pre_commit_status
+from governance.core.dispositions import add_disposition, resume_after_disposition
+from governance.core.evidence import create_task_seal, update_code_quality_ledger, update_evidence_manifest
+from governance.core.orchestrator import AuditOrchestrator, run_audit
+from governance.core.permissions import elevate_permissions_for_teardown
+from governance.core.prompt_gate import freeze_prompt_and_scope
+from governance.core.state import load_active_state, save_active_state
+from governance.core.utils import pretty_json_dumps
 
 
 class TestPrettyJSONFormatting(unittest.TestCase):
@@ -344,7 +344,7 @@ class TestPrettyJSONFormatting(unittest.TestCase):
 
     def test_update_rubric_artifacts_is_pretty_printed(self) -> None:
         """Verify update_rubric_artifacts writes pretty-printed multi-line JSON."""
-        from stagecheck.core.rubric_engine import run_rubric_evaluation, update_rubric_artifacts
+        from governance.core.rubric_engine import run_rubric_evaluation, update_rubric_artifacts
 
         run_init(workspace=str(self.workspace), repos="core", agent1="claude", agent2="codex")
         elevate_permissions_for_teardown(self.workspace)

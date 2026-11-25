@@ -2,7 +2,7 @@
 
 import unittest
 
-from stagecheck.core.task_plan import (
+from governance.core.task_plan import (
     CircularDependencyError,
     TaskPlanError,
     UnauthorizedRepositoryError,
@@ -12,7 +12,7 @@ from stagecheck.core.task_plan import (
     resolve_sprint_branch,
     validate_task_plan,
 )
-from stagecheck.core.utils import SchemaValidationError
+from governance.core.utils import SchemaValidationError
 
 
 class TestTaskPlanValidation(unittest.TestCase):

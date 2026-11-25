@@ -1,0 +1,480 @@
+"""Deterministic Acyclic Merkle DAG Sealing & Evidence Manifest (P4-T4 / FR-12 / DEC-012).
+
+Implements deterministic attempt sealing, pre-resolution symlink validation,
+canonical Unicode C-collation leaf sorting, and acyclic downstream manifest indexing.
+
+Invariants:
+1. Pre-Resolution Validation:
+   - No '..' path traversal in attempt path.
+   - Attempt root itself is inspected with os.path.islink() BEFORE resolve().
+   - Parent components up to workspace_root inspected with os.path.islink() BEFORE resolve().
+   - Traversal inspects os.path.islink() on EVERY directory and file entry before following or opening.
+   - Any symlink inside attempt directory or root path strictly fails closed with SymlinkInEvidenceError.
+2. Canonical Leaf Serialization:
+   - Exclusions: seal.json, *.lock, *.tmp, .DS_Store.
+   - Relative POSIX paths sorted in ascending Unicode code point order (C collation).
+   - JSON serialized strictly without whitespace: separators=(',', ':'), sort_keys=True.
+   - Root digest: SHA-256(canonical_json_bytes).
+3. Acyclic Manifest Indexing:
+   - DAG is strictly acyclic: seal.json hashes attempt evidence; EVIDENCE_MANIFEST.json hashes seal.json.
+   - seal.json never hashes the manifest.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import os
+import stat
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+
+from governance.core.agents import resolve_task_attempt_dir
+from governance.core.paths import (
+    PathOutsideBoundaryError,
+    PathTraversalError,
+    SymlinkPathEscapeError,
+    read_bytes_nofollow,
+    validate_attempt_root_symlinks,
+)
+from governance.core.permissions import (
+    _safe_chmod,
+    controlled_write_transaction,
+    elevate_permissions_for_teardown,
+)
+from governance.core.utils import load_json_file
+
+
+class SealingError(Exception):
+    """Base exception for Merkle sealing operations."""
+
+
+class SymlinkInEvidenceError(SealingError):
+    """Raised when a symlink is detected within the attempt hierarchy or attempt path components."""
+
+
+class MerkleVerificationError(SealingError):
+    """Raised when Merkle seal integrity verification fails."""
+
+
+EXCLUDED_SEAL_NAMES: Set[str] = {"seal.json", ".DS_Store"}
+EXCLUDED_EXTENSIONS: Set[str] = {".lock", ".tmp"}
+
+
+def validate_merkle_attempt_path(attempt_dir: Union[str, Path], workspace_root: Union[str, Path]) -> Path:
+    """Validate attempt root and parent hierarchy against symlinks before resolution."""
+    try:
+        return validate_attempt_root_symlinks(attempt_dir, workspace_root)
+    except (SymlinkPathEscapeError, PathTraversalError, PathOutsideBoundaryError) as err:
+        raise SymlinkInEvidenceError(f"Attempt path validation failed: {err}") from err
+
+
+def compute_attempt_merkle_seal(
+    attempt_dir: Union[str, Path],
+    workspace_root: Union[str, Path],
+    task_id: str,
+    attempt_index: int,
+    verdict_data: Optional[Dict[str, Any]] = None,
+    write_seal_file: bool = True,
+) -> Dict[str, Any]:
+    """Compute deterministic Merkle DAG seal across attempt evidence files.
+
+    Args:
+        attempt_dir: Path to attempt directory (e.g. evidence/tasks/task-01/attempt_1).
+        workspace_root: Governing workspace root path.
+        task_id: Task identifier.
+        attempt_index: 1-based attempt index.
+        verdict_data: Optional Phase-3 verdict dictionary.
+        write_seal_file: Whether to write seal.json (mode 0444) to attempt_dir.
+
+    Returns:
+        Dict representing seal_record.
+
+    Raises:
+        SymlinkInEvidenceError: If any symlink is found in root, parents, or children.
+    """
+    ws_root = Path(workspace_root).resolve()
+    attempt_path = validate_merkle_attempt_path(attempt_dir, ws_root)
+
+    leaf_entries: List[Dict[str, Any]] = []
+
+    # Traverse attempt hierarchy with followlinks=False
+    for root_dir, dirs, files in os.walk(attempt_path, followlinks=False):
+        # Inspect directories for symlinks before descending
+        for d in dirs:
+            dir_full = Path(root_dir) / d
+            if os.path.islink(dir_full):
+                raise SymlinkInEvidenceError(
+                    f"Evidence integrity defect [SYMLINK_IN_EVIDENCE]: Directory symlink '{dir_full}' prohibited."
+                )
+
+        # Inspect and hash regular files safely (no symlinks, no FIFOs/devices)
+        for f in files:
+            file_full = Path(root_dir) / f
+            if os.path.islink(file_full):
+                raise SymlinkInEvidenceError(
+                    f"Evidence integrity defect [SYMLINK_IN_EVIDENCE]: File symlink '{file_full}' prohibited."
+                )
+
+            if f in EXCLUDED_SEAL_NAMES or file_full.suffix in EXCLUDED_EXTENSIONS:
+                continue
+
+            try:
+                lstat_res = os.lstat(file_full)
+            except OSError as err:
+                raise SealingError(f"Failed to stat evidence entry '{file_full}': {err}") from err
+            if stat.S_ISLNK(lstat_res.st_mode):
+                raise SymlinkInEvidenceError(
+                    f"Evidence integrity defect [SYMLINK_IN_EVIDENCE]: File symlink '{file_full}' prohibited."
+                )
+            if not stat.S_ISREG(lstat_res.st_mode):
+                raise SealingError(
+                    f"Evidence integrity defect [NON_REGULAR_FILE]: Non-regular file '{file_full}' prohibited in sealed evidence."
+                )
+
+            rel_posix = file_full.relative_to(attempt_path).as_posix()
+            fd = os.open(file_full, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                fstat_res = os.fstat(fd)
+                if not stat.S_ISREG(fstat_res.st_mode):
+                    raise SealingError(
+                        f"Evidence integrity defect [NON_REGULAR_FILE]: Descriptor for '{file_full}' is not a regular file."
+                    )
+                file_hasher = hashlib.sha256()
+                total_read = 0
+                while True:
+                    chunk = os.read(fd, 65536)
+                    if not chunk:
+                        break
+                    file_hasher.update(chunk)
+                    total_read += len(chunk)
+            finally:
+                os.close(fd)
+
+            leaf_entries.append({
+                "hash": file_hasher.hexdigest(),
+                "path": rel_posix,
+                "size": total_read,
+            })
+
+    # Sort leaves in ascending Unicode code point order (C collation)
+    leaf_entries.sort(key=lambda item: item["path"])
+
+    # Canonical serialization: sorted keys, no whitespace, UTF-8 encoded
+    canonical_json_bytes = json.dumps(
+        leaf_entries,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    merkle_root_sha256 = hashlib.sha256(canonical_json_bytes).hexdigest()
+
+    prior_seal_sha256: Optional[str] = None
+    if attempt_index > 1:
+        from governance.core.agents import resolve_task_attempt_dir
+        from governance.core.paths import sha256_file_nofollow
+
+        # If previous attempts in the sequence are unsealed (e.g. failed audit retries),
+        # seal them retroactively so the cryptographic Merkle chain remains continuous and unbroken.
+        if write_seal_file:
+            for p_idx in range(1, attempt_index):
+                p_dir = resolve_task_attempt_dir(ws_root, task_id, p_idx)
+                p_seal = p_dir / "seal.json"
+                if p_dir.is_dir() and not p_seal.is_file() and not os.path.islink(p_seal):
+                    p_vfile = p_dir / "Phase-3" / "verdict.json"
+                    if not p_vfile.is_file():
+                        p_vfile = p_dir / "verdict.json"
+                    p_vdata: Dict[str, Any] = {"result": "FAILED", "note": "Unsealed failed prior attempt"}
+                    if p_vfile.is_file() and not os.path.islink(p_vfile):
+                        try:
+                            p_vdata = load_json_file(p_vfile)
+                        except Exception:
+                            pass
+                    p_seal_rec = compute_attempt_merkle_seal(
+                        attempt_dir=p_dir,
+                        workspace_root=ws_root,
+                        task_id=task_id,
+                        attempt_index=p_idx,
+                        verdict_data=p_vdata,
+                        write_seal_file=True,
+                    )
+                    try:
+                        index_seal_in_manifest(ws_root, task_id, p_idx, p_seal_rec)
+                    except Exception:
+                        pass
+
+        prior_dir = resolve_task_attempt_dir(ws_root, task_id, attempt_index - 1)
+        prior_seal_file = prior_dir / "seal.json"
+        if os.path.islink(prior_seal_file) or not prior_seal_file.is_file():
+            raise SealingError(
+                f"Cannot seal attempt {attempt_index}: prior attempt_{attempt_index - 1} seal.json is missing or symlinked."
+            )
+        if write_seal_file:
+            from governance.core.evidence import verify_seal_chain
+            ok_chain, chain_viol = verify_seal_chain(ws_root, task_id, attempt_index - 1)
+            if not ok_chain:
+                raise SealingError(
+                    f"Cannot seal attempt {attempt_index}: prior seal chain failed validation ({'; '.join(chain_viol)})."
+                )
+        prior_seal_sha256 = sha256_file_nofollow(prior_seal_file)
+
+    metadata_envelope = {
+        "schema_version": "2.0.0",
+        "task_id": task_id,
+        "attempt_index": attempt_index,
+        "merkle_root_sha256": merkle_root_sha256,
+        "total_files_sealed": len(leaf_entries),
+        "verdict": verdict_data or {},
+    }
+    if prior_seal_sha256 is not None:
+        metadata_envelope["prior_seal_sha256"] = prior_seal_sha256
+    seal_payload_sha256 = hashlib.sha256(
+        json.dumps(metadata_envelope, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+    seal_record: Dict[str, Any] = {
+        "schema_version": "2.0.0",
+        "task_id": task_id,
+        "attempt_index": attempt_index,
+        "merkle_root_sha256": merkle_root_sha256,
+        "seal_payload_sha256": seal_payload_sha256,
+        "total_files_sealed": len(leaf_entries),
+        "verdict": verdict_data or {},
+        "leaves": leaf_entries,
+    }
+    if prior_seal_sha256 is not None:
+        seal_record["prior_seal_sha256"] = prior_seal_sha256
+
+    if write_seal_file:
+        seal_file = attempt_path / "seal.json"
+        if os.path.islink(seal_file):
+            raise SymlinkInEvidenceError(f"Target seal file '{seal_file}' is a symbolic link.")
+        # Ensure parent directory is writable to create or overwrite seal.json
+        _safe_chmod(attempt_path, 0o755)
+
+        if seal_file.exists():
+            _safe_chmod(seal_file, 0o644)
+
+        seal_bytes = (json.dumps(seal_record, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        out_fd = os.open(seal_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+        try:
+            os.write(out_fd, seal_bytes)
+        finally:
+            os.close(out_fd)
+        _safe_chmod(seal_file, 0o444)
+
+    return seal_record
+
+
+def verify_attempt_merkle_seal(
+    attempt_dir: Union[str, Path],
+    workspace_root: Union[str, Path],
+) -> Tuple[bool, List[str]]:
+    """Verify integrity of seal.json against on-disk files in the attempt directory.
+
+    Returns:
+        Tuple of (is_valid: bool, violations: List[str]).
+    """
+    ws_root = Path(workspace_root).resolve()
+    violations: List[str] = []
+
+    try:
+        attempt_path = validate_merkle_attempt_path(attempt_dir, ws_root)
+    except SymlinkInEvidenceError as err:
+        return False, [f"Symlink validation failure: {err}"]
+
+    seal_file = attempt_path / "seal.json"
+    if seal_file.is_symlink():
+        return False, [f"Symlink validation failure: seal.json at '{seal_file}' is a symlink"]
+    if not seal_file.is_file():
+        return False, [f"Missing seal.json at '{seal_file}'"]
+
+    try:
+        fd = os.open(seal_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            with os.fdopen(fd, "rb") as f:
+                seal_bytes = f.read()
+        except Exception:
+            raise
+        seal_data = json.loads(seal_bytes.decode("utf-8"))
+    except Exception as err:
+        return False, [f"Malformed seal.json: {err}"]
+
+    if not isinstance(seal_data, dict):
+        return False, ["Malformed seal.json: root JSON value must be an object"]
+
+    raw_attempt_index = seal_data.get("attempt_index")
+    if not isinstance(raw_attempt_index, int) or isinstance(raw_attempt_index, bool):
+        return False, [
+            f"Malformed seal.json: 'attempt_index' must be an integer, got {type(raw_attempt_index).__name__}"
+        ]
+
+    expected_merkle_root = seal_data.get("merkle_root_sha256")
+    recorded_leaves = seal_data.get("leaves", [])
+
+    # Verify task_id and attempt_index match the directory identity
+    expected_task_id = attempt_path.parent.name
+    if seal_data.get("task_id") != expected_task_id:
+        violations.append(
+            f"Seal task_id mismatch: recorded '{seal_data.get('task_id')}', expected '{expected_task_id}'"
+        )
+    try:
+        expected_attempt = int(attempt_path.name.split("_", 1)[1])
+    except Exception:
+        expected_attempt = None
+    if expected_attempt is not None and raw_attempt_index != expected_attempt:
+        violations.append(
+            f"Seal attempt_index mismatch: recorded '{raw_attempt_index}', expected {expected_attempt}"
+        )
+
+    # Verify total_files_sealed
+    # Recompute seal in-memory
+    try:
+        computed_seal = compute_attempt_merkle_seal(
+            attempt_dir=attempt_path,
+            workspace_root=ws_root,
+            task_id=str(seal_data.get("task_id", "")),
+            attempt_index=raw_attempt_index,
+            verdict_data=seal_data.get("verdict"),
+            write_seal_file=False,
+        )
+    except SealingError as sym_err:
+        return False, [str(sym_err)]
+
+    if computed_seal["merkle_root_sha256"] != expected_merkle_root:
+        violations.append(
+            f"Merkle root mismatch: expected {expected_merkle_root}, computed {computed_seal['merkle_root_sha256']}"
+        )
+
+    recorded_payload_sha = seal_data.get("seal_payload_sha256")
+    if not isinstance(recorded_payload_sha, str) or not hmac.compare_digest(
+        recorded_payload_sha, computed_seal["seal_payload_sha256"]
+    ):
+        violations.append(
+            f"Seal metadata payload digest mismatch: recorded '{recorded_payload_sha}', computed '{computed_seal['seal_payload_sha256']}'"
+        )
+
+    if seal_data.get("total_files_sealed") != len(computed_seal["leaves"]):
+        violations.append(
+            f"Seal total_files_sealed mismatch: recorded {seal_data.get('total_files_sealed')}, actual {len(computed_seal['leaves'])}"
+        )
+
+    # Cross-check verdict against Phase-3/verdict.json if present
+    verdict_file = attempt_path / "Phase-3" / "verdict.json"
+    if verdict_file.is_symlink():
+        violations.append(f"Security policy violation: Phase-3/verdict.json is a symlink: '{verdict_file}'.")
+    elif verdict_file.is_file():
+        try:
+            disk_verdict = load_json_file(verdict_file)
+            if seal_data.get("verdict") != disk_verdict:
+                violations.append("Seal verdict metadata diverges from Phase-3/verdict.json.")
+        except Exception as err:
+            violations.append(f"Failed to verify seal verdict against Phase-3/verdict.json: {err}")
+
+    # Cross-check EVIDENCE_MANIFEST.json if indexed for this task/attempt
+    manifest_file = ws_root / "evidence" / "EVIDENCE_MANIFEST.json"
+    if manifest_file.is_symlink():
+        violations.append(f"Security policy violation: evidence/EVIDENCE_MANIFEST.json is a symlink: '{manifest_file}'.")
+    elif manifest_file.is_file():
+        try:
+            manifest_data = load_json_file(manifest_file)
+            indexed = (
+                manifest_data.get("sealed_tasks", {})
+                .get(expected_task_id, {})
+                .get(f"attempt_{expected_attempt}")
+            )
+            if indexed is not None:
+                actual_seal_sha = hashlib.sha256(read_bytes_nofollow(seal_file)).hexdigest()
+                if indexed.get("seal_sha256") != actual_seal_sha:
+                    violations.append("EVIDENCE_MANIFEST.json seal_sha256 does not match seal.json.")
+                if indexed.get("merkle_root_sha256") != expected_merkle_root:
+                    violations.append("EVIDENCE_MANIFEST.json merkle_root_sha256 does not match seal.json.")
+        except Exception as err:
+            violations.append(f"Malformed EVIDENCE_MANIFEST.json during seal check: {err}")
+
+    # Check leaf-by-leaf
+    computed_leaves_map = {l["path"]: l["hash"] for l in computed_seal["leaves"]}
+    for leaf in recorded_leaves:
+        rel_p = leaf.get("path")
+        exp_h = leaf.get("hash")
+        if rel_p not in computed_leaves_map:
+            violations.append(f"Missing sealed file: '{rel_p}'")
+        elif computed_leaves_map[rel_p] != exp_h:
+            violations.append(
+                f"Tampered sealed file: '{rel_p}' (recorded {exp_h[:12]}, computed {computed_leaves_map[rel_p][:12]})"
+            )
+
+    for p in computed_leaves_map:
+        if not any(l.get("path") == p for l in recorded_leaves):
+            violations.append(f"Unrecorded file present in attempt directory: '{p}'")
+
+    return len(violations) == 0, violations
+
+
+def index_seal_in_manifest(
+    workspace_root: Union[str, Path],
+    task_id: str,
+    attempt_index: int,
+    seal_record: Dict[str, Any],
+) -> Path:
+    """Acyclically index completed attempt seal into EVIDENCE_MANIFEST.json (FR-12 / DEC-012).
+
+    Manifest hashes seal.json; seal.json hashes attempt directory.
+    """
+    ws = Path(workspace_root).resolve()
+    manifest_file = ws / "evidence" / "EVIDENCE_MANIFEST.json"
+    if manifest_file.parent.is_symlink():
+        raise SealingError(f"Security policy violation: evidence directory '{manifest_file.parent}' cannot be a symbolic link.")
+    manifest_file.parent.mkdir(parents=True, exist_ok=True)
+
+    seal_file = resolve_task_attempt_dir(ws, task_id, attempt_index) / "seal.json"
+    seal_bytes = read_bytes_nofollow(seal_file)
+    seal_sha256 = hashlib.sha256(seal_bytes).hexdigest()
+
+    with controlled_write_transaction(manifest_file.parent):
+        if manifest_file.is_symlink():
+            raise SealingError(f"Security policy violation: Refusing to read symlinked EVIDENCE_MANIFEST.json '{manifest_file}'.")
+        if manifest_file.is_file():
+            try:
+                manifest_data = load_json_file(manifest_file)
+                if not isinstance(manifest_data, dict):
+                    raise SealingError("EVIDENCE_MANIFEST.json root must be a JSON object.")
+            except Exception as err:
+                raise SealingError(f"Refusing to overwrite corrupted EVIDENCE_MANIFEST.json: {err}") from err
+        else:
+            manifest_data = {"schema_version": "2.0.0", "sealed_tasks": {}}
+
+        sealed_tasks = manifest_data.setdefault("sealed_tasks", {})
+        task_entry = sealed_tasks.setdefault(task_id, {})
+        task_entry[f"attempt_{attempt_index}"] = {
+            "seal_sha256": seal_sha256,
+            "merkle_root_sha256": seal_record["merkle_root_sha256"],
+            "total_files": seal_record["total_files_sealed"],
+        }
+
+        # Keep entries map synchronized if present
+        if "entries" in manifest_data:
+            from datetime import datetime, timezone
+            rel_posix = seal_file.relative_to(ws).as_posix()
+            manifest_data["entries"][rel_posix] = {
+                "sha256": seal_sha256,
+                "size_bytes": len(seal_bytes),
+                "indexed_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        from governance.core.paths import write_text_nofollow
+        if manifest_file.exists():
+            try:
+                _safe_chmod(manifest_file, 0o644)
+            except OSError:
+                pass
+        write_text_nofollow(manifest_file, json.dumps(manifest_data, indent=2, sort_keys=True) + "\n", append=False, mode=0o444)
+        try:
+            _safe_chmod(manifest_file, 0o444)
+        except OSError:
+            pass
+
+    return manifest_file
+

@@ -24,27 +24,27 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.main import main
-from stagecheck.core.circuit_breaker import (
+from governance.cli.main import main
+from governance.core.circuit_breaker import (
     AttemptBudgetExhaustedError,
     CircuitBreakerEvaluation,
     trip_circuit_breaker,
 )
-from stagecheck.core.gate_engine import (
+from governance.core.gate_engine import (
     GateCriteriaFailedError,
     GateId,
     advance_gate_atomic,
     generate_gate_receipt,
     handle_audit_verdict,
 )
-from stagecheck.core.permissions import (
+from governance.core.permissions import (
     ActiveTaskTeardownBlockedError,
     assert_safe_teardown_preconditions,
     controlled_write_transaction,
 )
-from stagecheck.core.sealing import verify_attempt_merkle_seal
-from stagecheck.core.state import load_active_state, save_active_state
-from stagecheck.core.utils import sha256_file
+from governance.core.sealing import verify_attempt_merkle_seal
+from governance.core.state import load_active_state, save_active_state
+from governance.core.utils import sha256_file
 
 
 class TestGate4SealingAndLifecycle(unittest.TestCase):

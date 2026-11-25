@@ -69,7 +69,7 @@ fi
 "${PYTHON_BIN}" - <<'PYEOF'
 import tempfile
 from pathlib import Path
-from stagecheck.core.portability import (
+from governance.core.portability import (
     EXECUTABLE_REPO_PATHS,
     create_source_zip_preserving_modes,
     extract_zip_preserving_modes,

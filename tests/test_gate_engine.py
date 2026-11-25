@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.gate_engine import (
+from governance.core.gate_engine import (
     GateAdvanceResult,
     GateCheckReport,
     GateCriteriaFailedError,
@@ -25,11 +25,11 @@ from stagecheck.core.gate_engine import (
     normalize_gate_id,
     validate_gate_transition_allowed,
 )
-from stagecheck.core.git import RepoBaseline
-from stagecheck.core.scaffold import scaffold_controls_atomic
-from stagecheck.core.state import load_active_state, save_active_state
-from stagecheck.core.utils import canonical_json_dumps, sha256_file
-from stagecheck.schemas.validator import validate_active_state
+from governance.core.git import RepoBaseline
+from governance.core.scaffold import scaffold_controls_atomic
+from governance.core.state import load_active_state, save_active_state
+from governance.core.utils import canonical_json_dumps, sha256_file
+from governance.schemas.validator import validate_active_state
 
 
 class TestGateEngine(unittest.TestCase):
@@ -218,7 +218,7 @@ class TestGateEngine(unittest.TestCase):
 
         # 4. Partial Phase-3/rubric_evaluation.json MUST NOT satisfy Gate-3 (GAP-02)
         import datetime
-        from stagecheck.core.rubric_engine import compute_rubric_context_digest, load_270_rule_catalog
+        from governance.core.rubric_engine import compute_rubric_context_digest, load_270_rule_catalog
 
         catalog = load_270_rule_catalog()
         now_iso = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -256,7 +256,7 @@ class TestGateEngine(unittest.TestCase):
         self.assertFalse(rep_partial.passed)
 
         # 5. Passing verdict WITH COMPLETE 270/270 PASS Phase-3/rubric_evaluation.json -> PASS
-        from stagecheck.core.rubric_engine import get_rule_strategy
+        from governance.core.rubric_engine import get_rule_strategy
 
         full_evals = []
         for r in catalog:
@@ -297,7 +297,7 @@ class TestGateEngine(unittest.TestCase):
         from unittest.mock import patch
         import json as _json
         expected_eval = _json.loads((p3_dir / "rubric_evaluation.json").read_text(encoding="utf-8"))
-        with patch("stagecheck.core.rubric_engine.run_rubric_evaluation", return_value=(expected_eval, 1.0)):
+        with patch("governance.core.rubric_engine.run_rubric_evaluation", return_value=(expected_eval, 1.0)):
             rep3 = check_gate_preconditions(self.workspace, "Gate-3")
         self.assertTrue(rep3.passed, f"Expected Gate-3 to pass, failures={rep3.failure_reasons}")
 

@@ -14,7 +14,7 @@ from pathlib import Path
 
 def setup_test_scanner():
     """Configure portable test scanner launcher for the test harness."""
-    from stagecheck.core.scanner import SecretScanner
+    from governance.core.scanner import SecretScanner
 
     # If host has real Gitleaks (not inside tests/), verify and use if present
     host_gitleaks = shutil.which("gitleaks")

@@ -9,19 +9,19 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from stagecheck.cli.main import main
-from stagecheck.core.dispositions import (
+from governance.cli.main import main
+from governance.core.dispositions import (
     DispositionError,
     NonInteractiveDispositionBlockedError,
     add_disposition,
     load_dispositions,
     resume_after_disposition,
 )
-from stagecheck.core.git import discover_repository
-from stagecheck.core.orchestrator import AuditOrchestrator
-from stagecheck.core.scaffold import scaffold_controls_atomic
-from stagecheck.core.agents_md import write_agents_contract
-from stagecheck.core.utils import canonical_json_dumps, sha256_file
+from governance.core.git import discover_repository
+from governance.core.orchestrator import AuditOrchestrator
+from governance.core.scaffold import scaffold_controls_atomic
+from governance.core.agents_md import write_agents_contract
+from governance.core.utils import canonical_json_dumps, sha256_file
 
 
 class TestDispositions(unittest.TestCase):
@@ -268,8 +268,8 @@ class TestDispositions(unittest.TestCase):
 
     def test_resume_rejects_symlinked_phase3_dir_and_verdict_mismatch(self):
         """Verify resume_after_disposition rejects symlinked Phase-3 dir and mismatched task_id/iteration."""
-        from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.state import load_active_state, save_active_state
+        from governance.core.permissions import controlled_write_transaction
+        from governance.core.state import load_active_state, save_active_state
 
         with controlled_write_transaction(self.workspace_root / "controls"):
             s = load_active_state(self.workspace_root)

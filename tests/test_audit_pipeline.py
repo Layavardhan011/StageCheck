@@ -21,17 +21,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.audit_cmd import run_audit_cmd
-from stagecheck.cli.gate_cmd import run_gate_advance, run_gate_check
-from stagecheck.cli.init_cmd import run_init
-from stagecheck.cli.main import main
-from stagecheck.cli.review_cmd import run_approve_review
-from stagecheck.core.gate_engine import GateId, advance_gate_atomic, check_gate_preconditions
-from stagecheck.core.orchestrator import run_audit
-from stagecheck.core.permissions import elevate_permissions_for_teardown
-from stagecheck.core.prompt_gate import freeze_prompt_and_scope
-from stagecheck.core.state import load_active_state, save_active_state
-from stagecheck.core.utils import canonical_json_dumps, sha256_file
+from governance.cli.audit_cmd import run_audit_cmd
+from governance.cli.gate_cmd import run_gate_advance, run_gate_check
+from governance.cli.init_cmd import run_init
+from governance.cli.main import main
+from governance.cli.review_cmd import run_approve_review
+from governance.core.gate_engine import GateId, advance_gate_atomic, check_gate_preconditions
+from governance.core.orchestrator import run_audit
+from governance.core.permissions import elevate_permissions_for_teardown
+from governance.core.prompt_gate import freeze_prompt_and_scope
+from governance.core.state import load_active_state, save_active_state
+from governance.core.utils import canonical_json_dumps, sha256_file
 
 
 def _setup_git_repo(repo_dir: Path, file_name: str = "app.py", task_id: str = "task-audit-01") -> str:
@@ -99,10 +99,10 @@ class TestAuditPipeline(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
 
-        from stagecheck.core.agents_md import write_agents_contract
-        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
-        from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.rubric_engine import (
+        from governance.core.agents_md import write_agents_contract
+        from governance.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from governance.core.permissions import controlled_write_transaction
+        from governance.core.rubric_engine import (
             build_agent_reviews_artifact,
             load_270_rule_catalog,
             run_rubric_evaluation,
@@ -384,8 +384,8 @@ class TestAuditPipeline(unittest.TestCase):
 
     def test_stage8_rerun_accepts_qualification_directory_command(self) -> None:
         """Verify Stage 8 rerun permits command citations with cwd under qualification root (evals)."""
-        from stagecheck.checks.stage8_rerun import run_stage8_rerun
-        from stagecheck.core.orchestrator import AuditContext
+        from governance.checks.stage8_rerun import run_stage8_rerun
+        from governance.core.orchestrator import AuditContext
 
         evals_dir = self.ws / "evals"
         evals_dir.mkdir(parents=True, exist_ok=True)

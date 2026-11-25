@@ -6,10 +6,10 @@ import io
 import unittest
 from contextlib import redirect_stdout
 
-import stagecheck
-from stagecheck.cli.main import build_parser, main
-from stagecheck.config import get_config_path
-from stagecheck.schemas import get_schema_path
+import governance
+from governance.cli.main import build_parser, main
+from governance.config import get_config_path
+from governance.schemas import get_schema_path
 
 
 class TestSmoke(unittest.TestCase):
@@ -17,7 +17,7 @@ class TestSmoke(unittest.TestCase):
 
     def test_package_metadata(self) -> None:
         """Verify package version and exports."""
-        self.assertEqual(stagecheck.__version__, "2.0.0")
+        self.assertEqual(governance.__version__, "2.0.0")
 
     def test_cli_parser_subcommands(self) -> None:
         """Verify CLI parser has all 14 lifecycle subcommands registered."""

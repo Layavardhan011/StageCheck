@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from stagecheck.core.utils import SchemaValidationError
-from stagecheck.schemas.validator import (
+from governance.core.utils import SchemaValidationError
+from governance.schemas.validator import (
     validate_active_state,
     validate_control_descriptor,
     validate_gate_receipt,

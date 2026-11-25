@@ -9,9 +9,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.init_cmd import run_init
-from stagecheck.core.locking import acquire_bootstrap_lock
-from stagecheck.core.permissions import (
+from governance.cli.init_cmd import run_init
+from governance.core.locking import acquire_bootstrap_lock
+from governance.core.permissions import (
     controlled_write_transaction,
     elevate_permissions_for_teardown,
 )
@@ -68,7 +68,7 @@ class TestInitCommand(unittest.TestCase):
 
     def test_init_idempotent_reconciliation_without_force(self) -> None:
         """Verify repeated init succeeds and performs idempotent reconciliation with zero content mutation (FR-08)."""
-        from stagecheck.core.utils import sha256_file
+        from governance.core.utils import sha256_file
 
         # 1. Initial run
         ret1 = run_init(
@@ -194,7 +194,7 @@ class TestInitCommand(unittest.TestCase):
 
     def test_init_cli_reinit_flag(self) -> None:
         """Verify CLI parser accepts --reinit as alias for --force."""
-        from stagecheck.cli.main import main
+        from governance.cli.main import main
         ret1 = main(["init", "--workspace", str(self.workspace), "--repos", "payment-service", "--agent1", "agent1", "--agent2", "agent2"])
         self.assertEqual(ret1, 0)
         # Calling again with --reinit must succeed

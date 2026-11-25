@@ -26,14 +26,14 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from stagecheck.cli.init_cmd import run_init
-from stagecheck.cli.main import main
-from stagecheck.core.journal import (
+from governance.cli.init_cmd import run_init
+from governance.cli.main import main
+from governance.core.journal import (
     TransactionJournal,
     recover_interrupted_transactions,
     write_ahead_transaction,
 )
-from stagecheck.core.permissions import controlled_write_transaction, elevate_permissions_for_teardown
+from governance.core.permissions import controlled_write_transaction, elevate_permissions_for_teardown
 
 
 class TestWriteAheadJournal(unittest.TestCase):
@@ -329,7 +329,7 @@ class TestWriteAheadJournal(unittest.TestCase):
 
     def test_interrupted_state_transition_restores_authoritative_state(self) -> None:
         """Verify interrupted state transition restores exact active state and mode (Gap C)."""
-        from stagecheck.core.state import load_active_state, save_active_state
+        from governance.core.state import load_active_state, save_active_state
         state_file = self.ws / "controls" / "ACTIVE_STATE.json"
 
         # Baseline state
@@ -360,7 +360,7 @@ class TestWriteAheadJournal(unittest.TestCase):
 
     def test_corrupted_or_modified_evidence_detected_during_recovery_and_sealing(self) -> None:
         """Verify corrupted or modified evidence is strictly detected and not converted to pass (Gap C)."""
-        from stagecheck.core.sealing import compute_attempt_merkle_seal, verify_attempt_merkle_seal
+        from governance.core.sealing import compute_attempt_merkle_seal, verify_attempt_merkle_seal
         attempt_dir = self.ws / "evidence" / "tasks" / "task-01" / "attempt_1"
         attempt_dir.mkdir(parents=True, exist_ok=True)
         (attempt_dir / "output.txt").write_text("evidence data\n", encoding="utf-8")

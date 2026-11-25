@@ -9,9 +9,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.main import main
-from stagecheck.core.agents_md import write_agents_contract
-from stagecheck.core.dispositions import (
+from governance.cli.main import main
+from governance.core.agents_md import write_agents_contract
+from governance.core.dispositions import (
     DispositionError,
     UnauthorizedDispositionError,
     add_disposition,
@@ -23,12 +23,12 @@ from stagecheck.core.dispositions import (
     revoke_disposition,
     validate_waiver_provenance,
 )
-from stagecheck.core.git import discover_repository
-from stagecheck.core.permissions import controlled_write_transaction, elevate_permissions_for_teardown
-from stagecheck.core.rubric_engine import _evaluate_human_waiver, load_270_rule_catalog
-from stagecheck.core.scaffold import scaffold_controls_atomic
-from stagecheck.core.state import load_active_state, save_active_state
-from stagecheck.core.utils import canonical_json_dumps
+from governance.core.git import discover_repository
+from governance.core.permissions import controlled_write_transaction, elevate_permissions_for_teardown
+from governance.core.rubric_engine import _evaluate_human_waiver, load_270_rule_catalog
+from governance.core.scaffold import scaffold_controls_atomic
+from governance.core.state import load_active_state, save_active_state
+from governance.core.utils import canonical_json_dumps
 
 
 class TestHumanWaiverProvenance(unittest.TestCase):
@@ -294,8 +294,8 @@ class TestHumanWaiverProvenance(unittest.TestCase):
 
     def test_disposition_abort_requires_authorized_owner_even_with_yes(self) -> None:
         """Verify '--action abort --yes' cannot bypass --authorized-by / OWNER_GRANTS.md."""
-        from stagecheck.cli.disposition_cmd import run_disposition
-        from stagecheck.core.state import load_active_state
+        from governance.cli.disposition_cmd import run_disposition
+        from governance.core.state import load_active_state
 
         # Missing --authorized-by with --yes must fail
         rc_missing = run_disposition(

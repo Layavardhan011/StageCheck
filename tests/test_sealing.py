@@ -26,9 +26,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.init_cmd import run_init
-from stagecheck.core.permissions import elevate_permissions_for_teardown
-from stagecheck.core.sealing import (
+from governance.cli.init_cmd import run_init
+from governance.core.permissions import elevate_permissions_for_teardown
+from governance.core.sealing import (
     SymlinkInEvidenceError,
     compute_attempt_merkle_seal,
     index_seal_in_manifest,
@@ -209,7 +209,7 @@ class TestAcyclicMerkleSealing(unittest.TestCase):
 
     def test_create_task_seal_rejects_symlinked_verdict(self) -> None:
         """Verify create_task_seal uses nofollow and rejects symlinked verdict.json."""
-        from stagecheck.core.evidence import EvidenceTamperError, create_task_seal
+        from governance.core.evidence import EvidenceTamperError, create_task_seal
 
         outside = self.ws / "outside_verdict.json"
         outside.write_text('{"result": "CLEAR"}', encoding="utf-8")
@@ -257,8 +257,8 @@ class TestAcyclicMerkleSealing(unittest.TestCase):
 
     def test_multi_attempt_retroactively_seals_unsealed_prior_retry(self) -> None:
         """Verify sealing attempt 2 retroactively seals unsealed failed attempt 1 to maintain Merkle chain."""
-        from stagecheck.core.agents import resolve_task_attempt_dir
-        from stagecheck.core.evidence import verify_seal_chain
+        from governance.core.agents import resolve_task_attempt_dir
+        from governance.core.evidence import verify_seal_chain
 
         # Setup attempt 1 without seal.json (representing a failed attempt)
         att1_dir = resolve_task_attempt_dir(self.ws, self.task_id, 1, ensure_exists=True)

@@ -1,7 +1,7 @@
 """Unit tests for Spec 05: Universal Agent Decoupling & Dynamic Provider Architecture."""
 
 import unittest
-from stagecheck.core.utils import AgentSlugError, is_valid_agent_slug, validate_agent_slug
+from governance.core.utils import AgentSlugError, is_valid_agent_slug, validate_agent_slug
 
 
 class TestUniversalAgentDecoupling(unittest.TestCase):

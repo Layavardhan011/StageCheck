@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.controls import (
+from governance.core.controls import (
     MANDATORY_CONTROLS,
     ControlsRegistryError,
     ControlsSecurityError,
@@ -21,9 +21,9 @@ from stagecheck.core.controls import (
     get_mandatory_controls,
     validate_controls_registry,
 )
-from stagecheck.core.git import RepoBaseline
-from stagecheck.core.scaffold import scaffold_controls_atomic
-from stagecheck.schemas.validator import validate_control_descriptor
+from governance.core.git import RepoBaseline
+from governance.core.scaffold import scaffold_controls_atomic
+from governance.schemas.validator import validate_control_descriptor
 
 
 class TestControlsRegistry(unittest.TestCase):

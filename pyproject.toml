@@ -33,14 +33,14 @@ dev = [
 ]
 
 [project.scripts]
-stagecheck = "stagecheck.cli.main:main"
+stagecheck = "governance.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["stagecheck*"]
+include = ["governance*"]
 
 [tool.setuptools.package-data]
-stagecheck = [
+governance = [
     "schemas/assets/*.json",
     "config/defaults/*.json",
     "config/.gitleaks.toml",

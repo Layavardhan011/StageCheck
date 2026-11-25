@@ -20,21 +20,21 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.gate_cmd import run_gate_advance, run_gate_check
-from stagecheck.cli.init_cmd import run_init
-from stagecheck.cli.review_cmd import run_approve_review
-from stagecheck.core.prompt_gate import freeze_prompt_and_scope
-from stagecheck.core.gate_engine import (
+from governance.cli.gate_cmd import run_gate_advance, run_gate_check
+from governance.cli.init_cmd import run_init
+from governance.cli.review_cmd import run_approve_review
+from governance.core.prompt_gate import freeze_prompt_and_scope
+from governance.core.gate_engine import (
     GateCriteriaFailedError,
     GateId,
     advance_gate_atomic,
     check_gate_preconditions,
     evaluate_gate_2b_criteria,
 )
-from stagecheck.core.git import approved_remote, get_approved_remote_urls, get_repo_remote_push_urls
-from stagecheck.core.permissions import controlled_write_transaction, elevate_permissions_for_teardown
-from stagecheck.core.state import load_active_state, save_active_state
-from stagecheck.core.utils import sha256_file
+from governance.core.git import approved_remote, get_approved_remote_urls, get_repo_remote_push_urls
+from governance.core.permissions import controlled_write_transaction, elevate_permissions_for_teardown
+from governance.core.state import load_active_state, save_active_state
+from governance.core.utils import sha256_file
 
 
 def _git_run(args, cwd):
@@ -176,15 +176,15 @@ class TestGate2BAuthorization(unittest.TestCase):
         (self.p2a_dir / "pre_commit_status.json").write_text(json.dumps(status_data, indent=2) + "\n", encoding="utf-8")
 
         # Seed complete rubric artifacts with valid human-waiver and agent-review provenance
-        from stagecheck.core.agents_md import write_agents_contract
-        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
-        from stagecheck.core.rubric_engine import (
+        from governance.core.agents_md import write_agents_contract
+        from governance.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from governance.core.rubric_engine import (
             build_agent_reviews_artifact,
             load_270_rule_catalog,
             run_rubric_evaluation,
             update_rubric_artifacts,
         )
-        from stagecheck.core.utils import canonical_json_dumps
+        from governance.core.utils import canonical_json_dumps
 
         (self.ws / "evals").mkdir(parents=True, exist_ok=True)
         waiver_evidence = self.ws / "evidence" / "waiver_g2b.txt"
@@ -487,8 +487,8 @@ class TestGate2BAuthorization(unittest.TestCase):
             self.assertTrue((witnesses_dir / name).is_file(), f"{name} should exist under Phase-2B/witnesses/")
 
         # Verify Stage 3 citation resolution resolves relocated file cleanly
-        from stagecheck.checks.base import AuditContext
-        from stagecheck.checks.stage3_citations import run_stage3_citations
+        from governance.checks.base import AuditContext
+        from governance.checks.stage3_citations import run_stage3_citations
         claims = {
             "claims": [
                 {
@@ -587,7 +587,7 @@ class TestGate2BAuthorization(unittest.TestCase):
         notif_head = _git_run(["rev-parse", "HEAD"], cwd=notif_dir).stdout.strip()
 
         # 2. Update PRODUCT_REPOSITORIES.json
-        from stagecheck.core.permissions import controlled_write_transaction
+        from governance.core.permissions import controlled_write_transaction
         prod_repos_path = self.ws / "controls" / "PRODUCT_REPOSITORIES.json"
         prod_data = json.loads(prod_repos_path.read_text(encoding="utf-8"))
         prod_data["repositories"]["notification-service"] = {

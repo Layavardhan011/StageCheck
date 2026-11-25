@@ -19,13 +19,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.checks.base import AuditContext, Defect, StageResult
-from stagecheck.core.agents_md import write_agents_contract
-from stagecheck.core.git import discover_repository
-from stagecheck.core.orchestrator import AuditOrchestrator
-from stagecheck.core.prompt_gate import freeze_prompt_and_scope
-from stagecheck.core.scaffold import scaffold_controls_atomic
-from stagecheck.core.utils import canonical_json_dumps, sha256_digest
+from governance.checks.base import AuditContext, Defect, StageResult
+from governance.core.agents_md import write_agents_contract
+from governance.core.git import discover_repository
+from governance.core.orchestrator import AuditOrchestrator
+from governance.core.prompt_gate import freeze_prompt_and_scope
+from governance.core.scaffold import scaffold_controls_atomic
+from governance.core.utils import canonical_json_dumps, sha256_digest
 
 
 class TestMultiRepoAggregateScenarios(unittest.TestCase):
@@ -84,11 +84,11 @@ class TestMultiRepoAggregateScenarios(unittest.TestCase):
         base_a = discover_repository(self.repo_a, name="service-a", workspace_root=self.workspace_root)
         base_b = discover_repository(self.repo_b, name="service-b", workspace_root=self.workspace_root)
         scaffold_controls_atomic(self.workspace_root, {"service-a": base_a, "service-b": base_b})
-        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
-        from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.rubric_engine import load_270_rule_catalog
-        from stagecheck.core.start_manifest import generate_start_manifest
-        from stagecheck.core.state import load_active_state, save_active_state
+        from governance.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from governance.core.permissions import controlled_write_transaction
+        from governance.core.rubric_engine import load_270_rule_catalog
+        from governance.core.start_manifest import generate_start_manifest
+        from governance.core.state import load_active_state, save_active_state
 
         (self.workspace_root / "specs").mkdir(parents=True, exist_ok=True)
         generate_start_manifest(self.workspace_root)
@@ -182,8 +182,8 @@ class TestMultiRepoAggregateScenarios(unittest.TestCase):
             }),
             encoding="utf-8",
         )
-        from stagecheck.core.rubric_engine import build_agent_reviews_artifact, load_270_rule_catalog
-        from stagecheck.core.utils import sha256_file
+        from governance.core.rubric_engine import build_agent_reviews_artifact, load_270_rule_catalog
+        from governance.core.utils import sha256_file
 
         agent_reviews = {
             r.rule_id: {
@@ -374,7 +374,7 @@ class TestMultiRepoAggregateScenarios(unittest.TestCase):
         ctx = orchestrator.discover_context(self.task_id, self.attempt)
 
         from unittest.mock import patch
-        with patch("stagecheck.core.orchestrator.run_stage2_scope_paths", side_effect=RuntimeError("Injected pipeline crash")):
+        with patch("governance.core.orchestrator.run_stage2_scope_paths", side_effect=RuntimeError("Injected pipeline crash")):
             passed, verdict = orchestrator.run_all_stages(ctx)
             self.assertFalse(passed)
             self.assertEqual(verdict["result"], "BLOCKED")
@@ -405,7 +405,7 @@ class TestMultiRepoAggregateScenarios(unittest.TestCase):
         ctx = orchestrator.discover_context(self.task_id, self.attempt)
         self.assertEqual(ctx.touched_repos, [])
 
-        from stagecheck.checks.stage5_authority import run_stage5_authority
+        from governance.checks.stage5_authority import run_stage5_authority
         stage5_res = run_stage5_authority(ctx)
         self.assertEqual(stage5_res.status, "CLEAR")
         self.assertFalse(any(d.defect_id == "authority.unreviewed_commit_divergence" for d in stage5_res.defects))

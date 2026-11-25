@@ -9,25 +9,25 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from stagecheck.checks.base import AuditContext, Defect, StageResult
-from stagecheck.checks.stage1_preflight import run_stage1_preflight
-from stagecheck.checks.stage2_scope_paths import run_stage2_scope_paths
-from stagecheck.checks.stage3_citations import run_stage3_citations
-from stagecheck.checks.stage4_report_lint import run_stage4_report_lint
-from stagecheck.checks.stage5_authority import run_stage5_authority
-from stagecheck.checks.stage6_secrets import run_stage6_secrets
-from stagecheck.checks.stage7_qual_naming import run_stage7_qual_naming
-from stagecheck.checks.stage8_rerun import run_stage8_rerun
-from stagecheck.checks.stage9_carry_forward import run_stage9_carry_forward
-from stagecheck.cli.main import main
-from stagecheck.core.agents_md import write_agents_contract
-from stagecheck.core.orchestrator import AuditOrchestrator, run_audit
-from stagecheck.core.permissions import controlled_write_transaction
-from stagecheck.core.prompt_gate import freeze_prompt_and_scope
-from stagecheck.core.scaffold import scaffold_controls_atomic
-from stagecheck.core.git import discover_repository
-from stagecheck.core.utils import canonical_json_dumps, sha256_digest, sha256_file, validate_schema
-from stagecheck.schemas.validator import get_schema_path, load_json_file
+from governance.checks.base import AuditContext, Defect, StageResult
+from governance.checks.stage1_preflight import run_stage1_preflight
+from governance.checks.stage2_scope_paths import run_stage2_scope_paths
+from governance.checks.stage3_citations import run_stage3_citations
+from governance.checks.stage4_report_lint import run_stage4_report_lint
+from governance.checks.stage5_authority import run_stage5_authority
+from governance.checks.stage6_secrets import run_stage6_secrets
+from governance.checks.stage7_qual_naming import run_stage7_qual_naming
+from governance.checks.stage8_rerun import run_stage8_rerun
+from governance.checks.stage9_carry_forward import run_stage9_carry_forward
+from governance.cli.main import main
+from governance.core.agents_md import write_agents_contract
+from governance.core.orchestrator import AuditOrchestrator, run_audit
+from governance.core.permissions import controlled_write_transaction
+from governance.core.prompt_gate import freeze_prompt_and_scope
+from governance.core.scaffold import scaffold_controls_atomic
+from governance.core.git import discover_repository
+from governance.core.utils import canonical_json_dumps, sha256_digest, sha256_file, validate_schema
+from governance.schemas.validator import get_schema_path, load_json_file
 
 
 class TestNineStageVerification(unittest.TestCase):
@@ -80,9 +80,9 @@ class TestNineStageVerification(unittest.TestCase):
 
         baseline = discover_repository(self.repo_dir, name="app", workspace_root=self.workspace_root)
         scaffold_controls_atomic(self.workspace_root, {"app": baseline})
-        from stagecheck.core.rubric_engine import load_270_rule_catalog
+        from governance.core.rubric_engine import load_270_rule_catalog
 
-        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from governance.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
 
         waiver_ev = self.workspace_root / "evidence" / "waiver_orch.txt"
         waiver_ev.parent.mkdir(parents=True, exist_ok=True)
@@ -105,8 +105,8 @@ class TestNineStageVerification(unittest.TestCase):
             "schema_version": "2.0",
             "dispositions": [w_entry],
         }
-        from stagecheck.core.start_manifest import generate_start_manifest
-        from stagecheck.core.state import load_active_state, save_active_state
+        from governance.core.start_manifest import generate_start_manifest
+        from governance.core.state import load_active_state, save_active_state
 
         with controlled_write_transaction(self.workspace_root / "controls"):
             (self.workspace_root / "controls" / "DISPOSITIONS.json").write_text(
@@ -117,8 +117,8 @@ class TestNineStageVerification(unittest.TestCase):
         state["cleared_gates"] = {"GATE_1": "0" * 64}
         save_active_state(self.workspace_root, state)
         write_agents_contract(self.workspace_root)
-        from stagecheck.core.start_manifest import generate_start_manifest
-        from stagecheck.core.state import load_active_state, save_active_state
+        from governance.core.start_manifest import generate_start_manifest
+        from governance.core.state import load_active_state, save_active_state
 
         (self.workspace_root / "specs").mkdir(parents=True, exist_ok=True)
         generate_start_manifest(self.workspace_root)
@@ -217,7 +217,7 @@ class TestNineStageVerification(unittest.TestCase):
             }),
             encoding="utf-8",
         )
-        from stagecheck.core.rubric_engine import build_agent_reviews_artifact, load_270_rule_catalog
+        from governance.core.rubric_engine import build_agent_reviews_artifact, load_270_rule_catalog
 
         agent_reviews = {
             r.rule_id: {
@@ -259,7 +259,7 @@ class TestNineStageVerification(unittest.TestCase):
             "## Verification\nRan tests successfully.\n"
         )
         report_file.write_text(report_content, encoding="utf-8")
-        from stagecheck.core.utils import sha256_file
+        from governance.core.utils import sha256_file
 
         (p2b_dir / "claims.json").write_text(
             canonical_json_dumps({
@@ -673,7 +673,7 @@ class TestNineStageVerification(unittest.TestCase):
         self.assertFalse(res2_fail.is_clear)
 
         # Attempt 2 with cryptographically valid prior seal & non-empty issue history -> CLEAR
-        from stagecheck.core.evidence import append_issue_history, create_task_seal
+        from governance.core.evidence import append_issue_history, create_task_seal
         append_issue_history(
             self.workspace_root,
             self.task_id,
@@ -695,8 +695,8 @@ class TestNineStageVerification(unittest.TestCase):
     def test_stage9_carry_forward_unsealed_retry_attempt(self):
         """Test Stage 9 unsealed retry attempt clears when prior attempt failed and ledger is present."""
         import json
-        from stagecheck.core.evidence import append_issue_history
-        from stagecheck.checks.stage9_carry_forward import run_stage9_carry_forward
+        from governance.core.evidence import append_issue_history
+        from governance.checks.stage9_carry_forward import run_stage9_carry_forward
 
         task_id = "task-unsealed-retry"
         p1_dir = self.workspace_root / "evidence" / "tasks" / task_id / "attempt_1"
@@ -753,9 +753,9 @@ class TestNineStageVerification(unittest.TestCase):
             self.workspace_root,
             {"app": baseline_app, "service-b": baseline_b},
         )
-        from stagecheck.core.rubric_engine import load_270_rule_catalog
+        from governance.core.rubric_engine import load_270_rule_catalog
 
-        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from governance.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
 
         catalog = load_270_rule_catalog()
         waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
@@ -774,8 +774,8 @@ class TestNineStageVerification(unittest.TestCase):
             "schema_version": "2.0",
             "dispositions": [w_entry],
         }
-        from stagecheck.core.start_manifest import generate_start_manifest
-        from stagecheck.core.state import load_active_state, save_active_state
+        from governance.core.start_manifest import generate_start_manifest
+        from governance.core.state import load_active_state, save_active_state
 
         with controlled_write_transaction(self.workspace_root / "controls"):
             (self.workspace_root / "controls" / "DISPOSITIONS.json").write_text(
@@ -786,8 +786,8 @@ class TestNineStageVerification(unittest.TestCase):
         state["cleared_gates"] = {"GATE_1": "0" * 64}
         save_active_state(self.workspace_root, state)
         write_agents_contract(self.workspace_root)
-        from stagecheck.core.start_manifest import generate_start_manifest
-        from stagecheck.core.state import load_active_state, save_active_state
+        from governance.core.start_manifest import generate_start_manifest
+        from governance.core.state import load_active_state, save_active_state
 
         (self.workspace_root / "specs").mkdir(parents=True, exist_ok=True)
         generate_start_manifest(self.workspace_root)
@@ -871,7 +871,7 @@ class TestNineStageVerification(unittest.TestCase):
             }),
             encoding="utf-8",
         )
-        from stagecheck.core.rubric_engine import build_agent_reviews_artifact, load_270_rule_catalog
+        from governance.core.rubric_engine import build_agent_reviews_artifact, load_270_rule_catalog
 
         agent_reviews = {
             r.rule_id: {
@@ -917,7 +917,7 @@ class TestNineStageVerification(unittest.TestCase):
         self.assertTrue(any(d["defect_id"] == "scope_paths.out_of_scope_modification" for d in verdict["defects"]))
 
         # Now add waivers to controls/DISPOSITIONS.json (waiving emitted scope defects & preserving HUMAN_WAIVER authorizations)
-        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from governance.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
 
         disp_file = self.workspace_root / "controls" / "DISPOSITIONS.json"
         waiver_ids = [r.rule_id for r in load_270_rule_catalog() if r.category == "HUMAN_WAIVER"]
@@ -975,8 +975,8 @@ class TestNineStageVerification(unittest.TestCase):
         self.assertEqual(exit_code_premature, 1)
 
         # Clear Gate 1 & Gate 2B and transition state to PHASE_3_AUDIT
-        from stagecheck.core.gate_engine import GateId, generate_gate_receipt
-        from stagecheck.core.state import load_active_state, save_active_state
+        from governance.core.gate_engine import GateId, generate_gate_receipt
+        from governance.core.state import load_active_state, save_active_state
         state = load_active_state(self.workspace_root)
         state["task_id"] = self.task_id
         state["attempt_index"] = self.attempt
@@ -1005,8 +1005,8 @@ class TestNineStageVerification(unittest.TestCase):
         self._setup_valid_precommit_review()
         self._setup_valid_delivery_report()
 
-        from stagecheck.core.gate_engine import GateId, generate_gate_receipt
-        from stagecheck.core.state import load_active_state, save_active_state
+        from governance.core.gate_engine import GateId, generate_gate_receipt
+        from governance.core.state import load_active_state, save_active_state
         state = load_active_state(self.workspace_root)
         state["task_id"] = self.task_id
         state["attempt_index"] = self.attempt

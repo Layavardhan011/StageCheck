@@ -20,8 +20,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.main import main
-from stagecheck.core.sentinel import SentinelDaemon, is_process_alive, get_process_rss_mib
+from governance.cli.main import main
+from governance.core.sentinel import SentinelDaemon, is_process_alive, get_process_rss_mib
 
 
 class TestProductionSmoke(unittest.TestCase):
@@ -46,7 +46,7 @@ class TestProductionSmoke(unittest.TestCase):
             daemon.stop()
         except Exception:
             pass
-        from stagecheck.core.permissions import elevate_permissions_for_teardown
+        from governance.core.permissions import elevate_permissions_for_teardown
         try:
             elevate_permissions_for_teardown(self.workspace_dir)
         except Exception:
@@ -137,11 +137,11 @@ class TestProductionSmoke(unittest.TestCase):
         self.assertEqual(premature_exit, 1, "review-precommit should fail before Gate 1 is advanced")
 
         # Prepare Phase 1 artifacts and verify prompt to satisfy Gate 1
-        from stagecheck.core.agents_md import write_agents_contract
-        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
-        from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.rubric_engine import build_agent_reviews_artifact, load_270_rule_catalog
-        from stagecheck.core.utils import canonical_json_dumps, sha256_file
+        from governance.core.agents_md import write_agents_contract
+        from governance.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from governance.core.permissions import controlled_write_transaction
+        from governance.core.rubric_engine import build_agent_reviews_artifact, load_270_rule_catalog
+        from governance.core.utils import canonical_json_dumps, sha256_file
 
         repo_dir = self.workspace_dir / "repos" / "core-service"
         (repo_dir / "test_service.py").write_text(

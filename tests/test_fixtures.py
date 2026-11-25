@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 
 from evals.fixtures import SyntheticFixture, create_test_fixture, synthetic_workspace
-from stagecheck.core.utils import sha256_file
+from governance.core.utils import sha256_file
 
 
 class TestSyntheticFixtures(unittest.TestCase):

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.portability import (
+from governance.core.portability import (
     audit_portability,
     resolve_asset_path,
     validate_environment_portability,
@@ -138,16 +138,16 @@ class TestPortability(unittest.TestCase):
             )
 
             # Check core package modules
-            self.assertIn("stagecheck/cli/main.py", namelist)
-            self.assertIn("stagecheck/core/gate_engine.py", namelist)
-            self.assertIn("stagecheck/core/sealing.py", namelist)
-            self.assertIn("stagecheck/core/sentinel.py", namelist)
+            self.assertIn("governance/cli/main.py", namelist)
+            self.assertIn("governance/core/gate_engine.py", namelist)
+            self.assertIn("governance/core/sealing.py", namelist)
+            self.assertIn("governance/core/sentinel.py", namelist)
 
             # Check packaged schemas and configurations
-            self.assertIn("stagecheck/schemas/assets/active_state.schema.json", namelist)
-            self.assertIn("stagecheck/config/.gitleaks.toml", namelist)
-            self.assertIn("stagecheck/config/defaults/agents.json", namelist)
-            self.assertIn("stagecheck/agent_instructions/00_common.md", namelist)
+            self.assertIn("governance/schemas/assets/active_state.schema.json", namelist)
+            self.assertIn("governance/config/.gitleaks.toml", namelist)
+            self.assertIn("governance/config/defaults/agents.json", namelist)
+            self.assertIn("governance/agent_instructions/00_common.md", namelist)
 
     def test_environment_portability(self):
         """Verify environment portability validation reports Linux capabilities."""
@@ -163,7 +163,7 @@ class TestPortability(unittest.TestCase):
         import subprocess
         import tempfile
         import zipfile
-        from stagecheck.core.portability import (
+        from governance.core.portability import (
             EXECUTABLE_REPO_PATHS,
             create_source_zip_preserving_modes,
             extract_zip_preserving_modes,

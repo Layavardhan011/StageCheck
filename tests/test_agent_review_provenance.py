@@ -9,18 +9,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.agents_md import write_agents_contract
-from stagecheck.core.cooperative_review import record_pre_commit_review
-from stagecheck.core.git import discover_repository
-from stagecheck.core.permissions import controlled_write_transaction, elevate_permissions_for_teardown
-from stagecheck.core.rubric_engine import (
+from governance.core.agents_md import write_agents_contract
+from governance.core.cooperative_review import record_pre_commit_review
+from governance.core.git import discover_repository
+from governance.core.permissions import controlled_write_transaction, elevate_permissions_for_teardown
+from governance.core.rubric_engine import (
     build_agent_reviews_artifact,
     compute_uncommitted_state_digest,
     validate_agent_review_provenance,
 )
-from stagecheck.core.scaffold import scaffold_controls_atomic
-from stagecheck.core.state import load_active_state, save_active_state
-from stagecheck.core.utils import canonical_json_dumps
+from governance.core.scaffold import scaffold_controls_atomic
+from governance.core.state import load_active_state, save_active_state
+from governance.core.utils import canonical_json_dumps
 
 
 class TestAgentReviewProvenance(unittest.TestCase):

@@ -13,19 +13,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.checks.base import AuditContext
-from stagecheck.core.agents import (
+from governance.checks.base import AuditContext
+from governance.core.agents import (
     AgentRole,
     load_registered_agents,
     resolve_agent_response_dir,
     validate_agent_slug,
 )
-from stagecheck.core.cooperative_review import record_pre_commit_review
-from stagecheck.core.git import discover_repository
-from stagecheck.core.orchestrator import AuditOrchestrator
-from stagecheck.core.prompt_gate import freeze_prompt_and_scope
-from stagecheck.core.scaffold import scaffold_controls_atomic
-from stagecheck.core.utils import canonical_json_dumps, sha256_digest
+from governance.core.cooperative_review import record_pre_commit_review
+from governance.core.git import discover_repository
+from governance.core.orchestrator import AuditOrchestrator
+from governance.core.prompt_gate import freeze_prompt_and_scope
+from governance.core.scaffold import scaffold_controls_atomic
+from governance.core.utils import canonical_json_dumps, sha256_digest
 
 
 class TestCustomProviderE2E(unittest.TestCase):
@@ -88,17 +88,17 @@ class TestCustomProviderE2E(unittest.TestCase):
 
     def test_custom_provider_full_lifecycle_governance(self):
         """Test full task lifecycle with custom agents: prompt, review, delivery, and audit."""
-        from stagecheck.core.agents_md import write_agents_contract
-        from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.rubric_engine import load_270_rule_catalog
-        from stagecheck.core.start_manifest import generate_start_manifest
-        from stagecheck.core.utils import sha256_file
+        from governance.core.agents_md import write_agents_contract
+        from governance.core.permissions import controlled_write_transaction
+        from governance.core.rubric_engine import load_270_rule_catalog
+        from governance.core.start_manifest import generate_start_manifest
+        from governance.core.utils import sha256_file
 
         (self.workspace_root / "evals").mkdir(parents=True, exist_ok=True)
         (self.workspace_root / "specs").mkdir(parents=True, exist_ok=True)
         generate_start_manifest(self.workspace_root)
-        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
-        from stagecheck.core.rubric_engine import build_agent_reviews_artifact
+        from governance.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from governance.core.rubric_engine import build_agent_reviews_artifact
 
         waiver_evidence = self.workspace_root / "evidence" / "waiver_custom.txt"
         with controlled_write_transaction(self.workspace_root / "evidence"):

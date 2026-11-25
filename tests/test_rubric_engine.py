@@ -20,9 +20,9 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from stagecheck.cli.main import main
-from stagecheck.core.git import discover_repository
-from stagecheck.core.rubric_engine import (
+from governance.cli.main import main
+from governance.core.git import discover_repository
+from governance.core.rubric_engine import (
     EXEMPTION_PREDICATES,
     InvalidRubricExemptionError,
     RubricEvaluationError,
@@ -33,10 +33,10 @@ from stagecheck.core.rubric_engine import (
     update_rubric_artifacts,
     validate_rubric_evaluation_payload,
 )
-from stagecheck.core.scaffold import scaffold_controls_atomic
-from stagecheck.core.start_manifest import generate_start_manifest
-from stagecheck.core.state import load_active_state, save_active_state
-from stagecheck.schemas.validator import validate_rubric_evaluation
+from governance.core.scaffold import scaffold_controls_atomic
+from governance.core.start_manifest import generate_start_manifest
+from governance.core.state import load_active_state, save_active_state
+from governance.schemas.validator import validate_rubric_evaluation
 
 
 class TestRubricEngine(unittest.TestCase):
@@ -155,10 +155,10 @@ class TestRubricEngine(unittest.TestCase):
 
     def _seed_full_compliant_workspace(self) -> None:
         """Populate authentic Phase-1, Phase-2A, Phase-2B, Phase-3, test, review, and waiver artifacts."""
-        from stagecheck.core.agents_md import write_agents_contract
-        from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
-        from stagecheck.core.utils import canonical_json_dumps, sha256_file
+        from governance.core.agents_md import write_agents_contract
+        from governance.core.permissions import controlled_write_transaction
+        from governance.core.prompt_gate import freeze_prompt_and_scope
+        from governance.core.utils import canonical_json_dumps, sha256_file
 
         # 1. Real test suite with positive, negative, malformed, and duplicate/idempotency tests
         (self.repo_dir / "test_service.py").write_text(
@@ -221,8 +221,8 @@ class TestRubricEngine(unittest.TestCase):
         )
 
         # 4. Human waivers (all 10 HUMAN_WAIVER rules) + AGENTS contract digest update
-        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
-        from stagecheck.core.rubric_engine import build_agent_reviews_artifact
+        from governance.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from governance.core.rubric_engine import build_agent_reviews_artifact
 
         waiver_evidence = self.workspace / "evidence" / "waiver_evidence.txt"
         waiver_evidence.parent.mkdir(parents=True, exist_ok=True)
@@ -252,7 +252,7 @@ class TestRubricEngine(unittest.TestCase):
         record_waiver_in_replay_ledger(self.workspace, w_entry)
         write_agents_contract(self.workspace)
 
-        from stagecheck.core.utils import load_json_file
+        from governance.core.utils import load_json_file
         prod_repos = load_json_file(self.workspace / "controls" / "PRODUCT_REPOSITORIES.json")
         baseline_sha = prod_repos["repositories"]["backend"]["baseline_head"]
 
@@ -405,7 +405,7 @@ class TestRubricEngine(unittest.TestCase):
 
     def test_rule_with_no_evaluator_cannot_pass_by_default(self) -> None:
         """Verify an unsupported or unmapped rule returns NOT_EVALUATED and cannot pass by default (Gap A)."""
-        from stagecheck.core.rubric_engine import RubricRule, evaluate_rubric_rule
+        from governance.core.rubric_engine import RubricRule, evaluate_rubric_rule
         unsupported_rule = RubricRule(
             rule_id="UNKNOWN_DOMAIN-001",
             domain="NON_EXISTENT_DOMAIN",
@@ -419,7 +419,7 @@ class TestRubricEngine(unittest.TestCase):
         self.assertNotEqual(res.status, "PASS")
 
         # Also verify that validate_rubric_evaluation_payload rejects any pass from unsupported_fallback
-        from stagecheck.core.rubric_engine import RubricEvaluationError
+        from governance.core.rubric_engine import RubricEvaluationError
         with self.assertRaises(RubricEvaluationError):
             validate_rubric_evaluation_payload([
                 {
@@ -431,7 +431,7 @@ class TestRubricEngine(unittest.TestCase):
 
     def test_missing_evidence_cannot_result_in_unjustified_pass(self) -> None:
         """Verify evidence-dependent rules fail safely when evidence is missing (Gap A / GAP-01)."""
-        from stagecheck.core.rubric_engine import evaluate_rubric_rule
+        from governance.core.rubric_engine import evaluate_rubric_rule
         evidence_rule = next(r for r in load_270_rule_catalog() if r.rule_id == "CLAIM_SUPPORT-001")
         # Context indicates missing evidence artifact
         ctx = {"missing_evidence": ["CLAIM_SUPPORT-001"]}
@@ -443,7 +443,7 @@ class TestRubricEngine(unittest.TestCase):
 
     def test_rule_specific_failure_is_reported_correctly(self) -> None:
         """Verify domain-specific evaluators report failures with witnesses and messages (Gap A / GAP-01)."""
-        from stagecheck.core.rubric_engine import evaluate_rubric_rule
+        from governance.core.rubric_engine import evaluate_rubric_rule
         # Test UPSTREAM_REUSE failure with unpinned dependencies
         upstream_rule = next(r for r in load_270_rule_catalog() if r.rule_id == "UPSTREAM_REUSE-001")
         ctx = {"unpinned_dependencies": ["fastapi>=0.0.0"]}
@@ -456,8 +456,8 @@ class TestRubricEngine(unittest.TestCase):
 
     def test_valid_rule_specific_pass_is_reported_correctly(self) -> None:
         """Verify passing rules report their explicit evaluator, strategy, and witness metadata (Gap A / GAP-01)."""
-        from stagecheck.core.rubric_engine import evaluate_rubric_rule
-        from stagecheck.core.utils import canonical_json_dumps
+        from governance.core.rubric_engine import evaluate_rubric_rule
+        from governance.core.utils import canonical_json_dumps
 
         p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
         p1_dir.mkdir(parents=True, exist_ok=True)
@@ -480,7 +480,7 @@ class TestRubricEngine(unittest.TestCase):
 
     def test_evaluation_errors_handled_safely(self) -> None:
         """Verify evaluation exceptions fail closed with FAIL status rather than crashing or passing (Gap A / GAP-01)."""
-        from stagecheck.core.rubric_engine import EXEMPTION_PREDICATES, evaluate_rubric_rule
+        from governance.core.rubric_engine import EXEMPTION_PREDICATES, evaluate_rubric_rule
 
         canonical_rule = next(r for r in load_270_rule_catalog() if r.rule_id == "BLAST_RADIUS-013")
         orig_pred = EXEMPTION_PREDICATES["PREDICATE_NO_BLOCKCHAIN_PROTOCOL"]
@@ -496,7 +496,7 @@ class TestRubricEngine(unittest.TestCase):
 
     def test_rubric_coverage_is_measurable(self) -> None:
         """Verify catalog maps 100% of 270 rules across the 9 formal domain evaluators (Gap A)."""
-        from stagecheck.core.rubric_engine import EVALUATOR_MAP, load_270_rule_catalog
+        from governance.core.rubric_engine import EVALUATOR_MAP, load_270_rule_catalog
         catalog = load_270_rule_catalog()
         self.assertEqual(len(catalog), 270)
         for rule in catalog:
@@ -619,7 +619,7 @@ class TestRubricEngine(unittest.TestCase):
 
     def test_audit_matrix_completeness_and_no_bogus_exemptions(self) -> None:
         """Verify 270-rule audit matrix completeness, schema fields, and absence of mismatched React/Flask exemptions (GAP-01)."""
-        from stagecheck.core.rubric_engine import get_rule_strategy, load_270_rule_audit_matrix
+        from governance.core.rubric_engine import get_rule_strategy, load_270_rule_audit_matrix
 
         matrix = load_270_rule_audit_matrix()
         catalog = load_270_rule_catalog()
@@ -663,8 +663,8 @@ class TestRubricEngine(unittest.TestCase):
 
     def test_human_waiver_rules_require_real_approved_dispositions(self) -> None:
         """Verify clean tasks do not block on HUMAN_WAIVER (GOV-002), while required waivers enforce provenance."""
-        from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.utils import canonical_json_dumps
+        from governance.core.permissions import controlled_write_transaction
+        from governance.core.utils import canonical_json_dumps
 
         # Clean task with no active waiver requirement -> COMMON-001..010 do NOT block (GOV-002)
         payload_clean, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
@@ -722,8 +722,8 @@ class TestRubricEngine(unittest.TestCase):
         self.assertTrue(all(e["status"] in ("BLOCKED", "FAIL") for e in waiver_wrong))
 
         # Approved disposition scoped to active task with valid provenance -> PASS
-        from stagecheck.core.agents_md import write_agents_contract
-        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from governance.core.agents_md import write_agents_contract
+        from governance.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
 
         waiver_evidence = self.workspace / "evidence" / "waiver_active.txt"
         waiver_evidence.parent.mkdir(parents=True, exist_ok=True)
@@ -756,8 +756,8 @@ class TestRubricEngine(unittest.TestCase):
 
     def test_agent_assisted_rules_require_real_recorded_reviews(self) -> None:
         """Verify AGENT_ASSISTED rules fail closed when missing, report FAIL on negative review, and block self-exemption."""
-        from stagecheck.core.rubric_engine import evaluate_rubric_rule
-        from stagecheck.core.utils import canonical_json_dumps
+        from governance.core.rubric_engine import evaluate_rubric_rule
+        from governance.core.utils import canonical_json_dumps
 
         # Without recorded reviews -> all 34 AGENT_ASSISTED rules are NOT_EVALUATED
         payload_missing, _ = run_rubric_evaluation(self.workspace, self.task_id, self.attempt)
@@ -766,7 +766,7 @@ class TestRubricEngine(unittest.TestCase):
         self.assertTrue(all(e["status"] == "NOT_EVALUATED" for e in aa_missing))
 
         # Record a FAIL review for one rule and PASS for another
-        from stagecheck.core.rubric_engine import build_agent_reviews_artifact
+        from governance.core.rubric_engine import build_agent_reviews_artifact
 
         p2a_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
         p2a_dir.mkdir(parents=True, exist_ok=True)
@@ -857,9 +857,9 @@ class TestRubricEngine(unittest.TestCase):
     def test_review_precommit_blocks_when_rubric_has_blocked_or_unevaluated_rules(self) -> None:
         """Verify review-precommit fails closed (REVISION_REQUIRED) if BLOCKED or NOT_EVALUATED rules exist even with failed=0."""
         from unittest.mock import patch
-        from stagecheck.core.gate_engine import GateId, advance_gate_atomic
-        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
-        from stagecheck.core.utils import canonical_json_dumps
+        from governance.core.gate_engine import GateId, advance_gate_atomic
+        from governance.core.prompt_gate import freeze_prompt_and_scope
+        from governance.core.utils import canonical_json_dumps
 
         self._seed_full_compliant_workspace()
         state = load_active_state(self.workspace)
@@ -885,7 +885,7 @@ class TestRubricEngine(unittest.TestCase):
             ],
         }
         p2a_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-2A"
-        with patch("stagecheck.core.rubric_engine.run_rubric_evaluation", return_value=(fake_incomplete_payload, 1.0)):
+        with patch("governance.core.rubric_engine.run_rubric_evaluation", return_value=(fake_incomplete_payload, 1.0)):
             rc = main(["review-precommit", "--task", self.task_id, "--attempt", str(self.attempt), "--workspace", str(self.workspace)])
         self.assertEqual(rc, 1)
         rev = json.loads((p2a_dir / "pre_commit_review.json").read_text(encoding="utf-8"))
@@ -895,14 +895,14 @@ class TestRubricEngine(unittest.TestCase):
     def test_gap02_complete_vs_partial_classification_duplicates_and_stale_rejection(self) -> None:
         """Verify GAP-02 COMPLETE/PARTIAL classification, duplicate rejection, binding, and staleness checks."""
         import datetime
-        from stagecheck.core.rubric_engine import (
+        from governance.core.rubric_engine import (
             DuplicateRuleEvaluationError,
             RuleEvaluationResult,
             aggregate_rubric_results,
             validate_rubric_evaluation_payload,
             verify_complete_rubric_evaluation,
         )
-        from stagecheck.core.utils import canonical_json_dumps
+        from governance.core.utils import canonical_json_dumps
 
         self._seed_full_compliant_workspace()
 
@@ -989,9 +989,9 @@ class TestRubricEngine(unittest.TestCase):
 
     def test_gap02_gates_reject_partial_rubric_evaluations(self) -> None:
         """Verify approve-review, Gate-2A, and Gate-3 reject partial 30-rule rubric payloads."""
-        from stagecheck.core.gate_engine import GateId, advance_gate_atomic, check_gate_preconditions
-        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
-        from stagecheck.core.utils import canonical_json_dumps
+        from governance.core.gate_engine import GateId, advance_gate_atomic, check_gate_preconditions
+        from governance.core.prompt_gate import freeze_prompt_and_scope
+        from governance.core.utils import canonical_json_dumps
 
         self._seed_full_compliant_workspace()
         state = load_active_state(self.workspace)
@@ -1041,7 +1041,7 @@ class TestRubricEngine(unittest.TestCase):
     def test_gap01_270_rule_matrix_enforcement_and_tamper_rejection(self) -> None:
         """Verify all 228 strategies and 9 evaluators execute at runtime and fail closed on mismatches/tampering (GAP-01)."""
         from dataclasses import replace
-        from stagecheck.core.rubric_engine import (
+        from governance.core.rubric_engine import (
             EVALUATOR_REGISTRY,
             RubricEvaluationError,
             STRATEGY_REGISTRY,
@@ -1245,7 +1245,7 @@ class TestRubricEngine(unittest.TestCase):
         new_base = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=str(self.repo_dir), check=True, capture_output=True, text=True
         ).stdout.strip()
-        from stagecheck.core.permissions import controlled_write_transaction
+        from governance.core.permissions import controlled_write_transaction
         prod_path = self.workspace / "controls" / "PRODUCT_REPOSITORIES.json"
         prod_data = json.loads(prod_path.read_text(encoding="utf-8"))
         prod_data["repositories"]["backend"]["baseline_head"] = new_base
@@ -1264,10 +1264,10 @@ class TestRubricEngine(unittest.TestCase):
 
     def test_automated_rule_honors_provenance_verified_human_waiver(self) -> None:
         """Verify AUTOMATED rules honor provenance-verified APPROVED waivers in controls/DISPOSITIONS.json."""
-        from stagecheck.core.agents_md import write_agents_contract
-        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
-        from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.utils import canonical_json_dumps
+        from governance.core.agents_md import write_agents_contract
+        from governance.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from governance.core.permissions import controlled_write_transaction
+        from governance.core.utils import canonical_json_dumps
 
         self._seed_full_compliant_workspace()
         # Introduce unpinned dependency -> UPSTREAM_REUSE-001 FAILs in Phase-2A

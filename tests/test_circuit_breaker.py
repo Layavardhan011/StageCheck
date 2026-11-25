@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.main import main
-from stagecheck.core.circuit_breaker import (
+from governance.cli.main import main
+from governance.core.circuit_breaker import (
     AttemptBudgetExhaustedError,
     CircuitBreakerEvaluation,
     ResetAttemptsError,
@@ -18,9 +18,9 @@ from stagecheck.core.circuit_breaker import (
     trip_circuit_breaker,
     write_escalation_report,
 )
-from stagecheck.core.git import discover_repository
-from stagecheck.core.scaffold import scaffold_controls_atomic
-from stagecheck.core.utils import canonical_json_dumps
+from governance.core.git import discover_repository
+from governance.core.scaffold import scaffold_controls_atomic
+from governance.core.utils import canonical_json_dumps
 
 
 class TestCircuitBreaker(unittest.TestCase):

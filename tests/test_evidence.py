@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.evidence import (
+from governance.core.evidence import (
     EvidenceTamperError,
     SealChainBrokenError,
     append_issue_history,
@@ -20,7 +20,7 @@ from stagecheck.core.evidence import (
     verify_evidence_manifest,
     verify_seal_chain,
 )
-from stagecheck.core.utils import canonical_json_dumps, sha256_file
+from governance.core.utils import canonical_json_dumps, sha256_file
 
 
 class TestEvidenceEngine(unittest.TestCase):
@@ -261,8 +261,8 @@ class TestEvidenceEngine(unittest.TestCase):
 
     def test_update_code_quality_ledger(self):
         """Verify update_code_quality_ledger creates and updates CODE_QUALITY_REPORT.json."""
-        from stagecheck.core.evidence import update_code_quality_ledger
-        from stagecheck.cli.ops_cmd import run_log_quality
+        from governance.core.evidence import update_code_quality_ledger
+        from governance.cli.ops_cmd import run_log_quality
 
         obs = [
             {

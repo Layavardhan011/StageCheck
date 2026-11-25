@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.agents import (
+from governance.core.agents import (
     AgentRegistrationError,
     AgentRole,
     DuplicateAgentError,

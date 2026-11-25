@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.commands import (
+from governance.core.commands import (
     CommandSecurityError,
     CommandTimeoutError,
     ForbiddenCommandFlagError,
