@@ -107,7 +107,7 @@ echo ""
 
 echo "[GATE 6/7] Validating All 14 CLI Verbs and Entry Points..."
 "${TEMP_VENV}/bin/stagecheck" --version
-"${TEMP_VENV}/bin/python" -m stagecheck --version
+"${TEMP_VENV}/bin/python" -m governance --version
 
 VERBS=(
     "init"
