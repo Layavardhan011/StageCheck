@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.utils import (
+from governance.core.utils import (
     AgentSlugError,
     JSONParseError,
     SchemaValidationError,
@@ -202,7 +202,7 @@ class TestUtils(unittest.TestCase):
         self.assertIn("does not match pattern", str(ctx.exception))
 
     def test_strict_json_rejects_nan_and_duplicate_keys(self) -> None:
-        from stagecheck.core.utils import SerializationError, pretty_json_dumps
+        from governance.core.utils import SerializationError, pretty_json_dumps
 
         dup_file = self.temp_path / "dup.json"
         dup_file.write_text('{"a": 1, "a": 2}\n', encoding="utf-8")

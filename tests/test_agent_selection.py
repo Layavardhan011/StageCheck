@@ -13,14 +13,14 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from stagecheck.cli.init_cmd import run_init
-from stagecheck.cli.main import main
-from stagecheck.core.agents import load_registered_agents
-from stagecheck.core.agents_md import render_agents_contract
-from stagecheck.core.permissions import elevate_permissions_for_teardown
-from stagecheck.core.scaffold import scaffold_controls_atomic, ScaffoldingRollbackError
-from stagecheck.core.utils import sha256_file
-from stagecheck.schemas.validator import validate_active_state, validate_control_descriptor
+from governance.cli.init_cmd import run_init
+from governance.cli.main import main
+from governance.core.agents import load_registered_agents
+from governance.core.agents_md import render_agents_contract
+from governance.core.permissions import elevate_permissions_for_teardown
+from governance.core.scaffold import scaffold_controls_atomic, ScaffoldingRollbackError
+from governance.core.utils import sha256_file
+from governance.schemas.validator import validate_active_state, validate_control_descriptor
 
 
 class TestAgentSelectionSpec04(unittest.TestCase):
@@ -314,7 +314,7 @@ class TestAgentSelectionSpec04(unittest.TestCase):
         def faulty_scaffold(*args, **kwargs):
             raise ScaffoldingRollbackError("Simulated failure during scaffolding")
 
-        with patch("stagecheck.cli.init_cmd.scaffold_controls_atomic", side_effect=faulty_scaffold):
+        with patch("governance.cli.init_cmd.scaffold_controls_atomic", side_effect=faulty_scaffold):
             ret = run_init(workspace=str(self.workspace), repos="backend", agent1="Claude", agent2="Codex")
 
         self.assertEqual(ret, 1)

@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.main import main
-from stagecheck.core.cooperative_review import (
+from governance.cli.main import main
+from governance.core.cooperative_review import (
     CommitDivergenceError,
     CommitUnauthorizedError,
     ReviewGateError,
@@ -174,11 +174,11 @@ class TestCooperativeReview(unittest.TestCase):
 
     def test_cli_review_precommit_and_approve_subcommands(self) -> None:
         """Verify CLI 'review-precommit' and 'approve-review' subcommands."""
-        from stagecheck.core.gate_engine import advance_gate_atomic
-        from stagecheck.core.git import discover_repository
-        from stagecheck.core.scaffold import scaffold_controls_atomic
-        from stagecheck.core.start_manifest import generate_start_manifest
-        from stagecheck.core.state import load_active_state, save_active_state
+        from governance.core.gate_engine import advance_gate_atomic
+        from governance.core.git import discover_repository
+        from governance.core.scaffold import scaffold_controls_atomic
+        from governance.core.start_manifest import generate_start_manifest
+        from governance.core.state import load_active_state, save_active_state
 
         # Step 1: Submit pre-commit status
         submit_pre_commit_status(
@@ -210,12 +210,12 @@ class TestCooperativeReview(unittest.TestCase):
         scaffold_controls_atomic(self.workspace, baselines)
         generate_start_manifest(self.workspace)
 
-        from stagecheck.core.agents_md import write_agents_contract
-        from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.rubric_engine import load_270_rule_catalog
-        from stagecheck.core.utils import canonical_json_dumps, sha256_file
+        from governance.core.agents_md import write_agents_contract
+        from governance.core.permissions import controlled_write_transaction
+        from governance.core.rubric_engine import load_270_rule_catalog
+        from governance.core.utils import canonical_json_dumps, sha256_file
 
-        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+        from governance.core.prompt_gate import freeze_prompt_and_scope
 
         p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
         p1_dir.mkdir(parents=True, exist_ok=True)
@@ -253,8 +253,8 @@ class TestCooperativeReview(unittest.TestCase):
             encoding="utf-8",
         )
         (self.workspace / "evals").mkdir(parents=True, exist_ok=True)
-        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
-        from stagecheck.core.rubric_engine import build_agent_reviews_artifact
+        from governance.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from governance.core.rubric_engine import build_agent_reviews_artifact
 
         waiver_evidence = self.workspace / "evidence" / "waiver_coop.txt"
         waiver_evidence.parent.mkdir(parents=True, exist_ok=True)
@@ -378,7 +378,7 @@ class TestCooperativeReview(unittest.TestCase):
 
     def test_untracked_limits_and_index_lock_enforcement(self) -> None:
         """Verify untracked file ceilings (20 MiB, 500 files) and git index lock (FR-09 / ARCH-03)."""
-        from stagecheck.core.cooperative_review import (
+        from governance.core.cooperative_review import (
             GitIndexLockedError,
             UntrackedBytesExceededError,
             UntrackedCountExceededError,
@@ -415,11 +415,11 @@ class TestCooperativeReview(unittest.TestCase):
 
     def test_scope_containment_violation_returns_127(self) -> None:
         """Verify modifying files outside declared scope causes review-precommit to exit with code 127."""
-        from stagecheck.core.gate_engine import advance_gate_atomic
-        from stagecheck.core.git import discover_repository
-        from stagecheck.core.scaffold import scaffold_controls_atomic
-        from stagecheck.core.start_manifest import generate_start_manifest
-        from stagecheck.core.state import load_active_state, save_active_state
+        from governance.core.gate_engine import advance_gate_atomic
+        from governance.core.git import discover_repository
+        from governance.core.scaffold import scaffold_controls_atomic
+        from governance.core.start_manifest import generate_start_manifest
+        from governance.core.state import load_active_state, save_active_state
 
         baselines = {
             "backend": discover_repository(self.backend_dir, name="backend", workspace_root=self.workspace)
@@ -427,7 +427,7 @@ class TestCooperativeReview(unittest.TestCase):
         scaffold_controls_atomic(self.workspace, baselines)
         generate_start_manifest(self.workspace)
 
-        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+        from governance.core.prompt_gate import freeze_prompt_and_scope
         p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
         p1_dir.mkdir(parents=True, exist_ok=True)
         (p1_dir / "prompt.md").write_text("# Prompt\nImplement validated order logic.\n", encoding="utf-8")
@@ -468,7 +468,7 @@ class TestCooperativeReview(unittest.TestCase):
 
     def test_repair_cycles_do_not_consume_attempt_budget(self) -> None:
         """Verify multiple repair cycles in Phase 2A increment cycle without consuming attempt budget (FR-06)."""
-        from stagecheck.core.state import load_active_state, save_active_state
+        from governance.core.state import load_active_state, save_active_state
 
         state = load_active_state(self.workspace) if (self.workspace / "controls" / "ACTIVE_STATE.json").is_file() else {}
         initial_attempt = state.get("attempt_index", 1)
@@ -515,10 +515,10 @@ class TestCooperativeReview(unittest.TestCase):
 
     def test_readonly_empty_touched_repositories_supported(self) -> None:
         """Verify read-only/evidence-only tasks with touched_repositories=[] validate and fail if dirty."""
-        from stagecheck.core.agents import resolve_task_attempt_dir
-        from stagecheck.core.cooperative_review import verify_precommit_scope
-        from stagecheck.core.utils import validate_schema
-        from stagecheck.schemas import get_schema_path
+        from governance.core.agents import resolve_task_attempt_dir
+        from governance.core.cooperative_review import verify_precommit_scope
+        from governance.core.utils import validate_schema
+        from governance.schemas import get_schema_path
 
         p1_dir = resolve_task_attempt_dir(self.workspace, self.task_id, self.attempt) / "Phase-1"
         p1_dir.mkdir(parents=True, exist_ok=True)
@@ -595,13 +595,13 @@ class TestCooperativeReview(unittest.TestCase):
     def test_approve_review_binds_architectural_intents_and_blocks_on_new_issues(self) -> None:
         """Verify run_approve_review captures architectural_intents_approved and blocks on new_issues."""
         from unittest.mock import patch
-        from stagecheck.cli.review_cmd import run_approve_review
-        from stagecheck.core.gate_engine import advance_gate_atomic
-        from stagecheck.core.git import discover_repository
-        from stagecheck.core.scaffold import scaffold_controls_atomic
-        from stagecheck.core.start_manifest import generate_start_manifest
-        from stagecheck.core.state import load_active_state, save_active_state
-        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+        from governance.cli.review_cmd import run_approve_review
+        from governance.core.gate_engine import advance_gate_atomic
+        from governance.core.git import discover_repository
+        from governance.core.scaffold import scaffold_controls_atomic
+        from governance.core.start_manifest import generate_start_manifest
+        from governance.core.state import load_active_state, save_active_state
+        from governance.core.prompt_gate import freeze_prompt_and_scope
 
         baselines = {
             "backend": discover_repository(self.backend_dir, name="backend", workspace_root=self.workspace)
@@ -657,7 +657,7 @@ class TestCooperativeReview(unittest.TestCase):
         agent_reviews_payload["new_issues_found"] = []
         (p2a_dir / "agent_reviews.json").write_text(json.dumps(agent_reviews_payload), encoding="utf-8")
 
-        with patch("stagecheck.core.rubric_engine.verify_complete_rubric_evaluation", return_value=(True, [], [])):
+        with patch("governance.core.rubric_engine.verify_complete_rubric_evaluation", return_value=(True, [], [])):
             rc_ok = run_approve_review(task=self.task_id, attempt=self.attempt, workspace=str(self.workspace))
         self.assertEqual(rc_ok, 0)
 

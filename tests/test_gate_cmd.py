@@ -17,16 +17,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.main import main
-from stagecheck.core.gate_engine import (
+from governance.cli.main import main
+from governance.core.gate_engine import (
     GateId,
     get_gate_receipt_path,
 )
-from stagecheck.core.git import RepoBaseline
-from stagecheck.core.scaffold import scaffold_controls_atomic
-from stagecheck.core.start_manifest import generate_start_manifest
-from stagecheck.core.state import load_active_state, save_active_state
-from stagecheck.core.utils import sha256_file
+from governance.core.git import RepoBaseline
+from governance.core.scaffold import scaffold_controls_atomic
+from governance.core.start_manifest import generate_start_manifest
+from governance.core.state import load_active_state, save_active_state
+from governance.core.utils import sha256_file
 
 
 class TestGateCLIAndPrerequisites(unittest.TestCase):
@@ -54,7 +54,7 @@ class TestGateCLIAndPrerequisites(unittest.TestCase):
         # Switch to task branch
         subprocess.run(["git", "-C", str(self.repo_dir), "switch", "-c", "task/task-gate-cli"], check=True, capture_output=True)
 
-        from stagecheck.core.git import discover_repository
+        from governance.core.git import discover_repository
 
         # Baseline and controls
         baselines = {
@@ -78,7 +78,7 @@ class TestGateCLIAndPrerequisites(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def _setup_gate1_artifacts(self, allowed_paths=None) -> Path:
-        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+        from governance.core.prompt_gate import freeze_prompt_and_scope
         p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
         p1_dir.mkdir(parents=True, exist_ok=True)
         (p1_dir / "prompt.md").write_text("# Prompt\nImplement service\n", encoding="utf-8")
@@ -184,10 +184,10 @@ class TestGateCLIAndPrerequisites(unittest.TestCase):
 
     def test_tampered_receipt_blocks_execution_fail_closed(self) -> None:
         """Verify altered receipt on disk halts downstream operations fail-closed."""
-        from stagecheck.core.agents_md import write_agents_contract
-        from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.rubric_engine import load_270_rule_catalog
-        from stagecheck.core.utils import canonical_json_dumps
+        from governance.core.agents_md import write_agents_contract
+        from governance.core.permissions import controlled_write_transaction
+        from governance.core.rubric_engine import load_270_rule_catalog
+        from governance.core.utils import canonical_json_dumps
 
         p1_dir = self._setup_gate1_artifacts(
             allowed_paths=["repos/core-service/service.py", "repos/core-service/test_service.py"]
@@ -225,8 +225,8 @@ class TestGateCLIAndPrerequisites(unittest.TestCase):
             encoding="utf-8",
         )
         (self.workspace / "evals").mkdir(parents=True, exist_ok=True)
-        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
-        from stagecheck.core.rubric_engine import build_agent_reviews_artifact
+        from governance.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from governance.core.rubric_engine import build_agent_reviews_artifact
 
         waiver_evidence = self.workspace / "evidence" / "waiver_gate.txt"
         waiver_evidence.parent.mkdir(parents=True, exist_ok=True)
@@ -356,7 +356,7 @@ class TestGateCLIAndPrerequisites(unittest.TestCase):
 
     def test_gate2a_2b_3_reject_symlinks_and_gate3_checks_verdict_binding(self) -> None:
         """Verify Gate 2A/2B/3 reject symlinked deliverables and Gate 3 validates verdict task_id/attempt."""
-        from stagecheck.core.gate_engine import (
+        from governance.core.gate_engine import (
             evaluate_gate_2a_criteria,
             evaluate_gate_2b_criteria,
             evaluate_gate_3_criteria,

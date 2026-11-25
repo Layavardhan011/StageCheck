@@ -14,19 +14,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.init_cmd import run_init
-from stagecheck.cli.start_cmd import run_start
-from stagecheck.cli.prompt_cmd import run_verify_prompt
-from stagecheck.cli.gate_cmd import run_gate_advance
-from stagecheck.cli.review_cmd import run_approve_review, run_review_precommit
-from stagecheck.cli.audit_cmd import run_audit_cmd
-from stagecheck.cli.reset_cmd import run_reset_attempts
-from stagecheck.cli.disposition_cmd import run_disposition_add
-from stagecheck.cli.resume_cmd import run_resume
-from stagecheck.core.circuit_breaker import CircuitBreakerEvaluation, trip_circuit_breaker
-from stagecheck.core.evidence import create_task_seal, verify_seal_chain, verify_evidence_manifest
-from stagecheck.core.permissions import controlled_write_transaction
-from stagecheck.core.state import load_active_state, save_active_state
+from governance.cli.init_cmd import run_init
+from governance.cli.start_cmd import run_start
+from governance.cli.prompt_cmd import run_verify_prompt
+from governance.cli.gate_cmd import run_gate_advance
+from governance.cli.review_cmd import run_approve_review, run_review_precommit
+from governance.cli.audit_cmd import run_audit_cmd
+from governance.cli.reset_cmd import run_reset_attempts
+from governance.cli.disposition_cmd import run_disposition_add
+from governance.cli.resume_cmd import run_resume
+from governance.core.circuit_breaker import CircuitBreakerEvaluation, trip_circuit_breaker
+from governance.core.evidence import create_task_seal, verify_seal_chain, verify_evidence_manifest
+from governance.core.permissions import controlled_write_transaction
+from governance.core.state import load_active_state, save_active_state
 
 
 def run_git(args, cwd: Path) -> subprocess.CompletedProcess:
@@ -85,7 +85,7 @@ class TestEndToEndLifecycle(unittest.TestCase):
         specs_dir.mkdir(parents=True, exist_ok=True)
         (specs_dir / "TASK_PLAN.md").write_text("# Plan for task-101\n")
         (specs_dir / "ARCHITECTURE.md").write_text("# Architecture for task-101\n")
-        from stagecheck.core.start_manifest import update_spec_manifest
+        from governance.core.start_manifest import update_spec_manifest
         update_spec_manifest(self.ws)
 
         scope_data = {
@@ -137,16 +137,16 @@ class TestEndToEndLifecycle(unittest.TestCase):
         )
         run_git(["add", "."], cwd=repo_dir)
 
-        from stagecheck.core.agents_md import write_agents_contract
-        from stagecheck.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
-        from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.rubric_engine import (
+        from governance.core.agents_md import write_agents_contract
+        from governance.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from governance.core.permissions import controlled_write_transaction
+        from governance.core.rubric_engine import (
             build_agent_reviews_artifact,
             load_270_rule_catalog,
             run_rubric_evaluation,
             update_rubric_artifacts,
         )
-        from stagecheck.core.utils import canonical_json_dumps, sha256_file
+        from governance.core.utils import canonical_json_dumps, sha256_file
 
         waiver_evidence = self.ws / "evidence" / "waiver_e2e.txt"
         with controlled_write_transaction(self.ws / "evidence"):
@@ -399,13 +399,13 @@ class TestEndToEndLifecycle(unittest.TestCase):
         self.assertNotEqual(run_approve_review("task-303", attempt=1, workspace=str(self.ws)), 0)
 
         # Simulate reaching Phase 3 audit with an approved review for defense-in-depth verification
-        from stagecheck.core.cooperative_review import record_pre_commit_review
-        from stagecheck.core.state import load_active_state, save_active_state
+        from governance.core.cooperative_review import record_pre_commit_review
+        from governance.core.state import load_active_state, save_active_state
         diff_res = subprocess.run(
             ["git", "-C", str(repo_dir), "diff", "--binary", f"{base_commit}..{head_commit}"],
             capture_output=True, check=True,
         )
-        from stagecheck.core.utils import sha256_digest
+        from governance.core.utils import sha256_digest
         diff_sha = sha256_digest(diff_res.stdout)
         (phase2a_dir / "pre_commit_review.json").write_text(json.dumps({
             "schema_version": "2.0",
@@ -508,7 +508,7 @@ class TestEndToEndLifecycle(unittest.TestCase):
         (phase2a_dir / "pre_commit_status.json").write_text(json.dumps(status_data, indent=2) + "\n")
         self.assertNotEqual(run_approve_review("task-404", attempt=1, workspace=str(self.ws)), 0)
 
-        from stagecheck.core.utils import sha256_digest
+        from governance.core.utils import sha256_digest
         diff_b = sha256_digest(subprocess.run(["git", "-C", str(backend_dir), "diff", "--binary", f"{base_backend}..{head_backend}"], capture_output=True, check=True).stdout)
         diff_f = sha256_digest(subprocess.run(["git", "-C", str(frontend_dir), "diff", "--binary", f"{base_frontend}..{head_frontend}"], capture_output=True, check=True).stdout)
         (phase2a_dir / "pre_commit_review.json").write_text(json.dumps({

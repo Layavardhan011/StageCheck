@@ -12,8 +12,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.main import main
-from stagecheck.core.start_manifest import (
+from governance.cli.main import main
+from governance.core.start_manifest import (
     START_MANIFEST_FILENAME,
     SpecManifestNotFoundError,
     SpecManifestSecurityError,
@@ -23,7 +23,7 @@ from stagecheck.core.start_manifest import (
     update_spec_manifest,
     verify_spec_manifest,
 )
-from stagecheck.core.utils import sha256_file
+from governance.core.utils import sha256_file
 
 
 class TestStartManifest(unittest.TestCase):
@@ -174,7 +174,7 @@ class TestStartManifest(unittest.TestCase):
 
     def test_reconcile_creates_missing_file_when_manifest_absent(self) -> None:
         """Verify reconciliation generates missing specs files and manifest when absent (Gap D)."""
-        from stagecheck.core.scaffold import reconcile_specs_directory
+        from governance.core.scaffold import reconcile_specs_directory
         # Clean workspace specs
         shutil.rmtree(self.specs_dir)
         paths = reconcile_specs_directory(self.workspace)
@@ -185,7 +185,7 @@ class TestStartManifest(unittest.TestCase):
 
     def test_reconcile_preserves_user_content_without_overwriting(self) -> None:
         """Verify reconciliation does not overwrite user-authored content (Gap D)."""
-        from stagecheck.core.scaffold import reconcile_specs_directory
+        from governance.core.scaffold import reconcile_specs_directory
         custom_arch = "# My Custom Product Architecture\nAuthor: Laya\n"
         (self.specs_dir / "ARCHITECTURE.md").write_text(custom_arch, encoding="utf-8")
         reconcile_specs_directory(self.workspace)
@@ -193,7 +193,7 @@ class TestStartManifest(unittest.TestCase):
 
     def test_reconcile_fails_closed_when_file_content_changes(self) -> None:
         """Verify reconciliation detects tampered files and does NOT hide integrity violations (Gap D)."""
-        from stagecheck.core.scaffold import reconcile_specs_directory
+        from governance.core.scaffold import reconcile_specs_directory
         generate_start_manifest(self.workspace)
         # Tamper ARCHITECTURE.md
         (self.specs_dir / "ARCHITECTURE.md").write_text("# Secret Tampering\n", encoding="utf-8")
@@ -205,7 +205,7 @@ class TestStartManifest(unittest.TestCase):
 
     def test_reconcile_fails_closed_when_file_is_removed(self) -> None:
         """Verify reconciliation detects missing registered baseline files (Gap D)."""
-        from stagecheck.core.scaffold import reconcile_specs_directory
+        from governance.core.scaffold import reconcile_specs_directory
         generate_start_manifest(self.workspace)
         # Delete registered file
         (self.specs_dir / "TASK_PLAN.json").unlink()
@@ -215,7 +215,7 @@ class TestStartManifest(unittest.TestCase):
 
     def test_reconcile_fails_closed_when_unregistered_file_added(self) -> None:
         """Verify reconciliation detects unapproved specification file additions (Gap D)."""
-        from stagecheck.core.scaffold import reconcile_specs_directory
+        from governance.core.scaffold import reconcile_specs_directory
         generate_start_manifest(self.workspace)
         # Add rogue file
         (self.specs_dir / "UNAUTHORIZED_SPEC.md").write_text("# Backdoor Spec\n", encoding="utf-8")
@@ -225,7 +225,7 @@ class TestStartManifest(unittest.TestCase):
 
     def test_reconciliation_is_deterministic_and_idempotent(self) -> None:
         """Verify repeated reconciliation is idempotent and leaves unchanged files untouched (Gap D)."""
-        from stagecheck.core.scaffold import reconcile_specs_directory
+        from governance.core.scaffold import reconcile_specs_directory
         paths1 = reconcile_specs_directory(self.workspace)
         mtime1 = (self.specs_dir / "START_MANIFEST.md").stat().st_mtime_ns
         paths2 = reconcile_specs_directory(self.workspace)

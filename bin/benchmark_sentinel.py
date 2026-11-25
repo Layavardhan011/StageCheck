@@ -28,7 +28,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from stagecheck.core.sentinel import SentinelDaemon, get_process_rss_mib, is_process_alive
+from governance.core.sentinel import SentinelDaemon, get_process_rss_mib, is_process_alive
 
 
 def parse_proc_stat(pid: int) -> tuple[int, int]:

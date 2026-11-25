@@ -22,10 +22,10 @@ import time
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.init_cmd import run_init
-from stagecheck.cli.start_cmd import run_start
-from stagecheck.core.agents import resolve_task_attempt_dir
-from stagecheck.core.branch_governance import (
+from governance.cli.init_cmd import run_init
+from governance.cli.start_cmd import run_start
+from governance.core.agents import resolve_task_attempt_dir
+from governance.core.branch_governance import (
     DirtyWorkingTreeError,
     NonCompliantBranchError,
     ProtectedBranchPolicyError,
@@ -34,43 +34,43 @@ from stagecheck.core.branch_governance import (
     validate_branch_compliance,
     verify_multi_repo_governance,
 )
-from stagecheck.core.circuit_breaker import (
+from governance.core.circuit_breaker import (
     AttemptBudgetExhaustedError,
     CircuitBreakerError,
     ResetAttemptsError,
     reset_circuit_breaker,
 )
-from stagecheck.core.commands import (
+from governance.core.commands import (
     CommandSecurityError,
     ForbiddenCommandFlagError,
     execute_secure_command,
     validate_command_security,
 )
-from stagecheck.core.gate_engine import (
+from governance.core.gate_engine import (
     GateCriteriaFailedError,
     advance_gate_atomic,
     evaluate_gate_4_criteria,
 )
-from stagecheck.core.journal import (
+from governance.core.journal import (
     TransactionJournal,
     recover_interrupted_transactions,
     write_ahead_transaction,
 )
-from stagecheck.core.locking import LockCollisionError, acquire_runtime_lock
-from stagecheck.core.permissions import controlled_write_transaction, elevate_permissions_for_teardown
-from stagecheck.core.rubric_engine import (
+from governance.core.locking import LockCollisionError, acquire_runtime_lock
+from governance.core.permissions import controlled_write_transaction, elevate_permissions_for_teardown
+from governance.core.rubric_engine import (
     InvalidRubricExemptionError,
     validate_rubric_evaluation_payload,
 )
-from stagecheck.core.sealing import (
+from governance.core.sealing import (
     MerkleVerificationError,
     SymlinkInEvidenceError,
     compute_attempt_merkle_seal,
     validate_merkle_attempt_path,
     verify_attempt_merkle_seal,
 )
-from stagecheck.core.state import load_active_state, save_active_state
-from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_file
+from governance.core.state import load_active_state, save_active_state
+from governance.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_file
 
 
 class TestAdversarialSecurity(unittest.TestCase):
@@ -176,7 +176,7 @@ class TestAdversarialSecurity(unittest.TestCase):
         subprocess.run(["git", "add", "newfile.py"], cwd=str(self.backend_repo), check=True)
 
         # Commit using safe flags (which sets core.hooksPath=/dev/null)
-        from stagecheck.core.git import SAFE_GIT_SECURITY_FLAGS
+        from governance.core.git import SAFE_GIT_SECURITY_FLAGS
         cmd = ["git", *SAFE_GIT_SECURITY_FLAGS, "-C", str(self.backend_repo), "commit", "-m", "safe commit"]
         res = subprocess.run(cmd, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, f"Git commit failed: {res.stderr}")
@@ -403,12 +403,12 @@ class TestAdversarialSecurity(unittest.TestCase):
 
     def test_task_id_traversal_rejected_across_entrypoints(self) -> None:
         """Verify task_id traversal and '..' are rejected across CLI, schema, and evidence APIs (SC-SEC-05)."""
-        from stagecheck.cli.start_cmd import run_start
-        from stagecheck.core.circuit_breaker import CircuitBreakerEvaluation, write_escalation_report
-        from stagecheck.core.evidence import append_issue_history
-        from stagecheck.core.paths import SymlinkPathEscapeError, resolve_task_dir
-        from stagecheck.core.utils import SchemaValidationError
-        from stagecheck.schemas.validator import validate_active_state
+        from governance.cli.start_cmd import run_start
+        from governance.core.circuit_breaker import CircuitBreakerEvaluation, write_escalation_report
+        from governance.core.evidence import append_issue_history
+        from governance.core.paths import SymlinkPathEscapeError, resolve_task_dir
+        from governance.core.utils import SchemaValidationError
+        from governance.schemas.validator import validate_active_state
 
         outside_dir = Path(self.temp_dir.name) / "outside_escape"
         ev = CircuitBreakerEvaluation(tripped=True, trigger="test", reason="test")
@@ -456,7 +456,7 @@ class TestAdversarialSecurity(unittest.TestCase):
 
     def test_adversarial_symlink_injection_in_controls_rejected(self) -> None:
         """Verify symlink injection inside controls boundary is strictly caught (Gap B)."""
-        from stagecheck.core.permissions import VerifierIsolationError, assert_verifier_isolation
+        from governance.core.permissions import VerifierIsolationError, assert_verifier_isolation
         state_file = self.ws / "controls" / "ACTIVE_STATE.json"
 
         # Replace ACTIVE_STATE.json with symlink to /etc/passwd
@@ -470,7 +470,7 @@ class TestAdversarialSecurity(unittest.TestCase):
 
     def test_adversarial_tampering_with_prior_frozen_phase_detected_by_gate_advance(self) -> None:
         """Verify tampering with Phase-1 deliverables causes gate advance to fail closed (Gap B)."""
-        from stagecheck.core.gate_engine import advance_gate_atomic, GateCriteriaFailedError
+        from governance.core.gate_engine import advance_gate_atomic, GateCriteriaFailedError
         # Advance Gate 1 legitimately
         p1_dir = self.ws / "evidence" / "tasks" / "task-adv-01" / "attempt_1" / "Phase-1"
         p1_dir.mkdir(parents=True, exist_ok=True)
@@ -480,7 +480,7 @@ class TestAdversarialSecurity(unittest.TestCase):
             "task_id": "task-adv-01",
             "allowed_paths": ["repos/backend/README.md"],
         }), encoding="utf-8")
-        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+        from governance.core.prompt_gate import freeze_prompt_and_scope
         freeze_prompt_and_scope(self.ws, "task-adv-01", 1)
 
         # Gate 1 advance succeeds
@@ -502,7 +502,7 @@ class TestAdversarialSecurity(unittest.TestCase):
 
     def test_adversarial_tampering_with_evidence_manifest_rejected(self) -> None:
         """Verify tampering with EVIDENCE_MANIFEST.json is rejected by manifest and chain verifiers (Gap B)."""
-        from stagecheck.core.evidence import verify_evidence_manifest
+        from governance.core.evidence import verify_evidence_manifest
         manifest_file = self.ws / "evidence" / "EVIDENCE_MANIFEST.json"
         with controlled_write_transaction(self.ws / "evidence"):
             manifest_file.write_text(json.dumps({
@@ -522,7 +522,7 @@ class TestAdversarialSecurity(unittest.TestCase):
 
     def test_adversarial_batch4_symlink_lockfile_rejected(self) -> None:
         """Symlinked runtime or bootstrap lockfile must fail closed with LockError."""
-        from stagecheck.core.locking import LockError, acquire_bootstrap_lock
+        from governance.core.locking import LockError, acquire_bootstrap_lock
         lock_path = self.ws / ".stagecheck.lock"
         lock_path.unlink(missing_ok=True)
         lock_path.symlink_to(self.ws / "controls" / "ACTIVE_STATE.json")
@@ -541,7 +541,7 @@ class TestAdversarialSecurity(unittest.TestCase):
 
     def test_adversarial_batch4_teardown_active_task_guard(self) -> None:
         """commit_safe_teardown blocks active IN_PROGRESS task unless abort_active=True."""
-        from stagecheck.core.permissions import ActiveTaskTeardownBlockedError, commit_safe_teardown
+        from governance.core.permissions import ActiveTaskTeardownBlockedError, commit_safe_teardown
         with controlled_write_transaction(self.ws / "controls"):
             state = load_active_state(self.ws)
             state["task_id"] = "task-active-teardown"
@@ -558,11 +558,11 @@ class TestAdversarialSecurity(unittest.TestCase):
 
     def test_adversarial_batch4_topology_and_stage4_stage7_symlinks(self) -> None:
         """Topology, Stage 4 report lint, and Stage 7 qual naming must reject symlinks."""
-        from stagecheck.checks.base import AuditContext
-        from stagecheck.checks.stage4_report_lint import run_stage4_report_lint
-        from stagecheck.checks.stage7_qual_naming import run_stage7_qual_naming
-        from stagecheck.core.paths import StageCheckPathError
-        from stagecheck.core.topology import validate_worktree_hierarchy
+        from governance.checks.base import AuditContext
+        from governance.checks.stage4_report_lint import run_stage4_report_lint
+        from governance.checks.stage7_qual_naming import run_stage7_qual_naming
+        from governance.core.paths import StageCheckPathError
+        from governance.core.topology import validate_worktree_hierarchy
 
         wt_root = self.ws / ".stagecheck_worktrees"
         outside = Path(self.temp_dir.name) / "outside_dir"
@@ -601,8 +601,8 @@ class TestAdversarialSecurity(unittest.TestCase):
 
     def test_adversarial_batch4_prompt_gate_and_evidence_symlink_guards(self) -> None:
         """Prompt gate rejects symlinked prompt.md and mismatched task_id scope; manifest rejects missing seal."""
-        from stagecheck.core.evidence import verify_evidence_manifest
-        from stagecheck.core.prompt_gate import PromptGateError, freeze_prompt_and_scope
+        from governance.core.evidence import verify_evidence_manifest
+        from governance.core.prompt_gate import PromptGateError, freeze_prompt_and_scope
 
         p1_dir = self.ws / "evidence" / "tasks" / "task-pg-sym" / "attempt_1" / "Phase-1"
         p1_dir.mkdir(parents=True, exist_ok=True)
@@ -647,7 +647,7 @@ class TestAdversarialSecurity(unittest.TestCase):
 
     def test_adversarial_batch4_journal_symlink_and_corrupt_preimages_quarantined(self) -> None:
         """Symlinked journal fails closed; non-dict pre_images quarantined; rollback restores read-only mode."""
-        from stagecheck.core.journal import JournalError
+        from governance.core.journal import JournalError
 
         controls_file = self.ws / "controls" / "ACTIVE_STATE.json"
         orig_text = controls_file.read_text(encoding="utf-8")
@@ -686,7 +686,7 @@ class TestAdversarialSecurity(unittest.TestCase):
 
     def test_adversarial_batch6_dual_role_and_single_agent_fail_closed(self) -> None:
         """[13] dual_role cannot spoof prompt_and_audit; single_agent_mode fails dual-agent rules."""
-        from stagecheck.core.rubric_engine import (
+        from governance.core.rubric_engine import (
             _collect_rubric_context,
             build_agent_reviews_artifact,
             evaluate_rubric_rule,
@@ -745,8 +745,8 @@ class TestAdversarialSecurity(unittest.TestCase):
 
     def test_adversarial_batch6_forged_rubric_and_prompt_scope_invariance(self) -> None:
         """[28, 32, 36] Reject forged 270/270 rubric, wrong N/A predicates, deleted prompt.md, and scope task mismatch."""
-        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
-        from stagecheck.core.rubric_engine import (
+        from governance.core.prompt_gate import freeze_prompt_and_scope
+        from governance.core.rubric_engine import (
             InvalidRubricExemptionError,
             _collect_rubric_context,
             compute_rubric_context_digest,
@@ -832,7 +832,7 @@ class TestAdversarialSecurity(unittest.TestCase):
         self.assertEqual(res_025.status, "FAIL")
 
         # [28] Replacing declared_scope.json with mismatched task_id fails Gate-1
-        from stagecheck.core.gate_engine import evaluate_gate_1_criteria
+        from governance.core.gate_engine import evaluate_gate_1_criteria
         (p1_dir / "prompt.md").write_text("# Task\nImplement hardened verification checks.\n", encoding="utf-8")
         os.chmod(p1_dir / "declared_scope.json", 0o644)
         (p1_dir / "declared_scope.json").write_text(
@@ -844,8 +844,8 @@ class TestAdversarialSecurity(unittest.TestCase):
 
     def test_adversarial_batch6_waiver_finalization_on_breaker(self) -> None:
         """[29] Tripping the circuit breaker finalizes attempt waivers against replay."""
-        from stagecheck.core.circuit_breaker import CircuitBreakerEvaluation, trip_circuit_breaker
-        from stagecheck.core.dispositions import (
+        from governance.core.circuit_breaker import CircuitBreakerEvaluation, trip_circuit_breaker
+        from governance.core.dispositions import (
             DispositionReplayError,
             build_waiver_entry,
             record_waiver_in_replay_ledger,
@@ -881,9 +881,9 @@ class TestAdversarialSecurity(unittest.TestCase):
 
     def test_adversarial_batch6_resume_and_circuit_breaker_guards(self) -> None:
         """[24, 25] Resume requires AWAITING_HUMAN_DISPOSITION + verdict.json; breaker reset requires granted human."""
-        from stagecheck.cli.main import main
-        from stagecheck.core.circuit_breaker import CircuitBreakerEvaluation, trip_circuit_breaker
-        from stagecheck.core.dispositions import DispositionError, resume_after_disposition
+        from governance.cli.main import main
+        from governance.core.circuit_breaker import CircuitBreakerEvaluation, trip_circuit_breaker
+        from governance.core.dispositions import DispositionError, resume_after_disposition
 
         # [25a] Wrong phase fails closed
         with self.assertRaises(DispositionError):
@@ -934,10 +934,10 @@ class TestAdversarialSecurity(unittest.TestCase):
         """[23, 33, 35] Enforce Merkle seal chain, ignore unindexed plan seals, and block task restarts."""
         from contextlib import redirect_stdout
         import io
-        from stagecheck.checks.base import AuditContext
-        from stagecheck.checks.stage9_carry_forward import run_stage9_carry_forward
-        from stagecheck.cli.plan_cmd import run_plan
-        from stagecheck.core.sealing import SealingError, compute_attempt_merkle_seal, index_seal_in_manifest
+        from governance.checks.base import AuditContext
+        from governance.checks.stage9_carry_forward import run_stage9_carry_forward
+        from governance.cli.plan_cmd import run_plan
+        from governance.core.sealing import SealingError, compute_attempt_merkle_seal, index_seal_in_manifest
 
         att1 = self.ws / "evidence" / "tasks" / "task-adv-01" / "attempt_1"
         att2 = self.ws / "evidence" / "tasks" / "task-adv-01" / "attempt_2"

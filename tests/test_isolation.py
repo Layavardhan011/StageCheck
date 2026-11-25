@@ -10,16 +10,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from stagecheck.core.commands import SandboxUnavailableError as CommandSandboxError
-from stagecheck.core.commands import execute_secure_command
-from stagecheck.core.isolation import (
+from governance.core.commands import SandboxUnavailableError as CommandSandboxError
+from governance.core.commands import execute_secure_command
+from governance.core.isolation import (
     SandboxPolicy,
     SandboxUnavailableError,
     prepare_isolated_command,
     probe_bwrap_sandbox,
 )
-from stagecheck.core.permissions import assert_os_sandbox_boundary
-from stagecheck.core.utils import sha256_file
+from governance.core.permissions import assert_os_sandbox_boundary
+from governance.core.utils import sha256_file
 
 
 class TestSameUidIsolation(unittest.TestCase):
@@ -55,7 +55,7 @@ class TestSameUidIsolation(unittest.TestCase):
 
     def test_kernel_blocks_same_uid_writes_chmod_and_unlink_on_governance_and_package(self) -> None:
         """Verify untrusted same-UID child cannot mutate controls, evidence, AGENTS.md, or StageCheck package."""
-        pkg_file = Path(__file__).resolve().parent.parent / "stagecheck" / "core" / "gate_engine.py"
+        pkg_file = Path(__file__).resolve().parent.parent / "governance" / "core" / "gate_engine.py"
         before_state_sha = sha256_file(self.active_state)
         before_ev_sha = sha256_file(self.evidence_file)
         before_pkg_sha = sha256_file(pkg_file)
@@ -164,7 +164,7 @@ class TestSameUidIsolation(unittest.TestCase):
     def test_fails_closed_when_bwrap_missing_or_probe_fails(self) -> None:
         """Mandatory isolation must fail closed (exit 126 / SandboxUnavailableError), never run unsandboxed."""
         policy = SandboxPolicy(working_directory=self.repo_dir, workspace_root=self.ws)
-        with patch("stagecheck.core.isolation.resolve_bwrap_binary", return_value=None):
+        with patch("governance.core.isolation.resolve_bwrap_binary", return_value=None):
             with self.assertRaises(SandboxUnavailableError) as ctx:
                 prepare_isolated_command([sys.executable, "-c", "print('ok')"], policy=policy, mandatory=True)
             self.assertEqual(ctx.exception.exit_code, 126)
@@ -179,7 +179,7 @@ class TestSameUidIsolation(unittest.TestCase):
             self.assertEqual(cmd_ctx.exception.exit_code, 126)
 
         with patch(
-            "stagecheck.core.isolation.probe_bwrap_sandbox",
+            "governance.core.isolation.probe_bwrap_sandbox",
             return_value={"available": False, "bwrap_path": None, "namespaces_supported": False, "reason": "EPERM"},
         ):
             with self.assertRaises(SandboxUnavailableError):
@@ -188,8 +188,8 @@ class TestSameUidIsolation(unittest.TestCase):
     def test_gap03_deployment_preflight_checks_all_isolation_invariants(self) -> None:
         """Verify run_bwrap_deployment_preflight checks namespaces, RO governance/package, credentials, and network (GAP-03)."""
         import json
-        from stagecheck.core.isolation import run_bwrap_deployment_preflight
-        from stagecheck.cli.main import main
+        from governance.core.isolation import run_bwrap_deployment_preflight
+        from governance.cli.main import main
 
         res = run_bwrap_deployment_preflight(workspace_root=self.ws, working_directory=self.repo_dir)
         self.assertTrue(res.passed, f"Expected host preflight to pass: {res.reason}")
@@ -220,10 +220,10 @@ class TestSameUidIsolation(unittest.TestCase):
 
     def test_gap03_preflight_rejects_missing_untrusted_and_unsupported_namespaces(self) -> None:
         """Verify preflight fails closed on missing, world-writable, /tmp/repo-local bwrap, and unsupported namespaces (GAP-03)."""
-        from stagecheck.core.isolation import run_bwrap_deployment_preflight, validate_bwrap_binary
+        from governance.core.isolation import run_bwrap_deployment_preflight, validate_bwrap_binary
 
         # 1. Missing bwrap binary
-        with patch("stagecheck.core.isolation.resolve_bwrap_binary", return_value=None):
+        with patch("governance.core.isolation.resolve_bwrap_binary", return_value=None):
             with self.assertRaises(SandboxUnavailableError) as err_missing:
                 run_bwrap_deployment_preflight(workspace_root=self.ws, raise_on_failure=True)
             self.assertEqual(err_missing.exception.exit_code, 126)
@@ -255,18 +255,18 @@ class TestSameUidIsolation(unittest.TestCase):
         fake_proc = subprocess.CompletedProcess(
             args=["bwrap"], returncode=1, stdout="", stderr="bwrap: No permissions to create a new namespace (EPERM)"
         )
-        with patch("stagecheck.core.isolation.validate_bwrap_binary", return_value=("/usr/bin/bwrap", None)):
-            with patch("stagecheck.core.isolation._REAL_SUBPROCESS_RUN", return_value=fake_proc):
+        with patch("governance.core.isolation.validate_bwrap_binary", return_value=("/usr/bin/bwrap", None)):
+            with patch("governance.core.isolation._REAL_SUBPROCESS_RUN", return_value=fake_proc):
                 res_ns = run_bwrap_deployment_preflight(workspace_root=self.ws, raise_on_failure=False)
                 self.assertFalse(res_ns.passed)
                 self.assertIn("EPERM", res_ns.reason)
 
     def test_gap03_start_supervisor_and_orchestrator_block_without_preflight(self) -> None:
         """Verify stagecheck start, SupervisorEngine.step, and AuditOrchestrator fail closed if preflight fails (GAP-03)."""
-        from stagecheck.cli.main import main
-        from stagecheck.core.isolation import IsolationPreflightResult
-        from stagecheck.core.orchestrator import AuditContext, AuditOrchestrator
-        from stagecheck.core.supervisor import SupervisorEngine
+        from governance.cli.main import main
+        from governance.core.isolation import IsolationPreflightResult
+        from governance.core.orchestrator import AuditContext, AuditOrchestrator
+        from governance.core.supervisor import SupervisorEngine
 
         failed_preflight = IsolationPreflightResult(
             passed=False,
@@ -277,20 +277,20 @@ class TestSameUidIsolation(unittest.TestCase):
         )
 
         # 1. stagecheck supervisor preflight exits 126
-        with patch("stagecheck.cli.supervisor_cmd.run_bwrap_deployment_preflight", return_value=failed_preflight):
+        with patch("governance.cli.supervisor_cmd.run_bwrap_deployment_preflight", return_value=failed_preflight):
             rc_pre = main(["supervisor", "preflight", "--workspace", str(self.ws)])
             self.assertEqual(rc_pre, 126)
 
         # 2. stagecheck start blocks task initialization before mutating workspace
         (self.controls_dir / "STAGECHECK_ROOT.json").write_text('{"schema_version":"2.0"}\n', encoding="utf-8")
-        with patch("stagecheck.cli.start_cmd.run_bwrap_deployment_preflight", side_effect=SandboxUnavailableError("bwrap unavailable")):
+        with patch("governance.cli.start_cmd.run_bwrap_deployment_preflight", side_effect=SandboxUnavailableError("bwrap unavailable")):
             rc_start = main(["start", "--task", "task-blocked", "--workspace", str(self.ws)])
             self.assertEqual(rc_start, 126)
             self.assertFalse((self.ws / "evidence" / "tasks" / "task-blocked").exists())
 
         # 3. SupervisorEngine.step halts fail-closed
         sup = SupervisorEngine(self.ws)
-        with patch("stagecheck.core.isolation.run_bwrap_deployment_preflight", return_value=failed_preflight):
+        with patch("governance.core.isolation.run_bwrap_deployment_preflight", return_value=failed_preflight):
             step_res = sup.step(task_id="task-blocked", attempt=1)
             self.assertEqual(step_res.status, "HALTED")
             self.assertEqual(step_res.action_taken, "ISOLATION_PREFLIGHT_FAILED")
@@ -305,13 +305,13 @@ class TestSameUidIsolation(unittest.TestCase):
             touched_repos=["app"],
             all_registered_repos=["app"],
         )
-        with patch("stagecheck.core.isolation.run_bwrap_deployment_preflight", side_effect=SandboxUnavailableError("no bwrap")):
+        with patch("governance.core.isolation.run_bwrap_deployment_preflight", side_effect=SandboxUnavailableError("no bwrap")):
             with self.assertRaises(SandboxUnavailableError):
                 orch.run_all_stages(ctx)
 
     def test_full_home_masking_no_tmp_argv_unmask_and_ws_root_protection(self) -> None:
         """Verify arbitrary $HOME tokens are masked, /tmp argv tokens are not auto-mounted, and rw ws_root is rejected."""
-        from stagecheck.core.isolation import IsolationError, find_workspace_root_for_cwd
+        from governance.core.isolation import IsolationError, find_workspace_root_for_cwd
 
         with tempfile.TemporaryDirectory() as fake_home_tmp:
             fake_home = Path(fake_home_tmp).resolve()

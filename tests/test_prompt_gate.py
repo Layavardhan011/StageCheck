@@ -8,9 +8,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.main import main
-from stagecheck.core.agents import resolve_task_attempt_dir
-from stagecheck.core.prompt_gate import (
+from governance.cli.main import main
+from governance.core.agents import resolve_task_attempt_dir
+from governance.core.prompt_gate import (
     PromptGateError,
     PromptMissingError,
     PromptNotVerifiedError,

@@ -28,14 +28,14 @@ import time
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.init_cmd import run_init
-from stagecheck.cli.main import main
-from stagecheck.cli.supervisor_cmd import run_supervisor_cmd
-from stagecheck.core.locking import acquire_runtime_lock
-from stagecheck.core.permissions import elevate_permissions_for_teardown
-from stagecheck.core.prompt_gate import freeze_prompt_and_scope
-from stagecheck.core.state import load_active_state, save_active_state
-from stagecheck.core.supervisor import (
+from governance.cli.init_cmd import run_init
+from governance.cli.main import main
+from governance.cli.supervisor_cmd import run_supervisor_cmd
+from governance.core.locking import acquire_runtime_lock
+from governance.core.permissions import elevate_permissions_for_teardown
+from governance.core.prompt_gate import freeze_prompt_and_scope
+from governance.core.state import load_active_state, save_active_state
+from governance.core.supervisor import (
     PromptDebouncer,
     SupervisorEngine,
     evaluate_watchdog,
@@ -341,7 +341,7 @@ class TestSupervisorCLI(unittest.TestCase):
     def test_watchdog_ignores_unicode_line_separator_log_injection(self) -> None:
         """U+2028/U+2029 injected records in sentinel.log must not spoof relevant filesystem activity."""
         import datetime
-        from stagecheck.core.supervisor import get_last_relevant_filesystem_timestamp
+        from governance.core.supervisor import get_last_relevant_filesystem_timestamp
 
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         ev_dir = self.ws / "evidence"
@@ -359,9 +359,9 @@ class TestSupervisorCLI(unittest.TestCase):
         import contextlib
         import datetime
         from unittest import mock
-        from stagecheck.cli.start_cmd import run_start
-        from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.state import load_active_state, save_active_state
+        from governance.cli.start_cmd import run_start
+        from governance.core.permissions import controlled_write_transaction
+        from governance.core.state import load_active_state, save_active_state
 
         self.assertEqual(run_start(workspace=self.ws, task="task-wd-toctou"), 0)
         now_utc = datetime.datetime.now(datetime.timezone.utc)
@@ -372,7 +372,7 @@ class TestSupervisorCLI(unittest.TestCase):
             state["watchdog"] = {"last_active_timestamp": stale_iso}
             save_active_state(self.ws, state)
 
-        from stagecheck.core import supervisor as sup_mod
+        from governance.core import supervisor as sup_mod
         real_lock = sup_mod.acquire_runtime_lock
 
         @contextlib.contextmanager
@@ -392,8 +392,8 @@ class TestSupervisorCLI(unittest.TestCase):
 
     def test_supervisor_step_defers_cleanly_under_runtime_lock(self) -> None:
         """SupervisorEngine.step returns LOCK_CONTENDED without mutating state when runtime lock is held."""
-        from stagecheck.cli.start_cmd import run_start
-        from stagecheck.core.locking import acquire_runtime_lock
+        from governance.cli.start_cmd import run_start
+        from governance.core.locking import acquire_runtime_lock
 
         self.assertEqual(run_start(workspace=self.ws, task="task-lock-step"), 0)
         engine = SupervisorEngine(self.ws, watchdog_timeout_seconds=600.0)
@@ -404,10 +404,10 @@ class TestSupervisorCLI(unittest.TestCase):
 
     def test_supervisor_returns_halted_on_halted_phases_and_watchdog_resumes(self) -> None:
         """Halted phases return HALTED; watchdog timeout resumes to interrupted phase with refreshed watchdog."""
-        from stagecheck.cli.start_cmd import run_start
-        from stagecheck.core.dispositions import resume_after_disposition
-        from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.scaffold import scaffold_agent_instructions
+        from governance.cli.start_cmd import run_start
+        from governance.core.dispositions import resume_after_disposition
+        from governance.core.permissions import controlled_write_transaction
+        from governance.core.scaffold import scaffold_agent_instructions
 
         self.assertEqual(run_start(workspace=self.ws, task="task-halt-resume"), 0)
         with controlled_write_transaction(self.ws / "controls"):
@@ -459,12 +459,12 @@ class TestSupervisorCLI(unittest.TestCase):
 
     def test_reset_circuit_breaker_refreshes_watchdog_turn_and_cleared_gates(self) -> None:
         """reset_circuit_breaker refreshes watchdog timestamps and resets turn and cleared_gates."""
-        from stagecheck.core.circuit_breaker import (
+        from governance.core.circuit_breaker import (
             CircuitBreakerEvaluation,
             reset_circuit_breaker,
             trip_circuit_breaker,
         )
-        from stagecheck.core.permissions import controlled_write_transaction
+        from governance.core.permissions import controlled_write_transaction
 
         with controlled_write_transaction(self.ws / "controls"):
             st = load_active_state(self.ws)
@@ -496,7 +496,7 @@ class TestSupervisorCLI(unittest.TestCase):
 
     def test_default_60s_debounce_and_format_duration(self) -> None:
         """Verify default 60s debounce triggers INOTIFY_SILENCE_60S and format_duration formatting."""
-        from stagecheck.cli.supervisor_cmd import format_duration
+        from governance.cli.supervisor_cmd import format_duration
 
         # 1. format_duration verification
         self.assertEqual(format_duration(45.2), "45 sec")
@@ -525,7 +525,7 @@ class TestSupervisorCLI(unittest.TestCase):
 
     def test_supervisor_step_debouncing_message_shows_1_min(self) -> None:
         """Verify SupervisorEngine step debouncing message announces 1 min debounce."""
-        from stagecheck.core.permissions import controlled_write_transaction
+        from governance.core.permissions import controlled_write_transaction
 
         engine = SupervisorEngine(workspace_root=self.ws)
         self.assertEqual(engine.debouncer.quiet_seconds, 60.0)
@@ -552,8 +552,8 @@ class TestSupervisorCLI(unittest.TestCase):
         import io
         from contextlib import redirect_stdout
         from unittest.mock import patch
-        from stagecheck.cli.supervisor_cmd import run_supervisor_cmd
-        from stagecheck.core.supervisor import SupervisorStepResult
+        from governance.cli.supervisor_cmd import run_supervisor_cmd
+        from governance.core.supervisor import SupervisorStepResult
 
         step_results = [
             SupervisorStepResult(
@@ -599,7 +599,7 @@ class TestSupervisorCLI(unittest.TestCase):
         ]
 
         buf = io.StringIO()
-        with patch("stagecheck.cli.supervisor_cmd.SupervisorEngine.step", side_effect=step_results):
+        with patch("governance.cli.supervisor_cmd.SupervisorEngine.step", side_effect=step_results):
             with patch("time.sleep", return_value=None):
                 with redirect_stdout(buf):
                     rc = run_supervisor_cmd(
@@ -626,7 +626,7 @@ class TestSupervisorCLI(unittest.TestCase):
 
     def test_supervisor_terminal_colors_formatting(self) -> None:
         """Verify color formatting for statuses (WAITING=yellow, ADVANCED=green, etc.) and phases (PHASE-01=cyan, etc.)."""
-        from stagecheck.cli.supervisor_cmd import (
+        from governance.cli.supervisor_cmd import (
             color_phase,
             color_status,
             format_attempt_banner,
@@ -674,7 +674,7 @@ class TestSupervisorCLI(unittest.TestCase):
         self.assertIn("\033[1;93m", banner)
 
         # Task started banner contains cyan border and task title
-        from stagecheck.cli.supervisor_cmd import format_task_started_banner
+        from governance.cli.supervisor_cmd import format_task_started_banner
         start_banner = format_task_started_banner("task-01", enabled=True)
         self.assertIn(">>> TASK STARTED ----> Task-01 <<<", start_banner)
         self.assertIn("\033[1;96m", start_banner)
@@ -684,8 +684,8 @@ class TestSupervisorCLI(unittest.TestCase):
         import io
         from contextlib import redirect_stdout
         from unittest.mock import patch
-        from stagecheck.cli.supervisor_cmd import run_supervisor_cmd
-        from stagecheck.core.supervisor import SupervisorStepResult
+        from governance.cli.supervisor_cmd import run_supervisor_cmd
+        from governance.core.supervisor import SupervisorStepResult
 
         step_results = [
             SupervisorStepResult(
@@ -707,7 +707,7 @@ class TestSupervisorCLI(unittest.TestCase):
         ]
 
         buf = io.StringIO()
-        with patch("stagecheck.cli.supervisor_cmd.SupervisorEngine.step", side_effect=step_results):
+        with patch("governance.cli.supervisor_cmd.SupervisorEngine.step", side_effect=step_results):
             with patch("time.sleep", return_value=None):
                 with redirect_stdout(buf):
                     rc = run_supervisor_cmd(
@@ -732,8 +732,8 @@ class TestSupervisorCLI(unittest.TestCase):
         import io
         from contextlib import redirect_stdout
         from unittest.mock import patch
-        from stagecheck.cli.supervisor_cmd import run_supervisor_cmd
-        from stagecheck.core.supervisor import SupervisorStepResult
+        from governance.cli.supervisor_cmd import run_supervisor_cmd
+        from governance.core.supervisor import SupervisorStepResult
 
         step_results = [
             SupervisorStepResult(
@@ -764,7 +764,7 @@ class TestSupervisorCLI(unittest.TestCase):
         ]
 
         buf = io.StringIO()
-        with patch("stagecheck.cli.supervisor_cmd.SupervisorEngine.step", side_effect=step_results):
+        with patch("governance.cli.supervisor_cmd.SupervisorEngine.step", side_effect=step_results):
             with patch("time.sleep", return_value=None):
                 with redirect_stdout(buf):
                     rc = run_supervisor_cmd(
@@ -787,10 +787,10 @@ class TestSupervisorCLI(unittest.TestCase):
     def test_supervisor_step_triggers_audit_automatically_on_phase_3(self) -> None:
         """When in PHASE_3_AUDIT and verdict.json is missing, step() triggers run_audit outside lock."""
         from unittest.mock import patch
-        from stagecheck.cli.start_cmd import run_start
-        from stagecheck.core.agents import resolve_task_attempt_dir
-        from stagecheck.core.permissions import controlled_write_transaction
-        from stagecheck.core.supervisor import SupervisorEngine
+        from governance.cli.start_cmd import run_start
+        from governance.core.agents import resolve_task_attempt_dir
+        from governance.core.permissions import controlled_write_transaction
+        from governance.core.supervisor import SupervisorEngine
 
         self.assertEqual(run_start(workspace=self.ws, task="task-audit-auto"), 0)
         with controlled_write_transaction(self.ws / "controls"):
@@ -810,7 +810,7 @@ class TestSupervisorCLI(unittest.TestCase):
         p3_dir.mkdir(parents=True, exist_ok=True)
 
         # 1. Audit raises an exception -> returns HALTED with AUDIT_EXECUTION_ERROR
-        with patch("stagecheck.core.orchestrator.run_audit", side_effect=RuntimeError("container engine offline")):
+        with patch("governance.core.orchestrator.run_audit", side_effect=RuntimeError("container engine offline")):
             res = engine.step(task_id="task-audit-auto", attempt=1)
             self.assertEqual(res.status, "HALTED")
             self.assertEqual(res.action_taken, "AUDIT_EXECUTION_ERROR")
@@ -830,8 +830,8 @@ class TestSupervisorCLI(unittest.TestCase):
             (p3_dir / "verdict.json").write_text(json.dumps(verdict_payload, indent=2), encoding="utf-8")
             return True, verdict_payload
 
-        with patch("stagecheck.core.orchestrator.run_audit", side_effect=fake_run_audit) as mock_audit, \
-             patch("stagecheck.core.rubric_engine.verify_complete_rubric_evaluation", return_value=(True, [], [])):
+        with patch("governance.core.orchestrator.run_audit", side_effect=fake_run_audit) as mock_audit, \
+             patch("governance.core.rubric_engine.verify_complete_rubric_evaluation", return_value=(True, [], [])):
             res = engine.step(task_id="task-audit-auto", attempt=1)
             self.assertTrue(mock_audit.called)
             self.assertEqual(res.status, "ADVANCED")
@@ -841,11 +841,11 @@ class TestSupervisorCLI(unittest.TestCase):
     def test_supervisor_step_handles_audit_failure_and_transitions_to_attempt_2(self) -> None:
         """When audit fails on attempt 1, supervisor transitions to attempt 2 and re-steps with attempt=2."""
         from unittest.mock import patch
-        from stagecheck.cli.start_cmd import run_start
-        from stagecheck.core.agents import resolve_task_attempt_dir
-        from stagecheck.core.gate_engine import handle_audit_verdict
-        from stagecheck.core.permissions import controlled_write_transaction, freeze_phase_directory
-        from stagecheck.core.supervisor import SupervisorEngine
+        from governance.cli.start_cmd import run_start
+        from governance.core.agents import resolve_task_attempt_dir
+        from governance.core.gate_engine import handle_audit_verdict
+        from governance.core.permissions import controlled_write_transaction, freeze_phase_directory
+        from governance.core.supervisor import SupervisorEngine
 
         self.assertEqual(run_start(workspace=self.ws, task="task-audit-fail"), 0)
         with controlled_write_transaction(self.ws / "controls"):
@@ -888,7 +888,7 @@ class TestSupervisorCLI(unittest.TestCase):
             freeze_phase_directory(attempt1_dir / "Phase-1")
             return False, verdict_payload
 
-        with patch("stagecheck.core.orchestrator.run_audit", side_effect=fake_failing_audit):
+        with patch("governance.core.orchestrator.run_audit", side_effect=fake_failing_audit):
             res = engine.step(task_id="task-audit-fail", attempt=1)
             self.assertEqual(res.attempt, 2)
             self.assertEqual(res.current_phase, "PHASE_1_PLANNING")

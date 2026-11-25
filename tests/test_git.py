@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.git import (
+from governance.core.git import (
     DirtyRepositoryError,
     GitError,
     NotAGitRepositoryError,
@@ -182,7 +182,7 @@ class TestGitDiscovery(unittest.TestCase):
                 self.assertIn(flag, called_cmd)
 
         # 3. Verify get_repo_diff uses safe git flags and --no-ext-diff --no-textconv
-        from stagecheck.core.branch_governance import get_repo_diff
+        from governance.core.branch_governance import get_repo_diff
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="diff output", stderr="")
             get_repo_diff(repo_path, "HEAD~1")
@@ -224,7 +224,7 @@ class TestGitDiscovery(unittest.TestCase):
 
     def test_assert_safe_repo_git_config_detects_malicious_keys(self) -> None:
         """Verify assert_safe_repo_git_config fails closed on dangerous git config sections (SC-SEC-07)."""
-        from stagecheck.core.git import assert_safe_repo_git_config
+        from governance.core.git import assert_safe_repo_git_config
 
         dangerous_configs = [
             ("filter \"evil\"", "clean", "evil-clean %f"),
@@ -255,7 +255,7 @@ class TestGitDiscovery(unittest.TestCase):
 
     def test_assert_safe_repo_git_config_blocks_indented_includes_worktree_and_subdirs(self) -> None:
         """Regression test for indented headers, include/includeIf, core.worktree, core.bare, and subdirs."""
-        from stagecheck.core.git import assert_safe_repo_git_config
+        from governance.core.git import assert_safe_repo_git_config
 
         bypasses = [
             ("indented-filter", "  [filter \"evil\"]\n    clean = evil-cmd\n"),
@@ -295,7 +295,7 @@ class TestGitDiscovery(unittest.TestCase):
 
     def test_remote_name_dash_prefix_and_quotepath_nul_framing(self) -> None:
         """Regression test for dash-prefixed remote names and C-quoted/special filenames."""
-        from stagecheck.core.git import (
+        from governance.core.git import (
             get_repo_remote_push_urls,
             parse_git_porcelain_z,
             run_safe_git,

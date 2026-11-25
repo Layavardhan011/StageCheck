@@ -2,9 +2,9 @@ name: StageCheck Production CI Release Gates
 
 on:
   push:
-    branches: [ main, master, "fix/**", "feat/**", "release/**" ]
+    branches: [ main, master, Development, "fix/**", "feat/**", "refactor/**", "release/**" ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, Development, "refactor/**" ]
 
 jobs:
   release-gates:

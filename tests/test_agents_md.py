@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.agents_md import (
+from governance.core.agents_md import (
     AgentsContractNotFoundError,
     AgentsContractSecurityError,
     AgentsContractVerificationError,
@@ -16,9 +16,9 @@ from stagecheck.core.agents_md import (
     verify_agents_contract,
     write_agents_contract,
 )
-from stagecheck.core.git import RepoBaseline
-from stagecheck.core.scaffold import scaffold_controls_atomic
-from stagecheck.core.utils import sha256_file
+from governance.core.git import RepoBaseline
+from governance.core.scaffold import scaffold_controls_atomic
+from governance.core.utils import sha256_file
 
 
 class TestAgentsContract(unittest.TestCase):

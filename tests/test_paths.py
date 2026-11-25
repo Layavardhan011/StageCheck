@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.paths import (
+from governance.core.paths import (
     PathOutsideBoundaryError,
     PathTraversalError,
     StageCheckPathError,

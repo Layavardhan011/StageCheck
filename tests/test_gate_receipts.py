@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.gate_engine import (
+from governance.core.gate_engine import (
     GateAdvanceResult,
     GateCriteriaFailedError,
     GateId,
@@ -23,11 +23,11 @@ from stagecheck.core.gate_engine import (
     get_gate_receipt_path,
     verify_gate_receipts,
 )
-from stagecheck.core.git import RepoBaseline
-from stagecheck.core.scaffold import scaffold_controls_atomic
-from stagecheck.core.state import load_active_state, save_active_state
-from stagecheck.core.utils import sha256_file
-from stagecheck.schemas.validator import validate_gate_receipt
+from governance.core.git import RepoBaseline
+from governance.core.scaffold import scaffold_controls_atomic
+from governance.core.state import load_active_state, save_active_state
+from governance.core.utils import sha256_file
+from governance.schemas.validator import validate_gate_receipt
 
 
 class TestGateReceipts(unittest.TestCase):
@@ -214,8 +214,8 @@ class TestGateReceipts(unittest.TestCase):
 
         # Mock update_evidence_manifest to fail during commit
         from unittest.mock import patch
-        with patch("stagecheck.core.gate_engine.update_evidence_manifest", side_effect=RuntimeError("Manifest update failed")):
-            from stagecheck.core.gate_engine import GateError
+        with patch("governance.core.gate_engine.update_evidence_manifest", side_effect=RuntimeError("Manifest update failed")):
+            from governance.core.gate_engine import GateError
             with self.assertRaises(GateError):
                 advance_gate_atomic(self.workspace, "Gate-1")
 
@@ -229,7 +229,7 @@ class TestGateReceipts(unittest.TestCase):
 
     def test_advance_gate_atomic_lock_contention_handled_safely(self) -> None:
         """Verify lock contention safely blocks concurrent gate advance without corrupting state."""
-        from stagecheck.core.locking import LockCollisionError, acquire_runtime_lock
+        from governance.core.locking import LockCollisionError, acquire_runtime_lock
         self._setup_valid_gate1_deliverables()
         state_before = load_active_state(self.workspace)
 

@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.locking import (
+from governance.core.locking import (
     LockCollisionError,
     acquire_bootstrap_lock,
     acquire_runtime_lock,

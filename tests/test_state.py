@@ -6,9 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.state import load_active_state, save_active_state
-from stagecheck.core.utils import SchemaValidationError
-from stagecheck.schemas.validator import validate_active_state
+from governance.core.state import load_active_state, save_active_state
+from governance.core.utils import SchemaValidationError
+from governance.schemas.validator import validate_active_state
 
 
 class TestActiveStateGovernance(unittest.TestCase):

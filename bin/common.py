@@ -141,7 +141,7 @@ def safe_git(args, cwd, timeout=30):
     tool_root = str(Path(__file__).resolve().parent.parent)
     if tool_root not in sys.path:
         sys.path.insert(0, tool_root)
-    from stagecheck.core.git import GitError, assert_safe_repo_git_config
+    from governance.core.git import GitError, assert_safe_repo_git_config
     try:
         assert_safe_repo_git_config(Path(cwd))
     except GitError as exc:

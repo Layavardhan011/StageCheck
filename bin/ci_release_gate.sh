@@ -69,7 +69,7 @@ fi
 "${PYTHON_BIN}" - <<'PYEOF'
 import tempfile
 from pathlib import Path
-from stagecheck.core.portability import (
+from governance.core.portability import (
     EXECUTABLE_REPO_PATHS,
     create_source_zip_preserving_modes,
     extract_zip_preserving_modes,
@@ -107,7 +107,7 @@ echo ""
 
 echo "[GATE 6/7] Validating All 14 CLI Verbs and Entry Points..."
 "${TEMP_VENV}/bin/stagecheck" --version
-"${TEMP_VENV}/bin/python" -m stagecheck --version
+"${TEMP_VENV}/bin/python" -m governance --version
 
 VERBS=(
     "init"

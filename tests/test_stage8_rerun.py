@@ -26,10 +26,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.init_cmd import run_init
-from stagecheck.core.git import DirtyRepositoryError
-from stagecheck.core.permissions import elevate_permissions_for_teardown
-from stagecheck.core.topology import (
+from governance.cli.init_cmd import run_init
+from governance.core.git import DirtyRepositoryError
+from governance.core.permissions import elevate_permissions_for_teardown
+from governance.core.topology import (
     InvalidWorktreePathError,
     TopologyWorktreeManager,
     managed_topology_worktrees,
@@ -214,7 +214,7 @@ class TestTopologyPreservingWorktrees(unittest.TestCase):
 
     def test_stage8_test_at_base_commit_executes_without_name_error(self) -> None:
         """Verify _test_at_base_commit executes commands at base_commit without raising NameError."""
-        from stagecheck.checks.stage8_rerun import _test_at_base_commit
+        from governance.checks.stage8_rerun import _test_at_base_commit
 
         exit_code = _test_at_base_commit(
             workspace_root=self.ws,
@@ -252,8 +252,8 @@ class TestTopologyPreservingWorktrees(unittest.TestCase):
 
     def test_stage8_rejects_git_command_citations_with_clear_defect(self) -> None:
         """Verify Stage 8 rerun flags git command citations with rerun.invalid_command_citation_type."""
-        from stagecheck.checks.base import AuditContext
-        from stagecheck.checks.stage8_rerun import run_stage8_rerun
+        from governance.checks.base import AuditContext
+        from governance.checks.stage8_rerun import run_stage8_rerun
 
         claims = {
             "claims": [

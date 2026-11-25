@@ -116,8 +116,8 @@ def execute_copy(ctx, auto, cite, module, rel):
         tool_root = str(Path(__file__).resolve().parents[1])
         if tool_root not in sys.path:
             sys.path.insert(0, tool_root)
-        from stagecheck.core.commands import build_sanitized_environment
-        from stagecheck.core.isolation import IsolationError, SandboxPolicy, prepare_isolated_command
+        from governance.core.commands import build_sanitized_environment
+        from governance.core.isolation import IsolationError, SandboxPolicy, prepare_isolated_command
         # The configured build cache is reused; -count=1 below keeps test results from ever being served from it.
         env = build_sanitized_environment({
             **auto['environment'],
@@ -212,8 +212,8 @@ def check(ctx, value):
         tool_root = str(Path(__file__).resolve().parents[1])
         if tool_root not in sys.path:
             sys.path.insert(0, tool_root)
-        from stagecheck.core.commands import build_sanitized_environment
-        from stagecheck.core.isolation import IsolationError, SandboxPolicy, prepare_isolated_command
+        from governance.core.commands import build_sanitized_environment
+        from governance.core.isolation import IsolationError, SandboxPolicy, prepare_isolated_command
         clean_env = build_sanitized_environment({
             **env,
             'GOTOOLCHAIN': 'local',

@@ -10,16 +10,16 @@ import time
 import unittest
 from pathlib import Path
 
-from stagecheck.cli.main import main
-from stagecheck.core.permissions import controlled_write_transaction
-from stagecheck.core.sentinel import (
+from governance.cli.main import main
+from governance.core.permissions import controlled_write_transaction
+from governance.core.sentinel import (
     SentinelDaemon,
     SentinelError,
     classify_event_path,
     send_desktop_notification,
 )
-from stagecheck.core.state import load_active_state, save_active_state
-from stagecheck.core.supervisor import evaluate_watchdog
+from governance.core.state import load_active_state, save_active_state
+from governance.core.supervisor import evaluate_watchdog
 
 
 class TestSentinel(unittest.TestCase):
@@ -40,6 +40,7 @@ class TestSentinel(unittest.TestCase):
             "controls/ACTIVE_STATE.json",
             "specs/TASK_PLAN.md",
             "AGENTS.md",
+            "governance/core/sentinel.py",
             "stagecheck/core/sentinel.py",
             "evidence/EVIDENCE_MANIFEST.json",
             "repos/backend/.git/config",
@@ -124,7 +125,7 @@ class TestSentinel(unittest.TestCase):
 
         # Verify option termination ('--'), html escaping, and urgency/icon sanitization
         from unittest.mock import patch
-        with patch("stagecheck.core.sentinel.subprocess.run") as mock_run:
+        with patch("governance.core.sentinel.subprocess.run") as mock_run:
             send_desktop_notification(
                 title="-leading-dash <b>title</b>",
                 message="--msg <script>x</script>",
@@ -186,7 +187,7 @@ class TestSentinel(unittest.TestCase):
 
     def test_process_rss_measurement_returns_positive_value(self) -> None:
         """RSS helper measures a real process in MiB."""
-        from stagecheck.core.sentinel import get_process_rss_mib
+        from governance.core.sentinel import get_process_rss_mib
 
         rss = get_process_rss_mib(os.getpid())
         self.assertGreater(rss, 0.0)
@@ -221,7 +222,7 @@ class TestSentinel(unittest.TestCase):
         self.assertFalse(sentinel.pid_file.exists())
 
         # Verify no orphan or zombie process remains
-        from stagecheck.core.sentinel import is_process_alive
+        from governance.core.sentinel import is_process_alive
         self.assertFalse(is_process_alive(pid), f"Daemon process {pid} remained alive or zombie after stop")
 
     def test_repeated_start_and_stop_lifecycle(self) -> None:
@@ -393,7 +394,7 @@ class TestSentinel(unittest.TestCase):
         self.assertGreater(daemon.last_activity_monotonic, start_mono)
 
         # Verify sentinel.log recorded the relevant event
-        from stagecheck.core.supervisor import get_last_relevant_filesystem_timestamp
+        from governance.core.supervisor import get_last_relevant_filesystem_timestamp
         last_fs_ts = get_last_relevant_filesystem_timestamp(self.workspace)
         self.assertIsNotNone(last_fs_ts)
 
@@ -469,7 +470,7 @@ class TestSentinel(unittest.TestCase):
 
     def test_daemon_rejects_symlink_daemon_log_and_lock(self) -> None:
         """SentinelDaemon.start rejects symlinked sentinel_daemon.log and .stagecheck_sentinel.lock."""
-        from stagecheck.core.sentinel import SentinelError
+        from governance.core.sentinel import SentinelError
         daemon = SentinelDaemon(self.workspace)
         daemon.log_file.parent.mkdir(parents=True, exist_ok=True)
         daemon_log = self.workspace / "evidence" / "sentinel_daemon.log"
@@ -490,7 +491,7 @@ class TestSentinel(unittest.TestCase):
 
     def test_sanitize_log_field_escapes_c1_and_unicode_line_separators(self) -> None:
         """_sanitize_log_field escapes U+0085, U+2028, and U+2029 so forged lines cannot be injected."""
-        from stagecheck.core.sentinel import _sanitize_log_field
+        from governance.core.sentinel import _sanitize_log_field
         raw = "repos/backend/a\u0085b\u2028c\u2029d.py"
         sanitized = _sanitize_log_field(raw)
         self.assertNotIn("\u0085", sanitized)
@@ -502,8 +503,8 @@ class TestSentinel(unittest.TestCase):
 
     def test_authorized_runtime_lock_classified_as_authorized_transaction(self) -> None:
         """Verify SentinelDaemon detects active/recent runtime lock transactions and avoids false GOVERNANCE_BREACH."""
-        from stagecheck.core.locking import acquire_runtime_lock
-        from stagecheck.core.permissions import MODE_DIR_RO, MODE_DIR_RW
+        from governance.core.locking import acquire_runtime_lock
+        from governance.core.permissions import MODE_DIR_RO, MODE_DIR_RW
 
         controls_dir = self.workspace / "controls"
         daemon = SentinelDaemon(self.workspace)

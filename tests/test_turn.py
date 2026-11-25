@@ -20,14 +20,14 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from stagecheck.cli.main import main
-from stagecheck.core.gate_engine import advance_gate_atomic
-from stagecheck.core.git import discover_repository
-from stagecheck.core.scaffold import scaffold_controls_atomic
-from stagecheck.core.start_manifest import generate_start_manifest
-from stagecheck.core.state import load_active_state, save_active_state
-from stagecheck.core.turn import check_and_record_turn_rate_limit, compute_turn_status
-from stagecheck.schemas.validator import validate_turn_status
+from governance.cli.main import main
+from governance.core.gate_engine import advance_gate_atomic
+from governance.core.git import discover_repository
+from governance.core.scaffold import scaffold_controls_atomic
+from governance.core.start_manifest import generate_start_manifest
+from governance.core.state import load_active_state, save_active_state
+from governance.core.turn import check_and_record_turn_rate_limit, compute_turn_status
+from governance.schemas.validator import validate_turn_status
 
 
 class TestTurnProtocol(unittest.TestCase):
@@ -107,7 +107,7 @@ class TestTurnProtocol(unittest.TestCase):
 
     def test_phase2a_cooperative_review_turn_progression(self) -> None:
         """Verify Phase 2A turn transitions: AGENT_2 -> AGENT_1 -> AGENT_2 (revision) -> STAGECHECK (approved)."""
-        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+        from governance.core.prompt_gate import freeze_prompt_and_scope
         p1_dir = self.workspace / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}" / "Phase-1"
         p1_dir.mkdir(parents=True, exist_ok=True)
         (p1_dir / "prompt.md").write_text("# Prompt\nImplement service logic.\n", encoding="utf-8")
@@ -277,7 +277,7 @@ class TestTurnProtocol(unittest.TestCase):
 
     def test_turn_does_not_modify_agents_contract_or_manifest(self) -> None:
         """Verify 'stagecheck turn' watchdog tick does not rewrite AGENTS.md or mutate contract digest."""
-        from stagecheck.core.utils import sha256_file
+        from governance.core.utils import sha256_file
         agents_md = self.workspace / "AGENTS.md"
         sha_before = sha256_file(agents_md)
         mtime_before = agents_md.stat().st_mtime_ns
@@ -335,7 +335,7 @@ class TestTurnProtocol(unittest.TestCase):
         self.assertNotEqual(status_verifying.active_turn, "AGENT_2")
 
         # When verified: Still STAGECHECK turn until Gate-1 advance is completed
-        from stagecheck.core.prompt_gate import freeze_prompt_and_scope
+        from governance.core.prompt_gate import freeze_prompt_and_scope
         freeze_prompt_and_scope(self.workspace, self.task_id, self.attempt)
         status_gate1 = compute_turn_status(self.workspace)
         self.assertEqual(status_gate1.active_turn, "STAGECHECK")

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from stagecheck.core.scanner import ScannerStatus, SecretScanner
+from governance.core.scanner import ScannerStatus, SecretScanner
 
 
 class TestSecretScannerFailClosed(unittest.TestCase):
@@ -190,9 +190,9 @@ class TestSecretScannerFailClosed(unittest.TestCase):
         """Verify resolve_config_flags ignores CWD/workspace config/.gitleaks.toml and fails closed if missing (SC-SEC-09)."""
         import os
         import tempfile
-        import stagecheck
+        import governance
 
-        pkg_cfg = (Path(stagecheck.__file__).resolve().parent / "config" / ".gitleaks.toml").resolve()
+        pkg_cfg = (Path(governance.__file__).resolve().parent / "config" / ".gitleaks.toml").resolve()
         with tempfile.TemporaryDirectory() as tmp:
             t = Path(tmp).resolve()
             (t / "config").mkdir()

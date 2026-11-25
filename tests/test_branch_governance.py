@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.branch_governance import (
+from governance.core.branch_governance import (
     BaseCommitMismatchError,
     DirtyWorkingTreeError,
     NonCompliantBranchError,

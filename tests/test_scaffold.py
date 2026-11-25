@@ -6,15 +6,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stagecheck.core.git import RepoBaseline
-from stagecheck.core.scaffold import (
+from governance.core.git import RepoBaseline
+from governance.core.scaffold import (
     ScaffoldingRollbackError,
     reconcile_controls,
     reconcile_specs_directory,
     scaffold_controls_atomic,
 )
-from stagecheck.core.utils import load_json_file
-from stagecheck.schemas.validator import validate_control_descriptor
+from governance.core.utils import load_json_file
+from governance.schemas.validator import validate_control_descriptor
 
 
 class TestAtomicScaffolding(unittest.TestCase):
@@ -165,7 +165,7 @@ class TestAtomicScaffolding(unittest.TestCase):
         self.assertEqual(len(paths1), 8)
 
         # Record modification times and hashes
-        from stagecheck.core.utils import sha256_file
+        from governance.core.utils import sha256_file
         hashes_first = {name: sha256_file(path) for name, path in paths1.items()}
 
         # 2. Delete one file (simulating missing control file)
@@ -193,9 +193,9 @@ class TestAtomicScaffolding(unittest.TestCase):
         """init scaffolds controls/remotes.json and --approve-remote / approve_remote_url register URLs under 0555/0444."""
         import stat
         import subprocess
-        from stagecheck.cli.main import main
-        from stagecheck.core.git import get_approved_remote_urls
-        from stagecheck.core.scaffold import approve_remote_url
+        from governance.cli.main import main
+        from governance.core.git import get_approved_remote_urls
+        from governance.core.scaffold import approve_remote_url
 
         ws = self.workspace / "remotes_ws"
         repo = ws / "repos" / "app"
@@ -233,8 +233,8 @@ class TestAtomicScaffolding(unittest.TestCase):
     def test_init_automatically_secures_unapproved_remote_push_urls(self) -> None:
         """Verify init automatically sets unapproved remote push URLs to DISABLED (SEC-08 / DEC-021)."""
         import subprocess
-        from stagecheck.cli.main import main
-        from stagecheck.core.git import get_repo_remote_push_urls
+        from governance.cli.main import main
+        from governance.core.git import get_repo_remote_push_urls
 
         ws = self.workspace / "secure_remotes_ws"
         repo1 = ws / "repos" / "core"
@@ -274,7 +274,7 @@ class TestAtomicScaffolding(unittest.TestCase):
 
     def test_scaffold_instructions_contain_role_exclusions_and_citation_standards(self) -> None:
         """Verify generated agent instructions enforce role exclusions, controls warning, and citation standards."""
-        from stagecheck.core.scaffold import scaffold_agent_instructions
+        from governance.core.scaffold import scaffold_agent_instructions
 
         inst_paths = scaffold_agent_instructions(
             workspace_root=self.workspace,

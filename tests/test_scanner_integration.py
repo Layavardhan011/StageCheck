@@ -17,16 +17,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from stagecheck.checks.base import AuditContext
-from stagecheck.checks.stage1_preflight import run_stage1_preflight
-from stagecheck.checks.stage6_secrets import run_stage6_secrets
-from stagecheck.core.cooperative_review import ReviewGateError, record_pre_commit_review
-from stagecheck.core.git import discover_repository
-from stagecheck.core.orchestrator import AuditOrchestrator
-from stagecheck.core.prompt_gate import freeze_prompt_and_scope
-from stagecheck.core.scaffold import scaffold_controls_atomic
-from stagecheck.core.scanner import ScanExecutionResult, SecretScanner
-from stagecheck.core.utils import canonical_json_dumps, sha256_digest
+from governance.checks.base import AuditContext
+from governance.checks.stage1_preflight import run_stage1_preflight
+from governance.checks.stage6_secrets import run_stage6_secrets
+from governance.core.cooperative_review import ReviewGateError, record_pre_commit_review
+from governance.core.git import discover_repository
+from governance.core.orchestrator import AuditOrchestrator
+from governance.core.prompt_gate import freeze_prompt_and_scope
+from governance.core.scaffold import scaffold_controls_atomic
+from governance.core.scanner import ScanExecutionResult, SecretScanner
+from governance.core.utils import canonical_json_dumps, sha256_digest
 
 
 class TestSecretScannerIntegration(unittest.TestCase):

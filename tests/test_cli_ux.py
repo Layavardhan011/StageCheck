@@ -23,9 +23,9 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-import stagecheck
-from stagecheck.cli.main import build_parser, main
-from stagecheck.core.portability import resolve_asset_path
+import governance
+from governance.cli.main import build_parser, main
+from governance.core.portability import resolve_asset_path
 
 
 class TestCLIUX(unittest.TestCase):
@@ -39,7 +39,7 @@ class TestCLIUX(unittest.TestCase):
                 main(["--version"])
             except SystemExit as exc:
                 self.assertEqual(exc.code, 0)
-        self.assertIn(f"StageCheck v{stagecheck.__version__}", buf.getvalue())
+        self.assertIn(f"StageCheck v{governance.__version__}", buf.getvalue())
 
     def test_cli_help_flag(self):
         """Verify --help returns comprehensive command overview with exit code 0."""
