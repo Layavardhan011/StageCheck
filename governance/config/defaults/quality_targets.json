@@ -1,0 +1,10 @@
+{
+  "confidence": 0.95,
+  "audit_precision": 0.95,
+  "audit_recall": 0.95,
+  "engineering": 0.95,
+  "prompt_development": 0.95,
+  "deciders": ["owner"],
+  "scoring_rules": ["precision_v1", "recall_v1", "first_submission_v1", "prompt_correct_v1"],
+  "enforced": ["audit_precision"]
+}

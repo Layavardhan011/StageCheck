@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "execution_policy": {
+    "default_timeout_seconds": 300,
+    "max_timeout_seconds": 1800,
+    "max_rerun_attempts": 3,
+    "environment": {
+      "strip_sensitive_credentials": true,
+      "isolated_env_variables": [
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "USER",
+        "TERM",
+        "PYTHONDONTWRITEBYTECODE",
+        "HOME",
+        "TMPDIR"
+      ]
+    }
+  },
+  "tree_integrity": {
+    "mode": "git_working_tree_and_status",
+    "description": "Verifies that git status --porcelain=v1 --untracked-files=all is identical before and after test rerun, proving zero working-tree alteration, file mutation, or untracked artifact creation."
+  },
+  "command_templates": {
+    "default": {
+      "command_argv": ["{TOOLCHAIN_BIN}", "test"],
+      "allowed_flag_arrays": [
+        ["-v"],
+        ["-v", "-race"],
+        ["--verbose"]
+      ],
+      "working_directory": "{REPO_ROOT}"
+    }
+  },
+  "supported_toolchains": {
+    "pytest": { "binary": "pytest", "default_args": ["-v"] },
+    "python": { "binary": "python3", "default_args": ["-m", "unittest"] },
+    "go": { "binary": "go", "default_args": ["test", "./..."] },
+    "cargo": { "binary": "cargo", "default_args": ["test"] },
+    "npm": { "binary": "npm", "default_args": ["test"] }
+  }
+}

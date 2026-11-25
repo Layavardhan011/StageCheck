@@ -1,0 +1,294 @@
+"""Production-Grade End-to-End Smoke Test for StageCheck (P4-T5).
+
+Exercises the full realistic delivery cycle:
+1. Workspace initialization via `stagecheck init`
+2. Daemon launch with IPC readiness and verified < 25MB RSS
+3. Task roadmap validation and task activation
+4. Phase 1 prompt blueprint verification
+5. Production daemon restart (stop -> start -> status)
+6. Phase 2A cooperative pre-commit review and operator approval
+7. Clean daemon shutdown with verified PID unlinking and zero zombie/orphan processes
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+from governance.cli.main import main
+from governance.core.sentinel import SentinelDaemon, is_process_alive, get_process_rss_mib
+
+
+class TestProductionSmoke(unittest.TestCase):
+    """End-to-end production smoke test."""
+
+    def setUp(self) -> None:
+        self.workspace_dir = Path(tempfile.mkdtemp(prefix="stagecheck_prod_smoke_"))
+        # Initialize product repository under repos/
+        repo_dir = self.workspace_dir / "repos" / "core-service"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-b", "main", str(repo_dir)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo_dir), "config", "user.name", "Tester"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo_dir), "config", "user.email", "tester@stagecheck.local"], check=True, capture_output=True)
+        (repo_dir / "service.py").write_text("# Core service implementation\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo_dir), "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo_dir), "commit", "-m", "Initial commit"], check=True, capture_output=True)
+
+    def tearDown(self) -> None:
+        # Guarantee no lingering daemon from test failures
+        try:
+            daemon = SentinelDaemon(self.workspace_dir)
+            daemon.stop()
+        except Exception:
+            pass
+        from governance.core.permissions import elevate_permissions_for_teardown
+        try:
+            elevate_permissions_for_teardown(self.workspace_dir)
+        except Exception:
+            pass
+        shutil.rmtree(self.workspace_dir, ignore_errors=True)
+
+    def test_full_production_lifecycle_and_sentinel_restart(self) -> None:
+        """Run complete production delivery cycle with daemon monitoring and restart."""
+        ws = str(self.workspace_dir)
+
+        # 1. Workspace initialization
+        init_exit = main(["init", "--workspace", ws, "--agent1", "agent1", "--agent2", "agent2"])
+        self.assertEqual(init_exit, 0, "stagecheck init failed")
+        self.assertTrue((self.workspace_dir / "controls" / "ACTIVE_STATE.json").is_file())
+        self.assertTrue((self.workspace_dir / "specs" / "TASK_PLAN.json").is_file())
+
+        # 2. Start Sentinel daemon in background
+        daemon = SentinelDaemon(self.workspace_dir)
+        start_exit = daemon.start(daemon=True, timeout=10.0)
+        self.assertEqual(start_exit, 0, "Sentinel daemon failed to start")
+
+        running, pid1 = daemon.is_running()
+        self.assertTrue(running, "Daemon reported running=False after start")
+        self.assertIsNotNone(pid1)
+        self.assertNotEqual(pid1, os.getpid())
+
+        # Verify initial memory RSS < 25 MB
+        status1 = daemon.status()
+        self.assertTrue(status1["running"])
+        self.assertEqual(status1["pid"], pid1)
+        self.assertLess(status1["rss_mb"], 25.0, f"Initial RSS {status1['rss_mb']} exceeded 25MB")
+
+        # 3. Task Plan validation
+        plan_exit = main(["plan", "validate", "--workspace", ws])
+        self.assertEqual(plan_exit, 0, "Task plan validation failed")
+
+        # 4. Activate task
+        start_task_exit = main(["start", "--task", "task-101", "--workspace", ws])
+        self.assertEqual(start_task_exit, 0, "Task start failed")
+
+        # Verify Sentinel status sees active task
+        status_task = daemon.status()
+        self.assertEqual(status_task["active_task"], "task-101")
+
+        # 5. Simulate daemon restart
+        stop_exit = daemon.stop()
+        self.assertEqual(stop_exit, 0, "Sentinel daemon stop failed")
+        self.assertFalse(daemon.is_running()[0], "Daemon still running after stop")
+        self.assertFalse(is_process_alive(pid1), "Previous daemon process remained alive/zombie")
+
+        # Restart daemon
+        restart_exit = daemon.start(daemon=True, timeout=10.0)
+        self.assertEqual(restart_exit, 0, "Sentinel daemon failed to restart")
+
+        running2, pid2 = daemon.is_running()
+        self.assertTrue(running2)
+        self.assertIsNotNone(pid2)
+        self.assertNotEqual(pid2, pid1, "Restarted daemon must have new PID")
+
+        status2 = daemon.status()
+        self.assertTrue(status2["running"])
+        self.assertLess(status2["rss_mb"], 25.0, f"Restarted RSS {status2['rss_mb']} exceeded 25MB")
+        self.assertEqual(status2["active_task"], "task-101")
+
+        # 6. Execute Phase 2A pre-commit review
+        base_commit = subprocess.run(
+            ["git", "-C", str(self.workspace_dir / "repos" / "core-service"), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        phase2a_dir = self.workspace_dir / "evidence/tasks/task-101/attempt_1/Phase-2A"
+        phase2a_dir.mkdir(parents=True, exist_ok=True)
+        status_payload = {
+            "schema_version": "2.0",
+            "task_id": "task-101",
+            "attempt": 1,
+            "cycle": 1,
+            "status": "AWAITING_REVIEW",
+            "touched_repositories": ["core-service"],
+            "base_commits": {"core-service": base_commit},
+            "summary": "Implemented core-service components.",
+        }
+        (phase2a_dir / "pre_commit_status.json").write_text(
+            __import__("json").dumps(status_payload, indent=2) + "\n", encoding="utf-8"
+        )
+
+        # Assert calling review-precommit before Gate 1 is cleared fails fail-closed
+        premature_exit = main(["review-precommit", "--task", "task-101", "--workspace", ws])
+        self.assertEqual(premature_exit, 1, "review-precommit should fail before Gate 1 is advanced")
+
+        # Prepare Phase 1 artifacts and verify prompt to satisfy Gate 1
+        from governance.core.agents_md import write_agents_contract
+        from governance.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from governance.core.permissions import controlled_write_transaction
+        from governance.core.rubric_engine import build_agent_reviews_artifact, load_270_rule_catalog
+        from governance.core.utils import canonical_json_dumps, sha256_file
+
+        repo_dir = self.workspace_dir / "repos" / "core-service"
+        (repo_dir / "test_service.py").write_text(
+            "import unittest\n\n\n"
+            "def compute_val(n):\n"
+            "    if not isinstance(n, int):\n"
+            "        raise TypeError('int expected')\n"
+            "    if n < 0:\n"
+            "        raise ValueError('negative disallowed')\n"
+            "    return n + 1\n\n\n"
+            "class TestService(unittest.TestCase):\n"
+            "    def test_positive(self):\n"
+            "        self.assertEqual(compute_val(1), 2)\n\n"
+            "    def test_negative_boundary(self):\n"
+            "        with self.assertRaises(ValueError):\n"
+            "            compute_val(-1)\n\n"
+            "    def test_malformed_input(self):\n"
+            "        with self.assertRaises(TypeError):\n"
+            "            compute_val(None)\n\n"
+            "    def test_duplicate_replay_idempotent(self):\n"
+            "        self.assertEqual(compute_val(3), compute_val(3))\n",
+            encoding="utf-8",
+        )
+        (self.workspace_dir / "evals").mkdir(parents=True, exist_ok=True)
+        waiver_evidence = self.workspace_dir / "evidence" / "waiver_smoke.txt"
+        with controlled_write_transaction(self.workspace_dir / "evidence"):
+            waiver_evidence.parent.mkdir(parents=True, exist_ok=True)
+            waiver_evidence.write_text("Approved waiver evidence for smoke test.\n", encoding="utf-8")
+            if not (self.workspace_dir / "evidence" / "issue_history.json").is_file():
+                (self.workspace_dir / "evidence" / "issue_history.json").write_text(
+                    canonical_json_dumps({"schema_version": "1.0", "issues": []}),
+                    encoding="utf-8",
+                )
+
+        catalog = load_270_rule_catalog()
+        waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        w_entry = build_waiver_entry(
+            workspace_root=self.workspace_dir,
+            task_id="task-101",
+            defect_id=waiver_ids[0],
+            rationale="Authorized for production smoke test",
+            authorized_by="owner@stagecheck.local",
+            attempt=1,
+            evidence_path="evidence/waiver_smoke.txt",
+            rule_id=waiver_ids[0],
+            waived_rules=waiver_ids,
+        )
+        disp_doc = {
+            "schema_version": "2.0",
+            "dispositions": [w_entry],
+        }
+        with controlled_write_transaction(self.workspace_dir / "controls"):
+            (self.workspace_dir / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps(disp_doc), encoding="utf-8"
+            )
+        record_waiver_in_replay_ledger(self.workspace_dir, w_entry)
+        write_agents_contract(self.workspace_dir)
+
+        p1_dir = self.workspace_dir / "evidence/tasks/task-101/attempt_1/Phase-1"
+        p1_dir.mkdir(parents=True, exist_ok=True)
+        (p1_dir / "prompt.md").write_text("# Prompt for task-101\nImplement service components\n", encoding="utf-8")
+        scope_payload = {
+            "schema_version": "2.0",
+            "task_id": "task-101",
+            "allowed_paths": ["repos/core-service/service.py", "repos/core-service/test_service.py"],
+        }
+        (p1_dir / "declared_scope.json").write_text(
+            __import__("json").dumps(scope_payload, indent=2) + "\n", encoding="utf-8"
+        )
+        verify_prompt_exit = main(["verify-prompt", "--task", "task-101", "--workspace", ws])
+        self.assertEqual(verify_prompt_exit, 0, "verify-prompt failed")
+
+        # Advance Gate 1
+        gate1_adv = main(["gate", "advance", "Gate-1", "--task", "task-101", "--workspace", ws])
+        self.assertEqual(gate1_adv, 0, "Gate-1 advance failed")
+
+        agent_reviews = {
+            r.rule_id: {
+                "status": "PASS",
+                "rationale": f"Verified semantic criterion for {r.title}.",
+                "evidence_path": "Phase-2A/agent_reviews.json",
+            }
+            for r in catalog
+            if r.category == "AGENT_ASSISTED"
+        }
+        reviews_artifact = build_agent_reviews_artifact(
+            workspace_root=self.workspace_dir,
+            task_id="task-101",
+            attempt=1,
+            reviews=agent_reviews,
+            reviewer="agent1",
+            reviewer_role="prompt_and_audit",
+        )
+        (phase2a_dir / "agent_reviews.json").write_text(
+            canonical_json_dumps(reviews_artifact),
+            encoding="utf-8",
+        )
+        p2b_dir = self.workspace_dir / "evidence/tasks/task-101/attempt_1/Phase-2B"
+        p2b_dir.mkdir(parents=True, exist_ok=True)
+        report_file = p2b_dir / "report.md"
+        report_file.write_text("# Delivery Report\nCore service verified.\n", encoding="utf-8")
+        (p2b_dir / "claims.json").write_text(
+            canonical_json_dumps({
+                "task_id": "task-101",
+                "iteration": 1,
+                "contract_sha256": sha256_file(self.workspace_dir / "AGENTS.md"),
+                "record": "Phase-2B/report.md",
+                "record_sha256": sha256_file(report_file),
+                "claims": [],
+            }),
+            encoding="utf-8",
+        )
+        p3_dir = self.workspace_dir / "evidence/tasks/task-101/attempt_1/Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        (p3_dir / "test_execution.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": "task-101",
+                "attempt": 1,
+                "status": "PASS",
+                "repositories": {"core-service": {"status": "PASS", "exit_code": 0}},
+            }),
+            encoding="utf-8",
+        )
+        (p3_dir / "scanner_report.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "status": "CLEAN", "findings": []}),
+            encoding="utf-8",
+        )
+        (p3_dir / "verdict.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "result": "CLEAR", "counts": {"blocking": 0}}),
+            encoding="utf-8",
+        )
+
+        review_exit = main(["review-precommit", "--task", "task-101", "--workspace", ws])
+        self.assertEqual(review_exit, 0, "review-precommit failed")
+
+        # 7. Operator approval
+        approve_exit = main(["approve-review", "--task", "task-101", "--workspace", ws])
+        self.assertEqual(approve_exit, 0, "approve-review failed")
+
+        # 8. Clean final daemon shutdown
+        final_stop_exit = daemon.stop()
+        self.assertEqual(final_stop_exit, 0, "Final daemon stop failed")
+        self.assertFalse(daemon.is_running()[0])
+        self.assertFalse(is_process_alive(pid2), "Daemon process remained alive or zombie after final stop")
+        self.assertFalse(daemon.pid_file.exists(), "PID file was not cleaned up on stop")
+
+
+if __name__ == "__main__":
+    unittest.main()

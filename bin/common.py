@@ -116,6 +116,15 @@ def below(path, root):
     return path == root or path.is_relative_to(root)
 
 
+SAFE_GIT_FLAGS = [
+    '-c', 'core.fsmonitor=false',
+    '-c', 'core.pager=cat',
+    '-c', 'core.hooksPath=/dev/null',
+    '-c', 'core.editor=cat',
+    '-c', 'diff.external=',
+]
+
+
 def command(argv, cwd, timeout=30, env=None):
     try:
         r = subprocess.run(argv, cwd=cwd, input=None, capture_output=True,
@@ -126,6 +135,27 @@ def command(argv, cwd, timeout=30, env=None):
             'stdout_sha256': digest(r.stdout), 'stderr_sha256': digest(r.stderr),
             'stdout': r.stdout.decode('utf-8', 'replace'),
             'stderr': r.stderr.decode('utf-8', 'replace')}
+
+
+def safe_git(args, cwd, timeout=30):
+    tool_root = str(Path(__file__).resolve().parent.parent)
+    if tool_root not in sys.path:
+        sys.path.insert(0, tool_root)
+    from governance.core.git import GitError, assert_safe_repo_git_config
+    try:
+        assert_safe_repo_git_config(Path(cwd))
+    except GitError as exc:
+        raise ToolError('unsafe repository git config: ' + str(exc)) from exc
+    effective = list(args)
+    if effective and effective[0] == 'diff':
+        for flag in ('--no-textconv', '--no-ext-diff'):
+            if flag not in effective:
+                effective.insert(1, flag)
+    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    env['GIT_CONFIG_NOSYSTEM'] = '1'
+    env['GIT_CONFIG_GLOBAL'] = '/dev/null'
+    env['GIT_CONFIG_COUNT'] = '0'
+    return command(['git', *SAFE_GIT_FLAGS, '-C', str(cwd), *effective], cwd, timeout=timeout, env=env)
 
 
 def bindings(contract):
@@ -206,6 +236,11 @@ class Context:
 
     def run_command(self, argv, cwd, **kw):
         result = command(argv, cwd, **kw)
+        self.commands.append(result)
+        return result
+
+    def run_safe_git(self, args, cwd, timeout=30):
+        result = safe_git(args, cwd, timeout=timeout)
         self.commands.append(result)
         return result
 

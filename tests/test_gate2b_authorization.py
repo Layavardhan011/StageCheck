@@ -1,0 +1,656 @@
+"""Comprehensive Unit and Integration Tests for Task 3.4: Commit Authorization and Gate 2B.
+
+Verifies:
+1. Gate 2B criteria evaluation:
+   - Prior pre-commit review must be APPROVED and bound as a receipt deliverable.
+   - Phase 2B delivery report must exist and be bound as a receipt deliverable.
+   - Working tree must be clean across all touched/declared repositories.
+   - Commits must not be directly on protected branch (main/master).
+   - Committed diff must strictly match approved pre-commit diff (verify_committed_diff_fidelity).
+   - Remote push URLs must comply with authorized remote whitelist (approved_remote).
+   - Agent 2 zero remote push policy is enforced.
+2. Atomic Gate 2B advance transitions state from PHASE_2B_COMMITTING to PHASE_3_AUDIT,
+   sets turn to STAGECHECK_AUDITING, records live receipt SHA-256, and freezes Phase-2B/ to 0555/0444.
+3. Commit divergence or unauthorized remote fails closed without consuming attempt budget.
+"""
+
+import json
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+from governance.cli.gate_cmd import run_gate_advance, run_gate_check
+from governance.cli.init_cmd import run_init
+from governance.cli.review_cmd import run_approve_review
+from governance.core.prompt_gate import freeze_prompt_and_scope
+from governance.core.gate_engine import (
+    GateCriteriaFailedError,
+    GateId,
+    advance_gate_atomic,
+    check_gate_preconditions,
+    evaluate_gate_2b_criteria,
+)
+from governance.core.git import approved_remote, get_approved_remote_urls, get_repo_remote_push_urls
+from governance.core.permissions import controlled_write_transaction, elevate_permissions_for_teardown
+from governance.core.state import load_active_state, save_active_state
+from governance.core.utils import sha256_file
+
+
+def _git_run(args, cwd):
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+class TestGate2BAuthorization(unittest.TestCase):
+    """Test suite validating Gate 2B commit authorization, diff fidelity, and remote whitelist."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.ws = Path(self.temp_dir.name).resolve()
+
+        # Create git repo first
+        self.repo_dir = self.ws / "repos" / "payment-service"
+        self.repo_dir.mkdir(parents=True, exist_ok=True)
+        _git_run(["init", "-b", "main"], cwd=self.repo_dir)
+        _git_run(["config", "user.name", "Test Committer"], cwd=self.repo_dir)
+        _git_run(["config", "user.email", "test@stagecheck.local"], cwd=self.repo_dir)
+        readme = self.repo_dir / "README.md"
+        readme.write_text("# Payment Service\n", encoding="utf-8")
+        (self.repo_dir / "test_service.py").write_text(
+            "import unittest\n\n\n"
+            "def check_amount(val):\n"
+            "    if not isinstance(val, int):\n"
+            "        raise TypeError('int expected')\n"
+            "    if val < 0:\n"
+            "        raise ValueError('negative disallowed')\n"
+            "    return val\n\n\n"
+            "class TestService(unittest.TestCase):\n"
+            "    def test_positive(self):\n"
+            "        self.assertEqual(check_amount(10), 10)\n\n"
+            "    def test_negative_boundary(self):\n"
+            "        with self.assertRaises(ValueError):\n"
+            "            check_amount(-1)\n\n"
+            "    def test_malformed_input(self):\n"
+            "        with self.assertRaises(TypeError):\n"
+            "            check_amount(None)\n\n"
+            "    def test_duplicate_replay_idempotent(self):\n"
+            "        self.assertEqual(check_amount(5), check_amount(5))\n",
+            encoding="utf-8",
+        )
+        _git_run(["add", "README.md", "test_service.py"], cwd=self.repo_dir)
+        _git_run(["commit", "-m", "Initial commit"], cwd=self.repo_dir)
+
+        # Initialize workspace with repo "payment-service"
+        rc = run_init(
+            workspace=str(self.ws),
+            repos=["payment-service"],
+            agent1="agent1",
+            agent2="agent2",
+        )
+        self.assertEqual(rc, 0)
+
+        # Switch to task branch
+        _git_run(["checkout", "-b", "feature/task-101"], cwd=self.repo_dir)
+
+        # Baseline commit
+        self.base_commit = _git_run(["rev-parse", "HEAD"], cwd=self.repo_dir).stdout.strip()
+
+        # Set up active state in PHASE_1_PLANNING
+        self.task_id = "task-101"
+        self.attempt = 1
+        state = load_active_state(self.ws)
+        state["task_id"] = self.task_id
+        state["attempt_index"] = self.attempt
+        state["phase"] = "PHASE_1_PLANNING"
+        state["turn"] = "AGENT1_PLANNING"
+        save_active_state(self.ws, state)
+
+        # Set up directories
+        self.attempt_dir = self.ws / "evidence" / "tasks" / self.task_id / f"attempt_{self.attempt}"
+        self.p1_dir = self.attempt_dir / "Phase-1"
+        self.p2a_dir = self.attempt_dir / "Phase-2A"
+        self.p2b_dir = self.attempt_dir / "Phase-2B"
+        self.p1_dir.mkdir(parents=True, exist_ok=True)
+        self.p2a_dir.mkdir(parents=True, exist_ok=True)
+        self.p2b_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        elevate_permissions_for_teardown(self.ws)
+        self.temp_dir.cleanup()
+
+    def _setup_approved_review(self, diff_content: str = "def process(): pass\n") -> None:
+        """Set up Phase 1 -> Gate 1 -> Phase 2A -> approve review -> Gate 2A -> Phase 2B."""
+        # 1. Setup Phase 1 prompt and scope
+        (self.p1_dir / "prompt.md").write_text(
+            "# Task Execution Blueprint\n"
+            "## 1. Task Framing & Objectives\nTask objective.\n"
+            "## 2. Architecture & Design Principles\nDesign principles.\n"
+            "## 3. Scope Definition & Boundary Guardrails\nScope definition.\n"
+            "## 4. Work Breakdown Structure & Phasing\nPhasing.\n"
+            "## 5. Implementation Strategy\nStrategy.\n"
+            "## 6. Verification & Quality Engineering\nVerification.\n"
+            "## 7. Security Hardening & Isolation Constraints\nSecurity.\n"
+            "## 8. Defect Severity Matrix & Resolution SLA\nSLA.\n"
+            "## 9. Rollback & Emergency Teardown Protocol\nRollback.\n"
+            "## 10. Operational Handover & Claims Synthesis\nHandover.\n"
+            "## 11. Multi-Agent Turn Protocols\nProtocols.\n"
+            "## 12. Traceability Matrix & Manifest Attestation\nAttestation.\n",
+            encoding="utf-8",
+        )
+        (self.p1_dir / "declared_scope.json").write_text(
+            json.dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "allowed_paths": ["repos/payment-service/**"],
+            }),
+            encoding="utf-8",
+        )
+        # Freeze prompt and verify
+        freeze_prompt_and_scope(self.ws, self.task_id, self.attempt)
+
+        # Advance Gate 1
+        rc = run_gate_advance("Gate-1", task=self.task_id, attempt=self.attempt, workspace=str(self.ws))
+        self.assertEqual(rc, 0)
+
+        # 2. In Phase 2A: write uncommitted file and pre_commit_status.json
+        service_file = self.repo_dir / "service.py"
+        service_file.write_text(diff_content, encoding="utf-8")
+        _git_run(["add", "."], cwd=self.repo_dir)
+
+        status_data = {
+            "schema_version": "2.0",
+            "task_id": self.task_id,
+            "attempt": self.attempt,
+            "cycle": 1,
+            "status": "AWAITING_REVIEW",
+            "touched_repositories": ["payment-service"],
+            "base_commits": {"payment-service": self.base_commit},
+            "summary": "Implementation ready for review",
+        }
+        (self.p2a_dir / "pre_commit_status.json").write_text(json.dumps(status_data, indent=2) + "\n", encoding="utf-8")
+
+        # Seed complete rubric artifacts with valid human-waiver and agent-review provenance
+        from governance.core.agents_md import write_agents_contract
+        from governance.core.dispositions import build_waiver_entry, record_waiver_in_replay_ledger
+        from governance.core.rubric_engine import (
+            build_agent_reviews_artifact,
+            load_270_rule_catalog,
+            run_rubric_evaluation,
+            update_rubric_artifacts,
+        )
+        from governance.core.utils import canonical_json_dumps
+
+        (self.ws / "evals").mkdir(parents=True, exist_ok=True)
+        waiver_evidence = self.ws / "evidence" / "waiver_g2b.txt"
+        with controlled_write_transaction(self.ws / "evidence"):
+            waiver_evidence.parent.mkdir(parents=True, exist_ok=True)
+            waiver_evidence.write_text("Approved waiver evidence for Gate-2B test.\n", encoding="utf-8")
+            (self.ws / "evidence" / "issue_history.json").write_text(
+                canonical_json_dumps({"schema_version": "1.0", "issues": []}),
+                encoding="utf-8",
+            )
+
+        catalog = load_270_rule_catalog()
+        waiver_ids = [r.rule_id for r in catalog if r.category == "HUMAN_WAIVER"]
+        w_entry = build_waiver_entry(
+            workspace_root=self.ws,
+            task_id=self.task_id,
+            defect_id=waiver_ids[0],
+            rationale="Authorized for Gate-2B pre-commit rubric test",
+            authorized_by="owner@stagecheck.local",
+            attempt=self.attempt,
+            evidence_path="evidence/waiver_g2b.txt",
+            rule_id=waiver_ids[0],
+            waived_rules=waiver_ids,
+        )
+        with controlled_write_transaction(self.ws / "controls"):
+            (self.ws / "controls" / "DISPOSITIONS.json").write_text(
+                canonical_json_dumps({"schema_version": "2.0", "dispositions": [w_entry]}),
+                encoding="utf-8",
+            )
+        record_waiver_in_replay_ledger(self.ws, w_entry)
+        write_agents_contract(self.ws)
+
+        agent_reviews = {
+            r.rule_id: {
+                "status": "PASS",
+                "rationale": f"Verified semantic criterion for {r.title}.",
+                "evidence_path": "Phase-2A/agent_reviews.json",
+            }
+            for r in catalog
+            if r.category == "AGENT_ASSISTED"
+        }
+        reviews_artifact = build_agent_reviews_artifact(
+            workspace_root=self.ws,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            reviews=agent_reviews,
+            reviewer="agent1",
+            reviewer_role="prompt_and_audit",
+        )
+        (self.p2a_dir / "agent_reviews.json").write_text(
+            canonical_json_dumps(reviews_artifact),
+            encoding="utf-8",
+        )
+
+        report_file = self.p2b_dir / "report.md"
+        report_file.write_text("# Delivery Report\nImplemented payment service.\n", encoding="utf-8")
+        (self.p2b_dir / "claims.json").write_text(
+            canonical_json_dumps({
+                "task_id": self.task_id,
+                "iteration": 1,
+                "contract_sha256": sha256_file(self.ws / "AGENTS.md"),
+                "record": "Phase-2B/report.md",
+                "record_sha256": sha256_file(report_file),
+                "claims": [],
+            }),
+            encoding="utf-8",
+        )
+        p3_dir = self.attempt_dir / "Phase-3"
+        p3_dir.mkdir(parents=True, exist_ok=True)
+        (p3_dir / "test_execution.json").write_text(
+            canonical_json_dumps({
+                "schema_version": "2.0",
+                "task_id": self.task_id,
+                "attempt": self.attempt,
+                "status": "PASS",
+                "repositories": {"payment-service": {"status": "PASS", "exit_code": 0}},
+            }),
+            encoding="utf-8",
+        )
+        (p3_dir / "scanner_report.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "status": "CLEAN", "findings": []}),
+            encoding="utf-8",
+        )
+        (p3_dir / "verdict.json").write_text(
+            canonical_json_dumps({"schema_version": "2.0", "result": "CLEAR", "counts": {"blocking": 0}}),
+            encoding="utf-8",
+        )
+        rubric_payload, _ = run_rubric_evaluation(
+            workspace_root=self.ws,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            cycle=1,
+        )
+        self.assertEqual(rubric_payload["overall_verdict"], "PASS", f"Rubric setup failed: {rubric_payload.get('counts')}")
+        update_rubric_artifacts(self.ws, rubric_payload)
+
+        # Run approve-review
+        rc = run_approve_review(self.task_id, attempt=self.attempt, workspace=str(self.ws))
+        self.assertEqual(rc, 0)
+        self.assertTrue((self.p2a_dir / "pre_commit_review.json").is_file())
+
+        # Advance Gate 2A
+        rc = run_gate_advance("Gate-2A", task=self.task_id, attempt=self.attempt, workspace=str(self.ws))
+        self.assertEqual(rc, 0)
+        st = load_active_state(self.ws)
+        self.assertEqual(st["phase"], "PHASE_2B_COMMITTING")
+
+    def test_gate2b_advance_success_with_matching_commit(self) -> None:
+        """Verify Gate 2B advances to PHASE_3_AUDIT when commit matches approved review diff."""
+        self._setup_approved_review("def process_payment(): return True\n")
+
+        # Agent 2 commits the exact approved changes
+        _git_run(["add", "service.py"], cwd=self.repo_dir)
+        _git_run(["commit", "-m", "feat: implement payment service"], cwd=self.repo_dir)
+
+        # Write Phase 2B delivery report
+        (self.p2b_dir / "report.md").write_text("# Delivery Report\nAll features committed.\n", encoding="utf-8")
+
+        # Evaluate criteria
+        criteria, deliverables = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+
+        self.assertEqual(crit_map.get("gate2b.prior_review_approved"), "MET")
+        self.assertEqual(crit_map.get("gate2b.delivery_report_exists"), "MET")
+        self.assertEqual(crit_map.get("gate2b.working_tree_clean.payment-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.branch_governance.payment-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.commit_fidelity.payment-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.remote_authority.payment-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.remote_push_prohibition"), "MET")
+
+        # Advance Gate 2B via CLI
+        rc = run_gate_advance("Gate-2B", task=self.task_id, attempt=self.attempt, workspace=str(self.ws))
+        self.assertEqual(rc, 0)
+
+        # Verify state transition
+        new_state = load_active_state(self.ws)
+        self.assertEqual(new_state["phase"], "PHASE_3_AUDIT")
+        self.assertEqual(new_state["turn"], "STAGECHECK_AUDITING")
+        self.assertIn("GATE_2B", new_state.get("cleared_gates", {}))
+
+        # Verify receipt contents and deliverables binding
+        receipt_path = self.p2b_dir / "gate2b_receipt.json"
+        self.assertTrue(receipt_path.is_file())
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(receipt["gate_id"], "GATE_2B")
+        self.assertEqual(receipt["status"], "PASSED")
+        self.assertEqual(receipt["from_phase"], "PHASE_2B_COMMITTING")
+        self.assertEqual(receipt["to_phase"], "PHASE_3_AUDIT")
+
+        deliv_paths = [d["path"] for d in receipt["deliverables"]]
+        self.assertIn(f"evidence/tasks/{self.task_id}/attempt_{self.attempt}/Phase-2A/pre_commit_review.json", deliv_paths)
+        self.assertIn(f"evidence/tasks/{self.task_id}/attempt_{self.attempt}/Phase-2B/report.md", deliv_paths)
+
+        # Verify Phase-2B directory is frozen to 0555
+        self.assertEqual(oct(self.p2b_dir.stat().st_mode)[-3:], "555")
+
+    def test_gate2b_fails_on_commit_divergence(self) -> None:
+        """Verify Gate 2B rejects commits that diverge from the approved Phase 2A diff."""
+        self._setup_approved_review("def process_payment(): return True\n")
+
+        # Agent 2 commits a DIFFERENT content than approved
+        service_file = self.repo_dir / "service.py"
+        service_file.write_text("def process_payment(): return False  # altered after approval\n", encoding="utf-8")
+        _git_run(["add", "service.py"], cwd=self.repo_dir)
+        _git_run(["commit", "-m", "feat: implement payment service with stealth changes"], cwd=self.repo_dir)
+
+        (self.p2b_dir / "report.md").write_text("# Delivery Report\n", encoding="utf-8")
+
+        # Evaluate criteria
+        criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+        self.assertEqual(crit_map.get("gate2b.commit_fidelity.payment-service"), "FAILED")
+
+        # Advance should fail
+        with self.assertRaises(GateCriteriaFailedError):
+            advance_gate_atomic(self.ws, GateId.GATE_2B, self.task_id, self.attempt)
+
+        # Ensure state remained PHASE_2B_COMMITTING and attempt was not consumed
+        st = load_active_state(self.ws)
+        self.assertEqual(st["phase"], "PHASE_2B_COMMITTING")
+        self.assertEqual(st["attempt_index"], self.attempt)
+
+    def test_gate2b_fails_on_dirty_working_tree(self) -> None:
+        """Verify Gate 2B rejects when working tree has uncommitted modifications."""
+        self._setup_approved_review("def process_payment(): return True\n")
+        _git_run(["add", "service.py"], cwd=self.repo_dir)
+        _git_run(["commit", "-m", "feat: implement payment service"], cwd=self.repo_dir)
+        (self.p2b_dir / "report.md").write_text("# Delivery Report\n", encoding="utf-8")
+
+        # Leave an uncommitted file
+        dirty_file = self.repo_dir / "leftover.py"
+        dirty_file.write_text("uncommitted = True\n", encoding="utf-8")
+
+        criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+        self.assertEqual(crit_map.get("gate2b.working_tree_clean.payment-service"), "FAILED")
+
+    def test_gate2b_fails_on_protected_branch(self) -> None:
+        """Verify Gate 2B rejects when on protected branch main."""
+        self._setup_approved_review("def process_payment(): return True\n")
+        # Switch to main
+        _git_run(["checkout", "main"], cwd=self.repo_dir)
+        _git_run(["add", "service.py"], cwd=self.repo_dir)
+        _git_run(["commit", "-m", "feat: commit directly to main"], cwd=self.repo_dir)
+        (self.p2b_dir / "report.md").write_text("# Delivery Report\n", encoding="utf-8")
+
+        criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+        self.assertEqual(crit_map.get("gate2b.branch_governance.payment-service"), "FAILED")
+
+    def test_gate2b_fails_on_unauthorized_remote_url(self) -> None:
+        """Verify Gate 2B rejects when remote push URL is not in the approved whitelist."""
+        self._setup_approved_review("def process_payment(): return True\n")
+        _git_run(["add", "service.py"], cwd=self.repo_dir)
+        _git_run(["commit", "-m", "feat: implement payment service"], cwd=self.repo_dir)
+        (self.p2b_dir / "report.md").write_text("# Delivery Report\n", encoding="utf-8")
+
+        # Configure an unauthorized remote
+        _git_run(["remote", "add", "origin", "git@github.com:attacker/malicious.git"], cwd=self.repo_dir)
+
+        criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+        self.assertEqual(crit_map.get("gate2b.remote_authority.payment-service"), "FAILED")
+
+    def test_gate2b_fails_on_blacklisted_remote_url(self) -> None:
+        """Verify Gate 2B rejects when remote push URL points to blacklisted domain."""
+        self._setup_approved_review("def process_payment(): return True\n")
+        _git_run(["add", "service.py"], cwd=self.repo_dir)
+        _git_run(["commit", "-m", "feat: implement payment service"], cwd=self.repo_dir)
+        (self.p2b_dir / "report.md").write_text("# Delivery Report\n", encoding="utf-8")
+
+        # Configure blacklisted remote
+        _git_run(["remote", "add", "origin", "https://multiversx.com/repo.git"], cwd=self.repo_dir)
+
+        criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+        self.assertEqual(crit_map.get("gate2b.remote_authority.payment-service"), "FAILED")
+
+    def test_gate2b_passes_with_authorized_remote_url(self) -> None:
+        """Verify Gate 2B passes when remote push URL is explicitly authorized in controls/remotes.json."""
+        self._setup_approved_review("def process_payment(): return True\n")
+        _git_run(["add", "service.py"], cwd=self.repo_dir)
+        _git_run(["commit", "-m", "feat: implement payment service"], cwd=self.repo_dir)
+        (self.p2b_dir / "report.md").write_text("# Delivery Report\n", encoding="utf-8")
+
+        auth_url = "git@github.com:acme-corp/payment-service.git"
+        _git_run(["remote", "add", "origin", auth_url], cwd=self.repo_dir)
+
+        # Authorize URL in controls/remotes.json
+        with controlled_write_transaction(self.ws / "controls"):
+            (self.ws / "controls" / "remotes.json").write_text(
+                json.dumps({"approved_push_urls": [auth_url]}, indent=2),
+                encoding="utf-8",
+            )
+
+        criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+        self.assertEqual(crit_map.get("gate2b.remote_authority.payment-service"), "MET")
+
+    def test_gate2b_fails_missing_prior_review_or_delivery_report(self) -> None:
+        """Verify Gate 2B fails closed if pre_commit_review.json or report.md is absent."""
+        # 1. Missing review
+        criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+        self.assertEqual(crit_map.get("gate2b.prior_review_approved"), "FAILED")
+
+        self.assertEqual(crit_map.get("gate2b.delivery_report_exists"), "FAILED")
+
+        # 2. Add unapproved review (REVISION_REQUIRED)
+        rev_data = {
+            "schema_version": "2.0",
+            "task_id": self.task_id,
+            "attempt": self.attempt,
+            "cycle": 1,
+            "status": "REVISION_REQUIRED",
+            "summary": "Fix defects",
+        }
+        (self.p2a_dir / "pre_commit_review.json").write_text(json.dumps(rev_data))
+        criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+        self.assertEqual(crit_map.get("gate2b.prior_review_approved"), "FAILED")
+
+    def test_phase2b_loose_witness_files_relocated_to_witnesses_directory(self) -> None:
+        """Verify loose witness and execution log files in Phase-2B root are relocated to Phase-2B/witnesses/."""
+        # Setup loose witness files directly in Phase-2B root
+        witness_names = ["git_branch.txt", "git_head.txt", "git_status.txt", "test_output.txt", "test_stderr.txt"]
+        for name in witness_names:
+            (self.p2b_dir / name).write_text(f"witness content for {name}\n", encoding="utf-8")
+
+        for name in witness_names:
+            self.assertTrue((self.p2b_dir / name).is_file())
+
+        criteria, deliverables = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+
+        # Loose files must be moved into witnesses/
+        witnesses_dir = self.p2b_dir / "witnesses"
+        self.assertTrue(witnesses_dir.is_dir())
+        for name in witness_names:
+            self.assertFalse((self.p2b_dir / name).exists(), f"{name} should have been relocated out of Phase-2B root")
+            self.assertTrue((witnesses_dir / name).is_file(), f"{name} should exist under Phase-2B/witnesses/")
+
+        # Verify Stage 3 citation resolution resolves relocated file cleanly
+        from governance.checks.base import AuditContext
+        from governance.checks.stage3_citations import run_stage3_citations
+        claims = {
+            "claims": [
+                {
+                    "id": "c_witness",
+                    "kind": "observation",
+                    "text": "Output captured",
+                    "scope": "app",
+                    "label": "TEST_PROVEN",
+                    "citations": [
+                        {
+                            "type": "file",
+                            "path": f"evidence/tasks/{self.task_id}/attempt_{self.attempt}/Phase-2B/test_output.txt",
+                            "lines": [1, 1],
+                            "quote": "witness content for test_output.txt",
+                        }
+                    ],
+                }
+            ]
+        }
+        ctx = AuditContext(
+            workspace_root=self.ws,
+            task_id=self.task_id,
+            attempt=self.attempt,
+            touched_repos=["payment-service"],
+            all_registered_repos=["payment-service"],
+            claims=claims,
+        )
+        res = run_stage3_citations(ctx)
+        self.assertTrue(res.is_clear, f"Stage 3 citations failed to resolve relocated witness: {res.defects}")
+
+    def test_gate2b_enforces_sprint_branch_and_commit_lint(self) -> None:
+        """Verify Gate 2B enforces sprint branch name and structured commit protocol when defined."""
+        self._setup_approved_review("def process_payment(): return True\n")
+
+        # Configure TASK_PLAN.json with sprint-01 for task-101
+        plan_data = {
+            "schema_version": "2.0",
+            "project_name": "sprint-test",
+            "created_at": "2026-11-04T10:00:00Z",
+            "updated_at": "2026-11-04T10:00:00Z",
+            "sprints": [
+                {
+                    "id": "sprint-01",
+                    "name": "payment-hardening",
+                    "title": "Payment Hardening",
+                }
+            ],
+            "tasks": [
+                {
+                    "task_id": self.task_id,
+                    "sprint": "sprint-01",
+                    "title": "Payment Service",
+                    "status": "planned",
+                    "priority": "HIGH",
+                    "dependencies": [],
+                    "target_repositories": ["payment-service"],
+                }
+            ],
+        }
+        (self.ws / "specs" / "TASK_PLAN.json").write_text(json.dumps(plan_data), encoding="utf-8")
+
+        # 1. Non-conforming branch (feature branch instead of sprint branch)
+        _git_run(["add", "service.py"], cwd=self.repo_dir)
+        _git_run(["commit", "-m", "[sp-01] T-101: implement payment service"], cwd=self.repo_dir)
+        (self.p2b_dir / "report.md").write_text("# Delivery Report\n", encoding="utf-8")
+
+        criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+        self.assertEqual(crit_map.get("gate2b.branch_governance.payment-service"), "FAILED")
+
+        # 2. Switch to compliant sprint branch
+        _git_run(["checkout", "-b", "sprint/sprint-01-payment-hardening"], cwd=self.repo_dir)
+        criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+        self.assertEqual(crit_map.get("gate2b.branch_governance.payment-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.commit_lint.payment-service"), "MET")
+
+        # 3. Bad commit message fails commit lint
+        _git_run(["commit", "--amend", "-m", "invalid commit format"], cwd=self.repo_dir)
+        criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+        self.assertEqual(crit_map.get("gate2b.commit_lint.payment-service"), "FAILED")
+
+    def test_gate2b_multi_repo_untouched_repo_exempt(self) -> None:
+        """Verify untouched repos in multi-repo workspaces pass Gate 2B without commit lint or diff fidelity errors."""
+        # 1. Setup second repo 'notification-service'
+        notif_dir = self.ws / "repos" / "notification-service"
+        notif_dir.mkdir(parents=True, exist_ok=True)
+        _git_run(["init", "-b", "sprint/sprint-01-payment-hardening"], cwd=notif_dir)
+        _git_run(["config", "user.name", "Test Committer"], cwd=notif_dir)
+        _git_run(["config", "user.email", "test@stagecheck.local"], cwd=notif_dir)
+        (notif_dir / "README.md").write_text("# Notification\n", encoding="utf-8")
+        _git_run(["add", "README.md"], cwd=notif_dir)
+        # Prior commit from task-01
+        _git_run(["commit", "-m", "[sp-01] T-01: init notification service"], cwd=notif_dir)
+        notif_head = _git_run(["rev-parse", "HEAD"], cwd=notif_dir).stdout.strip()
+
+        # 2. Update PRODUCT_REPOSITORIES.json
+        from governance.core.permissions import controlled_write_transaction
+        prod_repos_path = self.ws / "controls" / "PRODUCT_REPOSITORIES.json"
+        prod_data = json.loads(prod_repos_path.read_text(encoding="utf-8"))
+        prod_data["repositories"]["notification-service"] = {
+            "path": "repos/notification-service",
+            "branch": "sprint/sprint-01-payment-hardening",
+            "baseline_head": notif_head,
+            "remotes": [],
+        }
+        with controlled_write_transaction(self.ws / "controls"):
+            prod_repos_path.write_text(json.dumps(prod_data), encoding="utf-8")
+
+        # 3. Setup approved review for task-101 (only touching payment-service)
+        self._setup_approved_review("def process_payment(): return True\n")
+
+        # Set up sprint branch and commit on payment-service
+        _git_run(["checkout", "-b", "sprint/sprint-01-payment-hardening"], cwd=self.repo_dir)
+        _git_run(["add", "service.py"], cwd=self.repo_dir)
+        _git_run(["commit", "-m", "[sp-01] T-101: implement payment service"], cwd=self.repo_dir)
+        (self.p2b_dir / "report.md").write_text("# Delivery Report\n", encoding="utf-8")
+
+        # Configure TASK_PLAN.json with sprint-01 for task-101
+        plan_data = {
+            "schema_version": "2.0",
+            "project_name": "sprint-test",
+            "created_at": "2026-11-04T10:00:00Z",
+            "updated_at": "2026-11-04T10:00:00Z",
+            "sprints": [{"id": "sprint-01", "name": "payment-hardening"}],
+            "tasks": [
+                {
+                    "task_id": self.task_id,
+                    "sprint": "sprint-01",
+                    "title": "Payment Service",
+                    "status": "planned",
+                    "priority": "HIGH",
+                    "dependencies": [],
+                    "target_repositories": ["payment-service"],
+                }
+            ],
+        }
+        (self.ws / "specs" / "TASK_PLAN.json").write_text(json.dumps(plan_data), encoding="utf-8")
+
+        # Record repo_baseline.json for task attempt
+        baseline_data = {
+            "payment-service": {"head_commit": self.base_commit},
+            "notification-service": {"head_commit": notif_head},
+        }
+        (self.p2a_dir.parent / "repo_baseline.json").write_text(json.dumps(baseline_data), encoding="utf-8")
+
+        criteria, _ = evaluate_gate_2b_criteria(self.ws, self.task_id, self.attempt)
+        crit_map = {c.criterion_id: c.status for c in criteria}
+
+        # Touched repo (payment-service) evaluated fully
+        self.assertEqual(crit_map.get("gate2b.working_tree_clean.payment-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.branch_governance.payment-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.commit_fidelity.payment-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.commit_lint.payment-service"), "MET")
+
+        # Untouched repo (notification-service) clean and exempt from commit lint / diff fidelity
+        self.assertEqual(crit_map.get("gate2b.working_tree_clean.notification-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.branch_governance.notification-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.commit_fidelity.notification-service"), "MET")
+        self.assertEqual(crit_map.get("gate2b.commit_lint.notification-service"), "MET")
+
+
+if __name__ == "__main__":
+    unittest.main()

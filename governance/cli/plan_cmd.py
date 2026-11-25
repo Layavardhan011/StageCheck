@@ -1,0 +1,202 @@
+"""Task Plan Roadmap CLI Command Handler: 'stagecheck plan' (GAP-05, GAP-H4, GAP-L1).
+
+Implements:
+- 'stagecheck plan validate': Validates schema, repo whitelisting, and DAG cycles (Kahn's algorithm).
+- 'stagecheck plan next [--activate]': Determines next eligible task and optionally activates it.
+- 'stagecheck plan show': Visualizes roadmap in terminal.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import Optional
+
+from governance.core.paths import StageCheckPathError, find_workspace_root, safe_resolve, sha256_file_nofollow
+from governance.core.sealing import verify_attempt_merkle_seal
+from governance.core.task_plan import (
+    CircularDependencyError,
+    TaskPlanError,
+    UnauthorizedRepositoryError,
+    UnknownDependencyError,
+    get_next_eligible_task,
+    validate_task_plan,
+)
+from governance.core.utils import load_json_file
+
+
+def run_plan(
+    action: str,
+    workspace: Optional[str] = None,
+    task_id: Optional[str] = None,
+    activate: bool = False,
+) -> int:
+    """Execute 'stagecheck plan' roadmap commands."""
+    try:
+        workspace_root = Path(workspace).resolve() if workspace else find_workspace_root()
+    except Exception as err:
+        print(f"ERROR: [plan.workspace_error] {err}", file=sys.stderr)
+        return 1
+
+    plan_path = workspace_root / "specs" / "TASK_PLAN.json"
+    if not plan_path.is_file():
+        print(f"ERROR: [plan.missing_plan] Roadmap file not found at '{plan_path}'.", file=sys.stderr)
+        return 1
+
+    try:
+        plan_data = load_json_file(plan_path)
+    except Exception as err:
+        print(f"ERROR: [plan.invalid_json] Failed to parse roadmap JSON: {err}", file=sys.stderr)
+        return 1
+
+    # Load declared product repositories (fail closed if registry missing or malformed)
+    product_repos_file = workspace_root / "controls" / "PRODUCT_REPOSITORIES.json"
+    if not product_repos_file.is_file():
+        print(f"ERROR: [plan.missing_repos] Registry not found at '{product_repos_file}'.", file=sys.stderr)
+        return 1
+    try:
+        repos_data = load_json_file(product_repos_file)
+    except Exception as err:
+        print(f"ERROR: [plan.invalid_repos] Failed to read repository registry: {err}", file=sys.stderr)
+        return 1
+    if not isinstance(repos_data, dict) or not isinstance(repos_data.get("repositories"), dict):
+        print("ERROR: [plan.invalid_repos] Malformed PRODUCT_REPOSITORIES.json.", file=sys.stderr)
+        return 1
+    registered_repos = list(repos_data["repositories"].keys())
+
+    if action == "validate":
+        try:
+            topo = validate_task_plan(plan_data, registered_repos=registered_repos)
+            print(f"SUCCESS: Task plan roadmap is valid. Topological order: {' -> '.join(topo)}")
+            return 0
+        except CircularDependencyError as err:
+            print(f"ERROR: [plan.circular_dependency] {err}", file=sys.stderr)
+            return 1
+        except UnknownDependencyError as err:
+            print(f"ERROR: [plan.unknown_dependency] {err}", file=sys.stderr)
+            return 1
+        except UnauthorizedRepositoryError as err:
+            print(f"ERROR: [plan.unauthorized_repo] {err}", file=sys.stderr)
+            return 1
+        except Exception as err:
+            print(f"ERROR: [plan.validation_error] {err}", file=sys.stderr)
+            return 1
+
+    elif action == "next":
+        try:
+            validate_task_plan(plan_data, registered_repos=registered_repos)
+        except CircularDependencyError as err:
+            print(f"ERROR: [plan.circular_dependency] {err}", file=sys.stderr)
+            return 1
+        except UnknownDependencyError as err:
+            print(f"ERROR: [plan.unknown_dependency] {err}", file=sys.stderr)
+            return 1
+        except UnauthorizedRepositoryError as err:
+            print(f"ERROR: [plan.unauthorized_repo] {err}", file=sys.stderr)
+            return 1
+        except Exception as err:
+            print(f"ERROR: [plan.validation_error] {err}", file=sys.stderr)
+            return 1
+
+        # Derive completed tasks from roadmap status, sealed evidence, and ACTIVE_STATE.json
+        completed_tasks = {
+            t["task_id"]
+            for t in plan_data.get("tasks", [])
+            if isinstance(t, dict) and t.get("status") == "completed" and t.get("task_id")
+        }
+        active_state_file = workspace_root / "controls" / "ACTIVE_STATE.json"
+        if active_state_file.is_file() and not active_state_file.is_symlink():
+            try:
+                state_data = load_json_file(active_state_file)
+                completed_tasks.update(state_data.get("completed_tasks", []))
+                if (
+                    state_data.get("phase") == "SEALED_PASSED"
+                    or state_data.get("status") == "SEALED_PASSED"
+                ) and state_data.get("task_id"):
+                    completed_tasks.add(str(state_data["task_id"]))
+            except Exception:
+                pass
+
+        manifest_sealed_tasks = {}
+        manifest_path = workspace_root / "evidence" / "EVIDENCE_MANIFEST.json"
+        if manifest_path.is_file() and not manifest_path.is_symlink():
+            try:
+                manifest_data = load_json_file(manifest_path)
+                if isinstance(manifest_data, dict) and isinstance(manifest_data.get("sealed_tasks"), dict):
+                    manifest_sealed_tasks = manifest_data["sealed_tasks"]
+            except Exception:
+                manifest_sealed_tasks = {}
+
+        tasks_evidence_dir = workspace_root / "evidence" / "tasks"
+        if tasks_evidence_dir.is_dir() and not tasks_evidence_dir.is_symlink():
+            for seal_file in sorted(tasks_evidence_dir.glob("*/attempt_*/seal.json")):
+                try:
+                    safe_seal = safe_resolve(seal_file, workspace_root, allow_symlinks=False)
+                    if safe_seal.is_symlink() or not safe_seal.is_file():
+                        continue
+                    seal_data = load_json_file(safe_seal)
+                    if not isinstance(seal_data, dict):
+                        continue
+                    expected_task = safe_seal.parent.parent.name
+                    tid = seal_data.get("task_id")
+                    if tid != expected_task:
+                        continue
+                    attempt_name = safe_seal.parent.name
+                    if not attempt_name.startswith("attempt_") or not attempt_name[8:].isdigit():
+                        continue
+                    att_idx = int(attempt_name[8:])
+                    recorded_att = seal_data.get("attempt_index", seal_data.get("attempt"))
+                    if isinstance(recorded_att, bool) or recorded_att != att_idx:
+                        continue
+
+                    indexed_entry = (
+                        manifest_sealed_tasks.get(str(tid), {}).get(attempt_name)
+                        if isinstance(manifest_sealed_tasks.get(str(tid)), dict)
+                        else None
+                    )
+                    if not isinstance(indexed_entry, dict):
+                        continue
+                    if indexed_entry.get("seal_sha256") != sha256_file_nofollow(safe_seal):
+                        continue
+
+                    ok_seal, _ = verify_attempt_merkle_seal(safe_seal.parent, workspace_root)
+                    if not ok_seal:
+                        continue
+
+                    verdict = seal_data.get("verdict")
+                    verdict_passed = (
+                        isinstance(verdict, dict)
+                        and (verdict.get("status") in ("PASSED", "CLEAR") or verdict.get("result") in ("PASSED", "CLEAR"))
+                    )
+                    if verdict_passed or seal_data.get("outcome") == "PASSED":
+                        completed_tasks.add(str(tid))
+                except (StageCheckPathError, Exception):
+                    pass
+
+        next_task = get_next_eligible_task(plan_data, completed_tasks=completed_tasks)
+        if not next_task:
+            print("Notice: No pending eligible tasks found in roadmap. All tasks completed or blocked.")
+            return 0
+
+        print(f"Next eligible task: {next_task['task_id']} - {next_task['title']} (Priority: {next_task['priority']})")
+        if activate:
+            print(f"Activating task '{next_task['task_id']}'...")
+            from governance.cli.start_cmd import run_start
+            return run_start(task=next_task["task_id"], workspace=str(workspace_root))
+        return 0
+
+    elif action == "show":
+        tasks = plan_data.get("tasks", [])
+        print(f"Project: {plan_data.get('project_name', 'StageCheck Workspace')} (Roadmap)")
+        print("-" * 60)
+        for t in tasks:
+            deps = ", ".join(t.get("dependencies", [])) or "None"
+            repos = ", ".join(t.get("target_repositories", []))
+            print(f"[{t.get('status', 'planned').upper()}] {t['task_id']}: {t['title']}")
+            print(f"  Priority: {t.get('priority')} | Repos: {repos} | Depends on: {deps}")
+        return 0
+
+    print(f"ERROR: Unknown action '{action}'. Use validate, next, or show.", file=sys.stderr)
+    return 1
+

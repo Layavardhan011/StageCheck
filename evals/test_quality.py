@@ -43,9 +43,8 @@ class Fixture(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory(prefix='quality-test-');self.addCleanup(self.tmp.cleanup)
         self.home=Path(self.tmp.name)
         self.tool=Path(__file__).resolve().parents[1]
-        self.programme=Path('/home/magnus/Desktop/Desk/WIP/1. Team/Dir/RWA/NewArc/3m')
-        self.contract=self.programme.parent.parent/'AGENTS.md'
-        self.run,self.data,self.root,self.ft=fixture(self.home,self.tool,self.contract,self.programme)
+        self.run,self.data,self.root,self.ft=fixture(self.home,self.tool)
+        self.contract=Path(self.run['contract'])
         self.ctx=q.Context(self.run)
         self.records=q.roots(self.ctx)[1]
     def verdict(self,task='fixture',attempt=1,defect_id='D-fixture',check='citations',version=None):
@@ -292,9 +291,27 @@ class Fixture(unittest.TestCase):
     def launch(self,task):
         # Existing fixture contains an untracked qualification file. Explicit dirty
         # inspection retains its identity; product execution stays disabled.
-        data=q.load(self.run['claims']);data['task_id']=task;Path(self.run['claims']).write_bytes(q.encode(data))
+        data=q.load(self.run['claims']);data['task_id']=task
         manifest(self.ft)
-        (self.root/'controls/STAGECHECK_ROOT.json').write_bytes(q.encode({'root':str(self.ft),'manifest_sha256':q.digest((self.ft/'MANIFEST.sha256').read_bytes())}))
+        new_manifest_hash = q.digest((self.ft/'MANIFEST.sha256').read_bytes())
+        (self.root/'controls/STAGECHECK_ROOT.json').write_bytes(q.encode({'root':str(self.ft),'manifest_sha256':new_manifest_hash}))
+
+        # Keep contract in sync with new manifest hash for the synthetic fixture tool
+        import re
+        contract_text = self.contract.read_text()
+        contract_text = re.sub(
+            r"\|\s*StageCheck tool\s*\|\s*`[^`]+`\s*\|\s*`[0-9a-f]{64}`\s*\|",
+            f"| StageCheck tool | `{self.ft}/MANIFEST.sha256` | `{new_manifest_hash}` |",
+            contract_text
+        )
+        self.contract.write_text(contract_text)
+        (self.contract.parent / "AGENTS.md").write_text(contract_text)
+        for cp in q.load(self.ft / "config/paths.json").get("instruction_copies", []):
+            Path(cp).write_text(contract_text)
+
+        data['contract_sha256'] = q.digest(self.contract.read_bytes())
+        Path(self.run['claims']).write_bytes(q.encode(data))
+
         args=[sys.executable,'-B',str(self.ft/'bin/orchestrate.py'),'--task',task,'--repo',self.run['repo'],'--base',self.run['base'],'--report',self.run['report'],'--claims',self.run['claims'],'--root',str(self.root),'--contract',str(self.ctx.contract),'--allow-dirty']
         r=subprocess.run(args,capture_output=True,timeout=45,env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'})
         path=self.root/'evidence/stagecheck'/task/'1/verdict.json'
@@ -329,8 +346,7 @@ class Fixture(unittest.TestCase):
         self.configure_blocking();self.launch('bootstrap')  # Install final fixture paths/config before labels.
         p=q.load(self.root/'evidence/stagecheck/bootstrap/1/verdict.json')
         q.append_record(self.ctx,self.request('coverage',{'verdicts':[q.digest((self.root/'evidence/stagecheck/bootstrap/1/verdict.json').read_bytes())]},'covered'))
-        for i in range(93):
-            path,_=self.verdict(task='count-'+str(i),defect_id='D-'+str(i));q.append_record(self.ctx,self.label(path))
+        self.populate_precision(93)
         r,path,v=self.launch('earned');self.assertEqual((r.returncode,v['result']),(1,'BLOCKED'))
         self.assertEqual(v['quality']['checks']['citations']['source'],'measurement')
         self.assertEqual(v['quality']['checks']['citations']['earlier_pending_count'],0)

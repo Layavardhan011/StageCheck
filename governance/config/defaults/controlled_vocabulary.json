@@ -1,0 +1,5 @@
+{
+  "basis": "Installed AGENTS.md §4 controlled vocabulary and success synonyms",
+  "controlled": ["PASS", "FAIL", "ready", "complete", "completed", "fixed", "verified", "safe", "tested", "passing", "builds", "green"],
+  "synonyms": ["implemented", "done", "works", "working", "addressed", "resolved", "handled", "ok", "fine", "clean", "solid", "should work", "should be fine", "looks correct", "looks good", "no issues", "no problems", "no errors"]
+}

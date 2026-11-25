@@ -38,7 +38,7 @@ def main():
     jobs.append({'id': 'reaped-child-esrch', 'path': 'evals/test_response.py', 'old': 'except (FileNotFoundError,ProcessLookupError):pass  # Reaped before open or during read.', 'new': 'except FileNotFoundError:pass', 'tests': ['test_response.py', 'Hook.test_real_timeout_accepts_reaped_child']})
     jobs.append({'id': 'other-proc-io-error', 'path': 'evals/test_response.py', 'old': 'except (FileNotFoundError,ProcessLookupError):pass  # Reaped before open or during read.', 'new': 'except OSError:pass', 'tests': ['test_response.py', 'Hook.test_timeout_reaping_keeps_live_child_and_io_error_guards']})
     jobs.append({'id':'incomplete-attempt-recovery','path':'bin/response_hook.py','old':'except FileNotFoundError:','new':'except PermissionError:','tests':['test_response.py','Hook.test_missing_prior_record_recovers_without_rewriting']})
-    jobs.append({'id':'live-child-state-guard','path':'evals/test_response.py','old':"else:self.assertEqual(state_text.split()[2],'Z')",'new':'else:pass','tests':['test_response.py','Hook.test_timeout_reaping_keeps_live_child_and_io_error_guards']})
+    jobs.append({'id':'live-child-state-guard','path':'evals/test_response.py','old':"else:self.assertIn(state_text.split()[2],('Z','X'))",'new':'else:pass','tests':['test_response.py','Hook.test_timeout_reaping_keeps_live_child_and_io_error_guards']})
     if a.smoke:jobs=jobs[:1]
     results=[]
     with tempfile.TemporaryDirectory(prefix='response-mutations-') as temp:

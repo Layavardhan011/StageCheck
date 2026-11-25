@@ -5,7 +5,13 @@
   "session_backstop": 20,
   "stagecheck_timeout_seconds": 60,
   "claims_max_bytes": 65536,
-  "claims_folder": {"codex":"evidence/responses/codex/","claude":"evidence/responses/claude/"},
+  "claims_folder": {
+    "codex": "evidence/responses/codex/",
+    "claude": "evidence/responses/claude/",
+    "gemini": "evidence/responses/gemini/",
+    "cursor": "evidence/responses/cursor/",
+    "custom-agent": "evidence/responses/custom-agent/"
+  },
   "records_folder": "evidence/stagecheck_responses/",
   "send_back_rules": [
     "citation.missing_file", "citation.hash_mismatch", "citation.line_range",

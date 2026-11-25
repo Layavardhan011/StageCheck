@@ -1,0 +1,297 @@
+{
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "iteration": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "contract_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "record": {
+      "type": "string",
+      "minLength": 1
+    },
+    "record_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": [
+              "decision",
+              "observation",
+              "completion",
+              "requirement",
+              "test_expectation"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scope": {
+            "type": "string",
+            "minLength": 1
+          },
+          "label": {
+            "enum": [
+              "SOURCE_PROVEN",
+              "TEST_PROVEN",
+              "RUNTIME_PROVEN",
+              "INDEPENDENTLY_REPRODUCED",
+              "INFERRED",
+              "UNKNOWN",
+              "NOT_APPLICABLE"
+            ]
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "citations": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "enum": [
+                        "document",
+                        "file"
+                      ]
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "lines": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "minItems": 2,
+                      "maxItems": 2
+                    },
+                    "quote": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "approved": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "path",
+                    "sha256",
+                    "lines",
+                    "quote"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "const": "upstream"
+                    },
+                    "repository": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "commit": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{40}$"
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "lines": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "minItems": 2,
+                      "maxItems": 2
+                    },
+                    "quote": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "repository",
+                    "commit",
+                    "path",
+                    "sha256",
+                    "lines",
+                    "quote"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "const": "command"
+                    },
+                    "record": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "record_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "argv": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "minItems": 1
+                    },
+                    "cwd": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "exit_status": {
+                      "type": "integer"
+                    },
+                    "stdout_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "stderr_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "record",
+                    "record_sha256",
+                    "argv",
+                    "cwd",
+                    "exit_status",
+                    "stdout_sha256",
+                    "stderr_sha256"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "blast_radius": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "group": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 11
+                },
+                "label": {
+                  "enum": [
+                    "checked",
+                    "not_checked",
+                    "not_applicable"
+                  ]
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "required": [
+                "group",
+                "label",
+                "reason",
+                "items"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "text",
+          "scope",
+          "label",
+          "citations",
+          "blast_radius"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "checked": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "not_checked": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "not_applicable": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "checked",
+        "not_checked",
+        "not_applicable"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "task_id",
+    "iteration",
+    "contract_sha256",
+    "record",
+    "record_sha256",
+    "claims"
+  ],
+  "additionalProperties": false
+}
