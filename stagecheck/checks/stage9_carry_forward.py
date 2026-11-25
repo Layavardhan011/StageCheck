@@ -14,9 +14,9 @@ from typing import Any, Dict, List
 from stagecheck.checks.base import AuditContext, Defect, StageResult
 from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.evidence import verify_evidence_manifest, verify_seal_chain
-from stagecheck.core.paths import resolve_task_dir
+from stagecheck.core.paths import read_bytes_nofollow, resolve_task_dir
 from stagecheck.core.sealing import verify_attempt_merkle_seal
-from stagecheck.core.utils import canonical_json_dumps, sha256_digest, sha256_file
+from stagecheck.core.utils import canonical_json_dumps, load_json_file, sha256_digest, sha256_file
 
 
 def run_stage9_carry_forward(ctx: AuditContext) -> StageResult:
@@ -120,7 +120,7 @@ def run_stage9_carry_forward(ctx: AuditContext) -> StageResult:
         prior_verdict_passed = False
         if prior_verdict_file.is_file() and not prior_verdict_file.is_symlink():
             try:
-                prior_vdata = json.loads(prior_verdict_file.read_text(encoding="utf-8"))
+                prior_vdata = load_json_file(prior_verdict_file)
                 if prior_vdata.get("result") in ("PASSED", "CLEAR") and not any(
                     d.get("blocking", True) for d in prior_vdata.get("defects", [])
                 ):
@@ -153,8 +153,14 @@ def run_stage9_carry_forward(ctx: AuditContext) -> StageResult:
     # 3. Require non-empty cumulative issue history ledger for attempt > 1
     issue_history_path = resolve_task_dir(ctx.workspace_root, ctx.task_id) / f"TASK_{ctx.task_id}_ISSUE_HISTORY.md"
     alt_history = ctx.workspace_root / f"TASK_{ctx.task_id}_ISSUE_HISTORY.md"
-    active_history = issue_history_path if issue_history_path.is_file() else (alt_history if alt_history.is_file() else None)
-    if not active_history or not active_history.read_text(encoding="utf-8", errors="ignore").strip():
+    active_history = issue_history_path if (issue_history_path.is_file() and not issue_history_path.is_symlink()) else (alt_history if (alt_history.is_file() and not alt_history.is_symlink()) else None)
+    history_content = ""
+    if active_history:
+        try:
+            history_content = read_bytes_nofollow(active_history, max_bytes=1024 * 1024).decode("utf-8", errors="ignore")
+        except Exception:
+            history_content = ""
+    if not history_content.strip():
         defects.append(
             Defect(
                 defect_id="carry_forward.missing_issue_history",

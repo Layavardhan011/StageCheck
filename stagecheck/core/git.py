@@ -144,8 +144,14 @@ def _resolve_git_config_files(repo_path: Path) -> List[Path]:
         _append_safe_cfg(configs, git_entry / "config")
         _append_safe_cfg(configs, git_entry / "config.worktree")
     elif git_entry.is_file():
+        if git_entry.is_symlink():
+            raise GitError(
+                f"Security policy violation [UNSAFE_GIT_CONFIG]: Symlinked gitdir pointer '{git_entry}' prohibited."
+            )
         try:
-            text = git_entry.read_text(encoding="utf-8", errors="replace").strip()
+            from stagecheck.core.paths import read_bytes_nofollow
+            raw_bytes = read_bytes_nofollow(git_entry, max_bytes=8192)
+            text = raw_bytes.decode("utf-8", errors="replace").strip()
         except OSError as err:
             raise GitError(f"Failed to read gitdir pointer '{git_entry}': {err}") from err
         if text.startswith("gitdir:"):
@@ -164,7 +170,11 @@ def _resolve_git_config_files(repo_path: Path) -> List[Path]:
                     f"Security policy violation [UNSAFE_GIT_CONFIG]: Symlinked commondir '{commondir_file}' prohibited."
                 )
             if commondir_file.is_file():
-                raw_common = commondir_file.read_text(encoding="utf-8", errors="replace").strip()
+                try:
+                    raw_common_bytes = read_bytes_nofollow(commondir_file, max_bytes=8192)
+                    raw_common = raw_common_bytes.decode("utf-8", errors="replace").strip()
+                except OSError as err:
+                    raise GitError(f"Failed to read commondir pointer '{commondir_file}': {err}") from err
                 common_dir = (git_dir / raw_common).resolve() if not os.path.isabs(raw_common) else Path(raw_common).resolve()
                 git_dirs.append(common_dir)
                 _append_safe_cfg(configs, common_dir / "config")
@@ -297,9 +307,14 @@ def _iter_git_config_entries(
 
 def assert_safe_repo_git_config(repo_path: Path) -> None:
     """Parse repository-local git config strictly and fail closed on unsafe or redirective keys."""
+    from stagecheck.core.paths import read_bytes_nofollow
+
     for cfg_path in _resolve_git_config_files(repo_path):
+        if cfg_path.is_symlink():
+            raise GitError(f"Security policy violation [UNSAFE_GIT_CONFIG]: Symlinked git config '{cfg_path}' prohibited.")
         try:
-            raw_text = cfg_path.read_text(encoding="utf-8")
+            raw_bytes = read_bytes_nofollow(cfg_path, max_bytes=1024 * 1024)
+            raw_text = raw_bytes.decode("utf-8", errors="replace")
         except Exception as err:
             raise GitError(f"Unsafe or unparseable repository git config '{cfg_path}': {err}") from err
 
@@ -378,7 +393,19 @@ def _build_safe_git_command(
             if flag not in effective_args:
                 effective_args.insert(1, flag)
 
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    # SEC-02: Strict environment allowlist to prevent dynamic linker injection (LD_PRELOAD)
+    # and accidental host secret leakage (tokens, passwords, keys) to git child processes.
+    allowlisted_git_env = {
+        "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "TERM", "TZ", "TMPDIR", "HOME",
+    }
+    sensitive_git_substrings = (
+        "TOKEN", "KEY", "SECRET", "PASSWORD", "AUTH", "PRELOAD", "LIBRARY_PATH",
+    )
+    clean_env = {
+        k: v for k, v in os.environ.items()
+        if (k in allowlisted_git_env or k.startswith("GIT_AUTHOR_") or k.startswith("GIT_COMMITTER_"))
+        and not any(sub in k.upper() for sub in sensitive_git_substrings)
+    }
     clean_env.update(
         {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -621,14 +648,16 @@ def get_repo_remote_push_urls(repo_path: Union[str, Path]) -> List[str]:
 
 def get_approved_remote_urls(workspace_root: Union[str, Path]) -> Set[str]:
     """Resolve approved push URLs from protected workspace controls (controls/ only)."""
+    from stagecheck.core.utils import load_json_file
+
     root = Path(workspace_root).resolve()
     approved: Set[str] = set()
 
     # 1. controls/remotes.json (protected under 0555/0444 controls/)
     c_remotes = root / "controls" / "remotes.json"
-    if c_remotes.is_file():
+    if c_remotes.is_file() and not c_remotes.is_symlink():
         try:
-            data = json.loads(c_remotes.read_text(encoding="utf-8"))
+            data = load_json_file(c_remotes)
             for u in data.get("approved_push_urls", []):
                 approved.add(u)
         except Exception:
@@ -636,9 +665,9 @@ def get_approved_remote_urls(workspace_root: Union[str, Path]) -> Set[str]:
 
     # 2. controls/PRODUCT_REPOSITORIES.json (AGENTS.md SHA-256 bound)
     prod_repos = root / "controls" / "PRODUCT_REPOSITORIES.json"
-    if prod_repos.is_file():
+    if prod_repos.is_file() and not prod_repos.is_symlink():
         try:
-            data = json.loads(prod_repos.read_text(encoding="utf-8"))
+            data = load_json_file(prod_repos)
             for u in data.get("approved_push_urls", []):
                 approved.add(u)
             for repo_meta in data.get("repositories", {}).values():

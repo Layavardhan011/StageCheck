@@ -26,7 +26,7 @@ from stagecheck.core.paths import (
     sha256_file_nofollow,
     write_text_nofollow,
 )
-from stagecheck.core.permissions import controlled_write_transaction
+from stagecheck.core.permissions import _safe_chmod, controlled_write_transaction
 from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_digest, strict_json_loads
 
 
@@ -95,14 +95,14 @@ def update_evidence_manifest(
     manifest_dir = manifest_path.parent
     is_ro = not os.access(manifest_dir, os.W_OK)
     if is_ro:
-        os.chmod(manifest_dir, 0o755)
+        _safe_chmod(manifest_dir, 0o755)
 
     try:
         write_text_nofollow(manifest_path, pretty_json_dumps(manifest), append=False, mode=0o644)
-        manifest_path.chmod(0o444)
+        _safe_chmod(manifest_path, 0o444)
     finally:
         if is_ro:
-            os.chmod(manifest_dir, 0o555)
+            _safe_chmod(manifest_dir, 0o555)
 
     return manifest_path
 
@@ -291,13 +291,14 @@ def create_task_seal(
     # Verify task_id/attempt symlink safety and write seal atomically (O_NOFOLLOW)
     if seal_path.is_symlink():
         raise EvidenceTamperError(f"Refusing to follow symlinked seal file '{seal_path}'.")
-    tmp_seal = seal_path.with_suffix(f".tmp.{os.getpid()}")
-    tmp_fd = os.open(tmp_seal, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-    try:
-        os.write(tmp_fd, pretty_json_dumps(seal_data).encode("utf-8"))
-    finally:
-        os.close(tmp_fd)
-    os.replace(tmp_seal, seal_path)
+    with controlled_write_transaction(attempt_dir):
+        tmp_seal = seal_path.with_suffix(f".tmp.{os.getpid()}")
+        tmp_fd = os.open(tmp_seal, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        try:
+            os.write(tmp_fd, pretty_json_dumps(seal_data).encode("utf-8"))
+        finally:
+            os.close(tmp_fd)
+        os.replace(tmp_seal, seal_path)
 
     # Also update Phase-3 copy if Phase-3 directory exists
     p3_dir = attempt_dir / "Phase-3"
@@ -305,7 +306,7 @@ def create_task_seal(
         p3_is_ro = not os.access(p3_dir, os.W_OK)
         if p3_is_ro:
             try:
-                os.chmod(str(p3_dir), 0o755)
+                _safe_chmod(p3_dir, 0o755)
             except OSError:
                 pass
         try:
@@ -313,21 +314,18 @@ def create_task_seal(
             if p3_seal.is_symlink():
                 raise EvidenceTamperError(f"Refusing to follow symlinked Phase-3 seal '{p3_seal}'.")
             if p3_seal.exists():
-                os.chmod(str(p3_seal), 0o644)
+                _safe_chmod(p3_seal, 0o644)
             p3_fd = os.open(p3_seal, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
             try:
                 os.write(p3_fd, pretty_json_dumps(seal_data).encode("utf-8"))
             finally:
                 os.close(p3_fd)
-            os.chmod(str(p3_seal), stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+            _safe_chmod(p3_seal, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
         except OSError:
             pass
         finally:
             if p3_is_ro:
-                try:
-                    os.chmod(str(p3_dir), 0o555)
-                except OSError:
-                    pass
+                _safe_chmod(p3_dir, 0o555)
 
     # If final PASSED outcome, write master task seal at task root
     if outcome == "PASSED":
@@ -335,10 +333,7 @@ def create_task_seal(
         if master_seal.is_symlink():
             raise EvidenceTamperError(f"Refusing to follow symlinked master seal '{master_seal}'.")
         if master_seal.exists():
-            try:
-                os.chmod(str(master_seal), 0o644)
-            except OSError:
-                pass
+            _safe_chmod(master_seal, 0o644)
         m_fd = os.open(master_seal, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
         try:
             os.write(m_fd, pretty_json_dumps(seal_data).encode("utf-8"))
@@ -352,7 +347,7 @@ def create_task_seal(
     update_evidence_manifest(workspace_root, files_to_index)
 
     # Lock read-only mode 0444
-    os.chmod(seal_path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    _safe_chmod(seal_path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
 
     return seal_path
 
@@ -507,10 +502,19 @@ def append_issue_history(
     defects: List[Dict[str, Any]],
 ) -> Path:
     """Append verification results to cumulative TASK_<ID>_ISSUE_HISTORY.md ledger."""
-    task_dir = resolve_task_dir(workspace_root, task_id)
-    safe_resolve(f"evidence/tasks/{task_id}", workspace_root, allow_symlinks=False)
-    task_dir.mkdir(parents=True, exist_ok=True)
-    history_file = safe_resolve(f"evidence/tasks/{task_id}/TASK_{task_id}_ISSUE_HISTORY.md", workspace_root, allow_symlinks=False)
+    ws = Path(workspace_root).resolve()
+    evidence_dir = ws / "evidence"
+    is_ev_ro = evidence_dir.is_dir() and not os.access(evidence_dir, os.W_OK)
+    if is_ev_ro:
+        _safe_chmod(evidence_dir, 0o755)
+    try:
+        task_dir = resolve_task_dir(ws, task_id)
+        safe_resolve(f"evidence/tasks/{task_id}", ws, allow_symlinks=False)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        history_file = safe_resolve(f"evidence/tasks/{task_id}/TASK_{task_id}_ISSUE_HISTORY.md", ws, allow_symlinks=False)
+    finally:
+        if is_ev_ro:
+            _safe_chmod(evidence_dir, 0o555)
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     lines = [
@@ -535,7 +539,8 @@ def append_issue_history(
         lines.append("All 9 verification stages passed with zero defects.\n")
 
     content_to_append = "".join(lines)
-    write_text_nofollow(history_file, content_to_append, append=True, mode=0o644)
+    with controlled_write_transaction(task_dir):
+        write_text_nofollow(history_file, content_to_append, append=True, mode=0o644)
 
     # Index history file in evidence manifest
     update_evidence_manifest(workspace_root, [history_file])
@@ -550,16 +555,18 @@ def update_code_quality_ledger(
 ) -> Path:
     """Record non-blocking maintainability/quality findings in evidence/CODE_QUALITY_REPORT.json (GAP-F2)."""
     ev_dir = Path(workspace_root).resolve() / "evidence"
+    if ev_dir.is_symlink():
+        raise EvidenceTamperError(f"Security policy violation: evidence directory '{ev_dir}' cannot be a symbolic link.")
     ev_dir.mkdir(parents=True, exist_ok=True)
     report_file = ev_dir / "CODE_QUALITY_REPORT.json"
 
     data: Dict[str, Any] = {"Code Quality issue": []}
-    if report_file.is_file():
+    if report_file.is_file() and not report_file.is_symlink():
         try:
-            with open(report_file, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-                if isinstance(loaded, dict) and "Code Quality issue" in loaded:
-                    data = loaded
+            from stagecheck.core.utils import load_json_file
+            loaded = load_json_file(report_file)
+            if isinstance(loaded, dict) and "Code Quality issue" in loaded:
+                data = loaded
         except Exception:
             pass
 
@@ -568,19 +575,17 @@ def update_code_quality_ledger(
 
     is_ro = not os.access(ev_dir, os.W_OK)
     if is_ro:
-        os.chmod(ev_dir, 0o755)
+        _safe_chmod(ev_dir, 0o755)
 
     try:
-        tmp_file = report_file.with_suffix(".tmp")
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            f.write(pretty_json_dumps(data))
+        from stagecheck.core.paths import write_text_nofollow
         if report_file.exists():
-            report_file.chmod(0o644)
-        os.replace(tmp_file, report_file)
-        report_file.chmod(0o444)
+            _safe_chmod(report_file, 0o644)
+        write_text_nofollow(report_file, pretty_json_dumps(data), append=False, mode=0o644)
+        _safe_chmod(report_file, 0o444)
     finally:
         if is_ro:
-            os.chmod(ev_dir, 0o555)
+            _safe_chmod(ev_dir, 0o555)
 
     update_evidence_manifest(workspace_root, [report_file])
     return report_file

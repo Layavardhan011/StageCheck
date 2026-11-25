@@ -12,6 +12,7 @@ import hmac
 import json
 import os
 import re
+import stat
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -32,7 +33,7 @@ from stagecheck.core.git import (
 )
 from stagecheck.core.locking import acquire_runtime_lock
 from stagecheck.core.paths import StageCheckPathError, safe_resolve, sha256_file_nofollow, validate_task_id
-from stagecheck.core.permissions import freeze_phase_directory
+from stagecheck.core.permissions import _safe_chmod, freeze_phase_directory
 from stagecheck.core.state import load_active_state, save_active_state
 from stagecheck.core.utils import (
     canonical_json_dumps,
@@ -234,9 +235,25 @@ def evaluate_gate_1_criteria(
     criteria: List[GateCriterion] = []
     deliverables: List[Dict[str, str]] = []
 
-    # 1. prompt.md
+    # 1. prompt.md (SEC-21: atomic descriptor-level open with O_NOFOLLOW)
     prompt_file = p1_dir / "prompt.md"
-    if prompt_file.is_symlink() or not prompt_file.is_file():
+    content = ""
+    prompt_read_ok = False
+    if not prompt_file.is_symlink():
+        try:
+            fd = os.open(str(prompt_file), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                st = os.fstat(fd)
+                if stat.S_ISREG(st.st_mode):
+                    with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as f:
+                        content = f.read()
+                    prompt_read_ok = True
+            finally:
+                os.close(fd)
+        except OSError:
+            prompt_read_ok = False
+
+    if not prompt_read_ok:
         criteria.append(GateCriterion(
             criterion_id="gate1.prompt_exists",
             description="Phase 1 prompt blueprint exists and is readable",
@@ -244,7 +261,6 @@ def evaluate_gate_1_criteria(
             message=f"Missing or symlinked required artifact: '{prompt_file.relative_to(workspace_root)}'",
         ))
     else:
-        content = prompt_file.read_text(encoding="utf-8")
         if not content.strip():
             criteria.append(GateCriterion(
                 criterion_id="gate1.prompt_non_empty",
@@ -675,21 +691,34 @@ def evaluate_gate_2b_criteria(
     if p2b_dir.is_dir() and not p2b_dir.is_symlink():
         witnesses_dir = p2b_dir / "witnesses"
         rerun_dir = p2b_dir / "rerun_outputs"
-        try:
-            witnesses_dir.mkdir(parents=True, exist_ok=True)
-            rerun_dir.mkdir(parents=True, exist_ok=True)
-            for item in list(p2b_dir.iterdir()):
-                if item.is_file() and not item.is_symlink() and item.name not in primary_phase2b_files:
-                    if (
-                        item.name.endswith((".txt", ".log", "_output", "_stderr", "_stdout"))
-                        or item.name.startswith("git_")
-                        or item.name.startswith("test_")
-                    ):
-                        dest = witnesses_dir / item.name
-                        if not dest.exists():
-                            item.rename(dest)
-        except OSError:
-            pass
+        if not witnesses_dir.is_symlink() and not rerun_dir.is_symlink():
+            p2b_is_ro = not os.access(p2b_dir, os.W_OK)
+            if p2b_is_ro:
+                try:
+                    _safe_chmod(p2b_dir, 0o755)
+                except OSError:
+                    pass
+            try:
+                witnesses_dir.mkdir(parents=True, exist_ok=True)
+                rerun_dir.mkdir(parents=True, exist_ok=True)
+                for item in list(p2b_dir.iterdir()):
+                    if item.is_file() and not item.is_symlink() and item.name not in primary_phase2b_files:
+                        if (
+                            item.name.endswith((".txt", ".log", "_output", "_stderr", "_stdout"))
+                            or item.name.startswith("git_")
+                            or item.name.startswith("test_")
+                        ):
+                            dest = witnesses_dir / item.name
+                            if not dest.exists() and not dest.is_symlink():
+                                item.rename(dest)
+            except OSError:
+                pass
+            finally:
+                if p2b_is_ro:
+                    try:
+                        _safe_chmod(p2b_dir, 0o555)
+                    except OSError:
+                        pass
 
     # 4. Discover repositories to evaluate
     from stagecheck.core.cooperative_review import resolve_governed_repo_path
@@ -1214,9 +1243,23 @@ def evaluate_gate_4_criteria(
                         )
                     )
 
-    # 2. Verdict check
+    # 2. Verdict check (SEC-21: atomic descriptor-level open with O_NOFOLLOW)
     verdict_file = attempt_dir / "Phase-3" / "verdict.json"
-    if not verdict_file.is_file() or verdict_file.is_symlink():
+    verdict_data = None
+    if not verdict_file.is_symlink():
+        try:
+            fd = os.open(str(verdict_file), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                st = os.fstat(fd)
+                if stat.S_ISREG(st.st_mode):
+                    with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as f:
+                        verdict_data = json.loads(f.read())
+            finally:
+                os.close(fd)
+        except Exception:
+            verdict_data = None
+
+    if verdict_data is None:
         criteria.append(
             GateCriterion(
                 criterion_id="G4-VERDICT-PASSED",
@@ -1226,46 +1269,35 @@ def evaluate_gate_4_criteria(
             )
         )
     else:
-        try:
-            verdict_data = json.loads(verdict_file.read_text(encoding="utf-8"))
-            v_status = verdict_data.get("status") or verdict_data.get("result")
-            counts_obj = verdict_data.get("counts") if isinstance(verdict_data.get("counts"), dict) else {}
-            blocking_count = max(
-                int(counts_obj.get("blocking", 0) or 0),
-                int(verdict_data.get("blocking_defects_count", 0) or 0),
+        v_status = verdict_data.get("status") or verdict_data.get("result")
+        counts_obj = verdict_data.get("counts") if isinstance(verdict_data.get("counts"), dict) else {}
+        blocking_count = max(
+            int(counts_obj.get("blocking", 0) or 0),
+            int(verdict_data.get("blocking_defects_count", 0) or 0),
+        )
+        if v_status in ("PASSED", "CLEAR") and blocking_count == 0:
+            criteria.append(
+                GateCriterion(
+                    criterion_id="G4-VERDICT-PASSED",
+                    description="Phase 3 audit verdict status verification",
+                    status="MET",
+                    message=f"Phase 3 verdict verified with status {v_status}",
+                )
             )
-            if v_status in ("PASSED", "CLEAR") and blocking_count == 0:
-                criteria.append(
-                    GateCriterion(
-                        criterion_id="G4-VERDICT-PASSED",
-                        description="Phase 3 audit verdict status verification",
-                        status="MET",
-                        message=f"Phase 3 verdict verified with status {v_status}",
-                    )
-                )
-            else:
-                criteria.append(
-                    GateCriterion(
-                        criterion_id="G4-VERDICT-PASSED",
-                        description="Phase 3 audit verdict status verification",
-                        status="FAILED",
-                        message=f"Phase 3 verdict is not PASSED (status: '{v_status}', blocking defects: {blocking_count})",
-                    )
-                )
-            deliverables.append({
-                "path": str(verdict_file.relative_to(workspace_root)),
-                "sha256": sha256_file(verdict_file),
-                "status": "VALID",
-            })
-        except Exception as err:
+        else:
             criteria.append(
                 GateCriterion(
                     criterion_id="G4-VERDICT-PASSED",
                     description="Phase 3 audit verdict status verification",
                     status="FAILED",
-                    message=f"Malformed verdict.json: {err}",
+                    message=f"Phase 3 verdict is not PASSED (status: '{v_status}', blocking defects: {blocking_count})",
                 )
             )
+        deliverables.append({
+            "path": str(verdict_file.relative_to(workspace_root)),
+            "sha256": sha256_file(verdict_file),
+            "status": "VALID",
+        })
 
     return criteria, deliverables
 
@@ -1424,7 +1456,7 @@ def _write_receipt_no_follow(workspace_root: Path, receipt_path: Path, content_s
         raise GateError(f"Refusing to follow symlinked receipt path '{safe_target}'.")
     if safe_target.exists():
         try:
-            safe_target.chmod(0o644)
+            _safe_chmod(safe_target, 0o644)
         except OSError:
             pass
     fd = os.open(safe_target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
@@ -1433,7 +1465,7 @@ def _write_receipt_no_follow(workspace_root: Path, receipt_path: Path, content_s
     finally:
         os.close(fd)
     try:
-        safe_target.chmod(0o444)
+        _safe_chmod(safe_target, 0o444)
     except OSError:
         pass
 
@@ -1548,8 +1580,8 @@ def _advance_gate_atomic_locked(
     )
 
     # Pre-check receipt directory and symlink containment before creating dirs/files
-    receipt_path.parent.mkdir(parents=True, exist_ok=True)
     safe_resolve(receipt_path.relative_to(root).as_posix(), root, allow_symlinks=False)
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Specialized transactional execution for Gate 4 sealing per DEC-025
     if gate_id == GateId.GATE_4:
@@ -1559,11 +1591,18 @@ def _advance_gate_atomic_locked(
 
         verdict_file = attempt_dir / "Phase-3" / "verdict.json"
         verdict_data: Dict[str, Any] = {}
-        if verdict_file.is_file():
+        if verdict_file.is_file() and not verdict_file.is_symlink():
             try:
-                verdict_data = json.loads(verdict_file.read_text(encoding="utf-8"))
+                fd = os.open(str(verdict_file), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    st = os.fstat(fd)
+                    if stat.S_ISREG(st.st_mode):
+                        with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as f:
+                            verdict_data = json.loads(f.read())
+                finally:
+                    os.close(fd)
             except Exception:
-                pass
+                verdict_data = {}
 
         manifest_path = root / "evidence" / "EVIDENCE_MANIFEST.json"
         state_path = root / "controls" / "ACTIVE_STATE.json"
@@ -1585,7 +1624,7 @@ def _advance_gate_atomic_locked(
             parent_dir.mkdir(parents=True, exist_ok=True)
             if not os.access(parent_dir, os.W_OK):
                 try:
-                    os.chmod(str(parent_dir), 0o755)
+                    _safe_chmod(parent_dir, 0o755)
                 except OSError:
                     pass
 
@@ -1615,25 +1654,16 @@ def _advance_gate_atomic_locked(
             if not master_seal_path.is_symlink():
                 task_dir = master_seal_path.parent
                 if task_dir.is_dir() and not os.access(task_dir, os.W_OK):
-                    try:
-                        os.chmod(task_dir, 0o755)
-                    except OSError:
-                        pass
+                    _safe_chmod(task_dir, 0o755)
                 if master_seal_path.exists():
-                    try:
-                        os.chmod(master_seal_path, 0o644)
-                    except OSError:
-                        pass
+                    _safe_chmod(master_seal_path, 0o644)
                 seal_bytes = (json.dumps(seal_record, indent=2, sort_keys=True) + "\n").encode("utf-8")
                 m_fd = os.open(master_seal_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
                 try:
                     os.write(m_fd, seal_bytes)
                 finally:
                     os.close(m_fd)
-                try:
-                    os.chmod(master_seal_path, 0o444)
-                except OSError:
-                    pass
+                _safe_chmod(master_seal_path, 0o444)
                 journal.record_staged_write(master_seal_path)
 
             # Write Phase-3/seal.json copy for phase-level visibility
@@ -1642,24 +1672,15 @@ def _advance_gate_atomic_locked(
                 p3_seal_path = p3_dir / "seal.json"
                 if not p3_seal_path.is_symlink():
                     if not os.access(p3_dir, os.W_OK):
-                        try:
-                            os.chmod(p3_dir, 0o755)
-                        except OSError:
-                            pass
+                        _safe_chmod(p3_dir, 0o755)
                     if p3_seal_path.exists():
-                        try:
-                            os.chmod(p3_seal_path, 0o644)
-                        except OSError:
-                            pass
+                        _safe_chmod(p3_seal_path, 0o644)
                     p3_fd = os.open(p3_seal_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
                     try:
                         os.write(p3_fd, seal_bytes)
                     finally:
                         os.close(p3_fd)
-                    try:
-                        os.chmod(p3_seal_path, 0o444)
-                    except OSError:
-                        pass
+                    _safe_chmod(p3_seal_path, 0o444)
                     journal.record_staged_write(p3_seal_path)
 
             # Index seal downstream in EVIDENCE_MANIFEST.json
@@ -1699,7 +1720,7 @@ def _advance_gate_atomic_locked(
         parent_is_ro = not os.access(parent_dir, os.W_OK)
         if parent_is_ro:
             try:
-                os.chmod(str(parent_dir), 0o755)
+                _safe_chmod(parent_dir, 0o755)
             except OSError:
                 pass
 
@@ -1764,7 +1785,7 @@ def _advance_gate_atomic_locked(
         # Rollback
         if created_receipt and receipt_path.exists():
             try:
-                receipt_path.chmod(0o644)
+                _safe_chmod(receipt_path, 0o644)
                 receipt_path.unlink()
             except Exception:
                 pass
@@ -1902,8 +1923,13 @@ def handle_audit_verdict(
             save_active_state(root, state)
 
         # Initialize next attempt Phase-1 directory
-        next_phase1 = resolve_task_attempt_dir(root, task_id, next_attempt) / "Phase-1"
-        next_phase1.mkdir(parents=True, exist_ok=True)
+        next_attempt_dir = resolve_task_attempt_dir(root, task_id, next_attempt)
+        next_phase1 = next_attempt_dir / "Phase-1"
+        if next_phase1.is_symlink() or next_attempt_dir.is_symlink():
+            raise GateError("Security policy violation: Attempt directory components cannot be symbolic links.")
+        task_root_dir = next_attempt_dir.parent
+        with controlled_write_transaction(task_root_dir):
+            next_phase1.mkdir(parents=True, exist_ok=True)
 
         return {
             "action": "ATTEMPT_INCREMENTED",

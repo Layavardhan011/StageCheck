@@ -35,9 +35,15 @@ from stagecheck.core.paths import (
     PathOutsideBoundaryError,
     PathTraversalError,
     SymlinkPathEscapeError,
+    read_bytes_nofollow,
     validate_attempt_root_symlinks,
 )
-from stagecheck.core.permissions import controlled_write_transaction, elevate_permissions_for_teardown
+from stagecheck.core.permissions import (
+    _safe_chmod,
+    controlled_write_transaction,
+    elevate_permissions_for_teardown,
+)
+from stagecheck.core.utils import load_json_file
 
 
 class SealingError(Exception):
@@ -183,7 +189,7 @@ def compute_attempt_merkle_seal(
                     p_vdata: Dict[str, Any] = {"result": "FAILED", "note": "Unsealed failed prior attempt"}
                     if p_vfile.is_file() and not os.path.islink(p_vfile):
                         try:
-                            p_vdata = json.loads(p_vfile.read_text(encoding="utf-8"))
+                            p_vdata = load_json_file(p_vfile)
                         except Exception:
                             pass
                     p_seal_rec = compute_attempt_merkle_seal(
@@ -246,16 +252,10 @@ def compute_attempt_merkle_seal(
         if os.path.islink(seal_file):
             raise SymlinkInEvidenceError(f"Target seal file '{seal_file}' is a symbolic link.")
         # Ensure parent directory is writable to create or overwrite seal.json
-        try:
-            os.chmod(attempt_path, 0o755)
-        except OSError:
-            pass
+        _safe_chmod(attempt_path, 0o755)
 
         if seal_file.exists():
-            try:
-                os.chmod(seal_file, 0o644)
-            except OSError:
-                pass
+            _safe_chmod(seal_file, 0o644)
 
         seal_bytes = (json.dumps(seal_record, indent=2, sort_keys=True) + "\n").encode("utf-8")
         out_fd = os.open(seal_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
@@ -263,10 +263,7 @@ def compute_attempt_merkle_seal(
             os.write(out_fd, seal_bytes)
         finally:
             os.close(out_fd)
-        try:
-            os.chmod(seal_file, 0o444)
-        except OSError:
-            pass
+        _safe_chmod(seal_file, 0o444)
 
     return seal_record
 
@@ -366,9 +363,11 @@ def verify_attempt_merkle_seal(
 
     # Cross-check verdict against Phase-3/verdict.json if present
     verdict_file = attempt_path / "Phase-3" / "verdict.json"
-    if verdict_file.is_file():
+    if verdict_file.is_symlink():
+        violations.append(f"Security policy violation: Phase-3/verdict.json is a symlink: '{verdict_file}'.")
+    elif verdict_file.is_file():
         try:
-            disk_verdict = json.loads(verdict_file.read_text(encoding="utf-8"))
+            disk_verdict = load_json_file(verdict_file)
             if seal_data.get("verdict") != disk_verdict:
                 violations.append("Seal verdict metadata diverges from Phase-3/verdict.json.")
         except Exception as err:
@@ -376,16 +375,18 @@ def verify_attempt_merkle_seal(
 
     # Cross-check EVIDENCE_MANIFEST.json if indexed for this task/attempt
     manifest_file = ws_root / "evidence" / "EVIDENCE_MANIFEST.json"
-    if manifest_file.is_file():
+    if manifest_file.is_symlink():
+        violations.append(f"Security policy violation: evidence/EVIDENCE_MANIFEST.json is a symlink: '{manifest_file}'.")
+    elif manifest_file.is_file():
         try:
-            manifest_data = json.loads(manifest_file.read_text(encoding="utf-8"))
+            manifest_data = load_json_file(manifest_file)
             indexed = (
                 manifest_data.get("sealed_tasks", {})
                 .get(expected_task_id, {})
                 .get(f"attempt_{expected_attempt}")
             )
             if indexed is not None:
-                actual_seal_sha = hashlib.sha256(seal_file.read_bytes()).hexdigest()
+                actual_seal_sha = hashlib.sha256(read_bytes_nofollow(seal_file)).hexdigest()
                 if indexed.get("seal_sha256") != actual_seal_sha:
                     violations.append("EVIDENCE_MANIFEST.json seal_sha256 does not match seal.json.")
                 if indexed.get("merkle_root_sha256") != expected_merkle_root:
@@ -424,16 +425,20 @@ def index_seal_in_manifest(
     """
     ws = Path(workspace_root).resolve()
     manifest_file = ws / "evidence" / "EVIDENCE_MANIFEST.json"
+    if manifest_file.parent.is_symlink():
+        raise SealingError(f"Security policy violation: evidence directory '{manifest_file.parent}' cannot be a symbolic link.")
     manifest_file.parent.mkdir(parents=True, exist_ok=True)
 
     seal_file = resolve_task_attempt_dir(ws, task_id, attempt_index) / "seal.json"
-    seal_bytes = seal_file.read_bytes()
+    seal_bytes = read_bytes_nofollow(seal_file)
     seal_sha256 = hashlib.sha256(seal_bytes).hexdigest()
 
     with controlled_write_transaction(manifest_file.parent):
+        if manifest_file.is_symlink():
+            raise SealingError(f"Security policy violation: Refusing to read symlinked EVIDENCE_MANIFEST.json '{manifest_file}'.")
         if manifest_file.is_file():
             try:
-                manifest_data = json.loads(manifest_file.read_text(encoding="utf-8"))
+                manifest_data = load_json_file(manifest_file)
                 if not isinstance(manifest_data, dict):
                     raise SealingError("EVIDENCE_MANIFEST.json root must be a JSON object.")
             except Exception as err:
@@ -459,15 +464,15 @@ def index_seal_in_manifest(
                 "indexed_at": datetime.now(timezone.utc).isoformat(),
             }
 
-        temp_manifest = manifest_file.with_suffix(".tmp")
-        temp_manifest.write_text(json.dumps(manifest_data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        from stagecheck.core.paths import write_text_nofollow
+        if manifest_file.exists():
+            try:
+                _safe_chmod(manifest_file, 0o644)
+            except OSError:
+                pass
+        write_text_nofollow(manifest_file, json.dumps(manifest_data, indent=2, sort_keys=True) + "\n", append=False, mode=0o444)
         try:
-            os.chmod(temp_manifest, 0o444)
-        except OSError:
-            pass
-        temp_manifest.replace(manifest_file)
-        try:
-            os.chmod(manifest_file, 0o444)
+            _safe_chmod(manifest_file, 0o444)
         except OSError:
             pass
 

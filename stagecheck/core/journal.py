@@ -29,8 +29,8 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 from stagecheck.core.locking import LockCollisionError, acquire_runtime_lock
 from stagecheck.core.paths import StageCheckPathError, safe_resolve, write_text_nofollow
-from stagecheck.core.paths import StageCheckPathError, safe_resolve
 from stagecheck.core.permissions import (
+    _safe_chmod,
     apply_at_rest_permissions,
     elevate_permissions_for_teardown,
 )
@@ -101,7 +101,7 @@ class TransactionJournal:
             raise JournalError(f"Unsafe journal path rejected: {err}") from err
         # Ensure directory permissions are 0700
         try:
-            os.chmod(self.journal_dir, 0o700)
+            _safe_chmod(self.journal_dir, 0o700)
         except OSError:
             pass
 
@@ -290,7 +290,7 @@ def _restore_pre_images(
                 raise JournalError(f"Symlink ancestor '{curr}' rejected during journal rollback.")
             if curr.exists():
                 with suppress(OSError):
-                    os.chmod(curr, 0o755)
+                    _safe_chmod(curr, 0o755)
             curr = curr.parent
 
         if content is None:
@@ -305,7 +305,7 @@ def _restore_pre_images(
                         f"Refusing to unlink symlink or directory '{rel_path}' during rollback."
                     )
                 with suppress(OSError):
-                    os.chmod(full_path, 0o644)
+                    _safe_chmod(full_path, 0o644)
                 full_path.unlink(missing_ok=True)
                 removed.append(canonical_rel)
         else:
@@ -321,7 +321,7 @@ def _restore_pre_images(
                         f"Refusing to overwrite symlink or directory '{rel_path}' during rollback."
                     )
                 with suppress(OSError):
-                    os.chmod(full_path, 0o644)
+                    _safe_chmod(full_path, 0o644)
 
             payload = base64.b64decode(content.encode("ascii")) if encoding == "base64" else content.encode("utf-8")
             flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
@@ -334,7 +334,7 @@ def _restore_pre_images(
             with os.fdopen(fd, "wb") as stream:
                 stream.write(payload)
             with suppress(OSError):
-                os.chmod(full_path, mode)
+                _safe_chmod(full_path, mode)
             restored.append(canonical_rel)
 
     return restored, removed

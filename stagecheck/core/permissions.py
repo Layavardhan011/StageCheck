@@ -187,6 +187,8 @@ def log_teardown_audit_event(
     """Append structured teardown record to evidence/teardown.log and stop Sentinel daemon."""
     root = Path(workspace_root).resolve()
     evidence_dir = root / "evidence"
+    if evidence_dir.is_symlink():
+        raise PermissionError(f"Security policy violation: evidence directory '{evidence_dir}' cannot be a symbolic link.")
     evidence_dir.mkdir(parents=True, exist_ok=True)
     teardown_log = evidence_dir / "teardown.log"
 
@@ -195,16 +197,20 @@ def log_teardown_audit_event(
     sentinel_pid_file = root / ".stagecheck_sentinel.pid"
     if sentinel_pid_file.is_file() and not sentinel_pid_file.is_symlink():
         try:
-            pid_str = sentinel_pid_file.read_text(encoding="utf-8").strip()
+            from stagecheck.core.paths import read_bytes_nofollow
+            pid_raw = read_bytes_nofollow(sentinel_pid_file, max_bytes=64)
+            pid_str = pid_raw.decode("utf-8", errors="replace").strip()
             if pid_str.isdigit():
                 cand_pid = int(pid_str)
                 if cand_pid > 1:
-                    sentinel_pid = cand_pid
-                    import signal
-                    try:
-                        os.kill(sentinel_pid, signal.SIGTERM)
-                    except OSError:
-                        pass
+                    from stagecheck.core.sentinel import _is_sentinel_process
+                    if _is_sentinel_process(cand_pid):
+                        sentinel_pid = cand_pid
+                        import signal
+                        try:
+                            os.kill(sentinel_pid, signal.SIGTERM)
+                        except OSError:
+                            pass
             sentinel_pid_file.unlink(missing_ok=True)
         except Exception:
             pass
@@ -246,6 +252,17 @@ def log_teardown_audit_event(
     return teardown_log
 
 
+def _safe_chmod(path: Union[str, Path], mode: int) -> None:
+    """Apply chmod without following symbolic links (SEC-15)."""
+    p = Path(path)
+    if p.is_symlink():
+        return
+    try:
+        os.chmod(str(p), mode, follow_symlinks=False)
+    except (OSError, NotImplementedError):
+        pass
+
+
 def apply_at_rest_permissions(workspace_root: Union[str, Path]) -> None:
     """Apply standard defense-in-depth security modes across controls and evidence.
 
@@ -264,34 +281,34 @@ def apply_at_rest_permissions(workspace_root: Union[str, Path]) -> None:
     if controls_dir.is_dir() and not controls_dir.is_symlink():
         # First ensure directory is writable so we can chmod files inside it
         try:
-            os.chmod(str(controls_dir), MODE_DIR_RW)
+            _safe_chmod(controls_dir, MODE_DIR_RW)
             for item in controls_dir.iterdir():
                 if item.is_symlink():
                     continue
                 if item.is_file():
                     if item.name.endswith(".lock"):
-                        os.chmod(str(item), 0o600)
+                        _safe_chmod(item, 0o600)
                     else:
-                        os.chmod(str(item), MODE_FILE_RO)
+                        _safe_chmod(item, MODE_FILE_RO)
         finally:
-            os.chmod(str(controls_dir), MODE_DIR_RO)
+            _safe_chmod(controls_dir, MODE_DIR_RO)
 
     # 2. Protect evidence/
     if evidence_dir.is_dir() and not evidence_dir.is_symlink():
         try:
-            os.chmod(str(evidence_dir), MODE_DIR_RW)
+            _safe_chmod(evidence_dir, MODE_DIR_RW)
             if tasks_dir.is_dir() and not tasks_dir.is_symlink():
-                os.chmod(str(tasks_dir), MODE_DIR_RW)
+                _safe_chmod(tasks_dir, MODE_DIR_RW)
             for item in evidence_dir.iterdir():
                 if item.is_symlink():
                     continue
                 if item.is_file():
                     if item.name.startswith("sentinel"):
-                        os.chmod(str(item), MODE_FILE_RW)
+                        _safe_chmod(item, MODE_FILE_RW)
                     else:
-                        os.chmod(str(item), MODE_FILE_RO)
+                        _safe_chmod(item, MODE_FILE_RO)
         finally:
-            os.chmod(str(evidence_dir), MODE_DIR_RO)
+            _safe_chmod(evidence_dir, MODE_DIR_RO)
 
     # 3. Re-freeze any sealed attempt subtrees (preserve immutability at rest)
     if tasks_dir.is_dir():
@@ -320,7 +337,7 @@ def elevate_permissions_for_teardown(workspace_root: Union[str, Path]) -> None:
         target_dir = root / dir_name
         if target_dir.is_dir() and not target_dir.is_symlink():
             try:
-                os.chmod(str(target_dir), MODE_DIR_RW)
+                _safe_chmod(target_dir, MODE_DIR_RW)
             except OSError:
                 pass
             for item in target_dir.rglob("*"):
@@ -328,9 +345,9 @@ def elevate_permissions_for_teardown(workspace_root: Union[str, Path]) -> None:
                     continue
                 try:
                     if item.is_file():
-                        os.chmod(str(item), MODE_FILE_RW)
+                        _safe_chmod(item, MODE_FILE_RW)
                     elif item.is_dir():
-                        os.chmod(str(item), MODE_DIR_RW)
+                        _safe_chmod(item, MODE_DIR_RW)
                 except OSError:
                     pass
 
@@ -348,13 +365,13 @@ def freeze_phase_directory(phase_dir: Union[str, Path]) -> None:
             continue
         try:
             if item.is_file():
-                os.chmod(str(item), MODE_FILE_RO)
+                _safe_chmod(item, MODE_FILE_RO)
             elif item.is_dir():
-                os.chmod(str(item), MODE_DIR_RO)
+                _safe_chmod(item, MODE_DIR_RO)
         except OSError:
             pass
     try:
-        os.chmod(str(p), MODE_DIR_RO)
+        _safe_chmod(p, MODE_DIR_RO)
     except OSError:
         pass
 
@@ -377,7 +394,7 @@ def controlled_write_transaction(target_dir: Path) -> Generator[None, None, None
     # Check whether the directory itself was read-only
     was_dir_ro = (directory.stat().st_mode & 0o200) == 0
     if was_dir_ro:
-        os.chmod(str(directory), MODE_DIR_RW)
+        _safe_chmod(directory, MODE_DIR_RW)
 
     # Always elevate files in directory to writable so they can be overwritten
     for item in directory.iterdir():
@@ -385,7 +402,7 @@ def controlled_write_transaction(target_dir: Path) -> Generator[None, None, None
             continue
         if item.is_file() and not item.name.endswith(".lock"):
             try:
-                os.chmod(str(item), MODE_FILE_RW)
+                _safe_chmod(item, MODE_FILE_RW)
             except OSError:
                 pass
     try:
@@ -398,13 +415,13 @@ def controlled_write_transaction(target_dir: Path) -> Generator[None, None, None
             if item.is_file() and not item.name.endswith(".lock"):
                 try:
                     if item.name.startswith("sentinel"):
-                        os.chmod(str(item), MODE_FILE_RW)
+                        _safe_chmod(item, MODE_FILE_RW)
                     else:
-                        os.chmod(str(item), MODE_FILE_RO)
+                        _safe_chmod(item, MODE_FILE_RO)
                 except OSError:
                     pass
         if was_dir_ro or directory.name in ("controls", "evidence") or directory.name.startswith("Phase-") or directory.name.startswith("attempt_"):
             try:
-                os.chmod(str(directory), MODE_DIR_RO)
+                _safe_chmod(directory, MODE_DIR_RO)
             except OSError:
                 pass

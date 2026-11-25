@@ -87,16 +87,31 @@ _SECRET_RE = re.compile(
 )
 
 
+def _read_manifest_lower(repo: Path, filename: str) -> str:
+    target = repo / filename
+    if not target.is_file() or target.is_symlink():
+        return ""
+    try:
+        from stagecheck.core.paths import read_bytes_nofollow
+        return read_bytes_nofollow(target, max_bytes=1024 * 1024).decode("utf-8", errors="ignore").lower()
+    except Exception:
+        return ""
+
+
 def _has_blockchain_protocol(ws: Path, repo: Path) -> bool:
     """Detect deterministically whether a repository implements blockchain/MultiversX/DRWA protocol logic."""
     if not repo.is_dir():
         return False
+    from stagecheck.core.paths import read_bytes_nofollow
     for manifest_name in ("go.mod", "Cargo.toml", "package.json", "requirements.txt", "pyproject.toml"):
         mf = repo / manifest_name
         if mf.is_file() and not mf.is_symlink():
-            text = mf.read_text(encoding="utf-8", errors="ignore").lower()
-            if any(m in text for m in _BLOCKCHAIN_MARKERS):
-                return True
+            try:
+                text = read_bytes_nofollow(mf, max_bytes=1024 * 1024).decode("utf-8", errors="ignore").lower()
+                if any(m in text for m in _BLOCKCHAIN_MARKERS):
+                    return True
+            except Exception:
+                pass
     # Also check shallow source indicators for Go/Rust shard/metachain/vm modules
     if (repo / "go.mod").is_file() or (repo / "Cargo.toml").is_file():
         for root_dir, dirs, _ in os.walk(repo):
@@ -110,17 +125,23 @@ def _has_blockchain_protocol(ws: Path, repo: Path) -> bool:
 # Deterministic structural exemption predicates (FR-03 / DEC-026)
 EXEMPTION_PREDICATES: Dict[str, Callable[[Path, Path], bool]] = {
     "PREDICATE_NO_REACT_DEPENDENCY": lambda ws, repo: not (repo / "package.json").is_file()
-    or "react" not in (repo / "package.json").read_text(encoding="utf-8", errors="ignore").lower(),
+    or (repo / "package.json").is_symlink()
+    or "react" not in _read_manifest_lower(repo, "package.json"),
     "PREDICATE_NO_FLASK_DEPENDENCY": lambda ws, repo: not (repo / "requirements.txt").is_file()
-    or "flask" not in (repo / "requirements.txt").read_text(encoding="utf-8", errors="ignore").lower(),
+    or (repo / "requirements.txt").is_symlink()
+    or "flask" not in _read_manifest_lower(repo, "requirements.txt"),
     "PREDICATE_BACKEND_ONLY_REPO": lambda ws, repo: not any(repo.rglob("*.tsx"))
     and not any(repo.rglob("*.jsx")),
-    "PREDICATE_NO_NODE_PACKAGE": lambda ws, repo: not (repo / "package.json").is_file(),
-    "PREDICATE_NO_PYTHON_PACKAGE": lambda ws, repo: not (repo / "requirements.txt").is_file()
-    and not (repo / "pyproject.toml").is_file(),
-    "PREDICATE_NO_GO_MODULE": lambda ws, repo: not (repo / "go.mod").is_file(),
-    "PREDICATE_NO_RUST_CRATE": lambda ws, repo: not (repo / "Cargo.toml").is_file(),
-    "PREDICATE_NO_DOCKER": lambda ws, repo: not (repo / "Dockerfile").is_file(),
+    "PREDICATE_NO_NODE_PACKAGE": lambda ws, repo: not (repo / "package.json").is_file()
+    or (repo / "package.json").is_symlink(),
+    "PREDICATE_NO_PYTHON_PACKAGE": lambda ws, repo: (not (repo / "requirements.txt").is_file() or (repo / "requirements.txt").is_symlink())
+    and (not (repo / "pyproject.toml").is_file() or (repo / "pyproject.toml").is_symlink()),
+    "PREDICATE_NO_GO_MODULE": lambda ws, repo: not (repo / "go.mod").is_file()
+    or (repo / "go.mod").is_symlink(),
+    "PREDICATE_NO_RUST_CRATE": lambda ws, repo: not (repo / "Cargo.toml").is_file()
+    or (repo / "Cargo.toml").is_symlink(),
+    "PREDICATE_NO_DOCKER": lambda ws, repo: not (repo / "Dockerfile").is_file()
+    or (repo / "Dockerfile").is_symlink(),
     "PREDICATE_NO_BLOCKCHAIN_PROTOCOL": lambda ws, repo: not _has_blockchain_protocol(ws, repo),
 }
 
@@ -247,7 +268,7 @@ def _get_raw_matrix_entries(force_reload: bool = False) -> List[Dict[str, Any]]:
     ):
         return _MATRIX_CACHE
 
-    data = json.loads(matrix_path.read_text(encoding="utf-8"))
+    data = load_json_file(matrix_path)
     if not isinstance(data, list):
         raise ValueError(
             f"Audit matrix integrity error: expected JSON list in '{matrix_path}', found {type(data).__name__}."
@@ -331,10 +352,15 @@ def load_270_rule_catalog() -> List[RubricRule]:
 
     for domain_name, filename in manuals:
         filepath = instr_dir / filename
-        if not filepath.is_file():
-            raise FileNotFoundError(f"Missing required rubric manual: '{filename}'.")
+        if not filepath.is_file() or filepath.is_symlink():
+            raise FileNotFoundError(f"Missing or symlinked required rubric manual: '{filename}'.")
 
-        lines = filepath.read_text(encoding="utf-8").splitlines()
+        try:
+            from stagecheck.core.paths import read_bytes_nofollow
+            raw = read_bytes_nofollow(filepath, max_bytes=5 * 1024 * 1024)
+            lines = raw.decode("utf-8", errors="replace").splitlines()
+        except OSError as err:
+            raise FileNotFoundError(f"Cannot securely read rubric manual '{filename}': {err}") from err
         current_rule_id = ""
         current_title = ""
         current_question = ""
@@ -1704,20 +1730,26 @@ def _scan_dependencies(repo_dir: Path) -> List[str]:
     unpinned: List[str] = []
     req_file = repo_dir / "requirements.txt"
     if req_file.is_file() and not req_file.is_symlink():
-        for raw in req_file.read_text(encoding="utf-8", errors="ignore").splitlines():
-            line = raw.split("#", 1)[0].strip()
-            if not line or line.startswith(("-r", "--", "-e")):
-                continue
-            m = _PIN_SPEC_RE.match(line)
-            if m:
-                op = m.group(2)
-                if op != "==":
-                    unpinned.append(f"{repo_dir.name}/{req_file.name}: {line}")
+        try:
+            from stagecheck.core.paths import read_bytes_nofollow
+            raw_bytes = read_bytes_nofollow(req_file, max_bytes=1024 * 1024)
+            for raw in raw_bytes.decode("utf-8", errors="ignore").splitlines():
+                line = raw.split("#", 1)[0].strip()
+                if not line or line.startswith(("-r", "--", "-e")):
+                    continue
+                m = _PIN_SPEC_RE.match(line)
+                if m:
+                    op = m.group(2)
+                    if op != "==":
+                        unpinned.append(f"{repo_dir.name}/{req_file.name}: {line}")
+        except Exception:
+            pass
 
     pkg_file = repo_dir / "package.json"
     if pkg_file.is_file() and not pkg_file.is_symlink():
         try:
-            pkg = json.loads(pkg_file.read_text(encoding="utf-8", errors="ignore"))
+            from stagecheck.core.utils import load_json_file
+            pkg = load_json_file(pkg_file)
             for section in ("dependencies", "devDependencies"):
                 deps = pkg.get(section)
                 if isinstance(deps, dict):
@@ -1857,7 +1889,8 @@ def _analyze_python_repo_files(
             try:
                 if fpath.stat().st_size > 512 * 1024:
                     continue
-                src = fpath.read_text(encoding="utf-8", errors="ignore")
+                from stagecheck.core.paths import read_bytes_nofollow
+                src = read_bytes_nofollow(fpath, max_bytes=512 * 1024).decode("utf-8", errors="ignore")
             except OSError:
                 continue
 
@@ -2221,8 +2254,13 @@ def _collect_rubric_context(
                             except ValueError:
                                 symlink_escapes.append(ws_rel)
                         if fpath.is_file() and not fpath.is_symlink() and fpath.stat().st_size <= 1024 * 1024:
-                            if _SECRET_RE.search(fpath.read_text(encoding="utf-8", errors="ignore")):
-                                secrets_found.append(ws_rel)
+                            try:
+                                from stagecheck.core.paths import read_bytes_nofollow
+                                raw = read_bytes_nofollow(fpath, max_bytes=1024 * 1024)
+                                if _SECRET_RE.search(raw.decode("utf-8", errors="ignore")):
+                                    secrets_found.append(ws_rel)
+                            except Exception:
+                                pass
                 # Priority: attempt repo_baseline.json > PRODUCT_REPOSITORIES.json baseline_head
                 base_sha = None
                 baseline_file = attempt_dir / "repo_baseline.json"
@@ -2249,7 +2287,7 @@ def _collect_rubric_context(
                             if declared_scope and not is_path_in_scope(ws_rel, declared_scope):
                                 if ws_rel not in out_of_scope_files:
                                     out_of_scope_files.append(ws_rel)
-                    diff_patch = run_safe_git(r_dir, ["diff", "-U0", f"{base_sha}..{cur_sha}"])
+                    diff_patch = run_safe_git(r_dir, ["diff", "-U0", "--end-of-options", f"{base_sha}..{cur_sha}", "--"])
                     if diff_patch.returncode == 0:
                         for dline in diff_patch.stdout.splitlines():
                             if dline.startswith("-") and not dline.startswith("---") and ("assert" in dline or "pytest.raises" in dline):
@@ -3771,11 +3809,24 @@ def update_rubric_artifacts(
     task_id = rubric_payload["task_id"]
     attempt = rubric_payload["attempt"]
 
-    p2a_dir = resolve_task_attempt_dir(root, task_id, attempt) / "Phase-2A"
-    p2a_dir.mkdir(parents=True, exist_ok=True)
+    attempt_dir = resolve_task_attempt_dir(root, task_id, attempt)
+    p2a_dir = attempt_dir / "Phase-2A"
+    if p2a_dir.is_symlink():
+        raise RubricEvaluationError(f"Refusing to save rubric evaluation to symlinked directory '{p2a_dir}'.")
+    is_ro = attempt_dir.is_dir() and not os.access(attempt_dir, os.W_OK)
+    if is_ro:
+        from stagecheck.core.permissions import _safe_chmod
+        _safe_chmod(attempt_dir, 0o755)
+    try:
+        p2a_dir.mkdir(parents=True, exist_ok=True)
+    finally:
+        if is_ro:
+            from stagecheck.core.permissions import _safe_chmod
+            _safe_chmod(attempt_dir, 0o555)
 
     rubric_file = p2a_dir / "rubric_evaluation.json"
-    rubric_file.write_text(pretty_json_dumps(rubric_payload, indent=2), encoding="utf-8")
+    from stagecheck.core.paths import write_text_nofollow
+    write_text_nofollow(rubric_file, pretty_json_dumps(rubric_payload, indent=2), append=False, mode=0o644)
 
     review_file = p2a_dir / "pre_commit_review.json"
     updated_review = None
@@ -3817,7 +3868,7 @@ def update_rubric_artifacts(
                             f"{rubric_payload.get('expected_rule_count', 270)}) cannot authorize approval."
                         ),
                     })
-            review_file.write_text(pretty_json_dumps(rev_data, indent=2), encoding="utf-8")
+            write_text_nofollow(review_file, pretty_json_dumps(rev_data, indent=2), append=False, mode=0o644)
             updated_review = review_file
         except (SerializationError, JSONParseError):
             raise

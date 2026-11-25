@@ -112,10 +112,10 @@ def run_stage8_rerun(ctx: AuditContext) -> StageResult:
         repos_root = (ctx.workspace_root / "repos").resolve()
         qual_root_rel = "evals"
         qual_config_path = ctx.workspace_root / "controls" / "QUALIFICATION_ROOT.json"
-        if qual_config_path.is_file():
+        if qual_config_path.is_file() and not qual_config_path.is_symlink():
             try:
-                with open(qual_config_path, "r", encoding="utf-8") as f:
-                    qual_data = json.load(f)
+                from stagecheck.core.utils import load_json_file
+                qual_data = load_json_file(qual_config_path)
                 qual_root_rel = qual_data.get("qualification_root", "evals")
             except Exception:
                 pass

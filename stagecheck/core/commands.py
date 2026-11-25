@@ -126,29 +126,31 @@ def build_sanitized_environment(
             if not any(sub in var.upper() for sub in SENSITIVE_ENV_SUBSTRINGS):
                 clean[var] = val
 
-    # Enforce bytecode suppression and ephemeral sandbox HOME
+    # Enforce bytecode suppression and ephemeral sandbox HOME and TMPDIR
     clean["PYTHONDONTWRITEBYTECODE"] = "1"
     clean["HOME"] = "/tmp"
+    clean["TMPDIR"] = "/tmp"
 
-    # Auto-discover GOROOT, GOPATH, and GOMODCACHE if missing from environment and go binary exists
+    # Auto-discover GOROOT, GOPATH, and GOMODCACHE with minimal environment (SEC-13)
     if shutil.which("go"):
+        minimal_go_env = {"PATH": os.environ.get("PATH", ""), "HOME": "/tmp"}
         if "GOROOT" not in clean:
             try:
-                res = subprocess.run(["go", "env", "GOROOT"], capture_output=True, text=True, timeout=5)
+                res = subprocess.run(["go", "env", "GOROOT"], env=minimal_go_env, capture_output=True, text=True, timeout=5)
                 if res.returncode == 0 and res.stdout.strip():
                     clean["GOROOT"] = res.stdout.strip()
             except Exception:
                 pass
         if "GOPATH" not in clean:
             try:
-                res = subprocess.run(["go", "env", "GOPATH"], capture_output=True, text=True, timeout=5)
+                res = subprocess.run(["go", "env", "GOPATH"], env=minimal_go_env, capture_output=True, text=True, timeout=5)
                 if res.returncode == 0 and res.stdout.strip():
                     clean["GOPATH"] = res.stdout.strip()
             except Exception:
                 pass
         if "GOMODCACHE" not in clean:
             try:
-                res = subprocess.run(["go", "env", "GOMODCACHE"], capture_output=True, text=True, timeout=5)
+                res = subprocess.run(["go", "env", "GOMODCACHE"], env=minimal_go_env, capture_output=True, text=True, timeout=5)
                 if res.returncode == 0 and res.stdout.strip():
                     clean["GOMODCACHE"] = res.stdout.strip()
             except Exception:
@@ -384,14 +386,16 @@ def resolve_runner_category(binary_name: str) -> Optional[str]:
 
 def validate_npm_package_json(cwd: Path, target_script: str) -> None:
     """Validate package.json existence, JSON format, required 'test' script, and target script."""
+    from stagecheck.core.utils import load_json_file
+
     pkg_file = cwd / "package.json"
-    if not pkg_file.is_file():
+    if not pkg_file.is_file() or pkg_file.is_symlink():
         raise InvalidPackageJsonError(
-            f"Security policy violation [PACKAGE_JSON_MISSING]: package.json not found in '{cwd}'.",
+            f"Security policy violation [PACKAGE_JSON_MISSING]: package.json not found or symlinked in '{cwd}'.",
             exit_code=126,
         )
     try:
-        data = json.loads(pkg_file.read_text(encoding="utf-8"))
+        data = load_json_file(pkg_file)
     except Exception as err:
         raise InvalidPackageJsonError(
             f"Security policy violation [PACKAGE_JSON_MALFORMED]: package.json in '{cwd}' is invalid JSON: {err}",
@@ -487,6 +491,17 @@ def validate_command_security(argv: List[str], cwd: Optional[Path] = None) -> No
                     f"Security policy violation [UNTRUSTED_BINARY_PATH]: Runner resolves inside working directory '{resolved_bin}'.",
                     exit_code=126,
                 )
+            try:
+                from stagecheck.core.paths import find_workspace_root
+                ws_root = find_workspace_root(cwd_resolved)
+                if ws_root and resolved_path.is_relative_to(ws_root.resolve()):
+                    raise ForbiddenCommandFlagError(
+                        f"Security policy violation [UNTRUSTED_BINARY_PATH]: Runner resolves inside workspace root '{resolved_bin}'.",
+                        exit_code=126,
+                    )
+            except Exception as e:
+                if isinstance(e, ForbiddenCommandFlagError):
+                    raise
 
     args = argv[1:]
     sep_idx = args.index("--") if "--" in args else len(args)
@@ -781,10 +796,16 @@ def execute_secure_command(
 
     # Persist logs if requested
     if log_dir:
-        log_path = Path(log_dir).resolve()
+        raw_log_path = Path(log_dir)
+        if raw_log_path.is_symlink():
+            raise CommandSecurityError(f"Refusing to write execution logs to symlinked directory '{log_dir}'.")
+        log_path = raw_log_path.resolve()
+        if log_path.is_symlink():
+            raise CommandSecurityError(f"Refusing to write execution logs to symlinked directory '{log_path}'.")
         log_path.mkdir(parents=True, exist_ok=True)
-        (log_path / "stdout.log").write_text(stdout_str, encoding="utf-8")
-        (log_path / "stderr.log").write_text(stderr_str, encoding="utf-8")
+        from stagecheck.core.paths import write_text_nofollow
+        write_text_nofollow(log_path / "stdout.log", stdout_str, append=False, mode=0o644)
+        write_text_nofollow(log_path / "stderr.log", stderr_str, append=False, mode=0o644)
 
     record = CommandExecutionRecord(
         command_argv=argv,

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from stagecheck.core.git import RepoBaseline
+from stagecheck.core.paths import write_text_nofollow
 from stagecheck.core.start_manifest import generate_start_manifest
 from stagecheck.core.utils import (
     canonical_json_dumps,
@@ -310,6 +311,8 @@ def scaffold_agent_instructions(
     """Scaffold instructions/ directory and role instruction markdown files (Specs 03, 08)."""
     root = Path(workspace_root).resolve()
     instructions_dir = root / "instructions"
+    if instructions_dir.is_symlink():
+        raise ScaffoldingError(f"Security policy violation: instructions directory '{instructions_dir}' cannot be a symbolic link.")
     instructions_dir.mkdir(parents=True, exist_ok=True)
 
     norm_a1 = validate_agent_slug(agent1_name.strip().lower())
@@ -396,7 +399,7 @@ def scaffold_agent_instructions(
                 f"- MUST NOT modify control descriptors in `controls/*` or edit `.stagecheck.lock`.\n"
                 f"- MUST NOT alter Gitleaks configuration or create `.gitleaksignore` override files.\n"
             )
-            single_path.write_text(single_content, encoding="utf-8")
+            write_text_nofollow(single_path, single_content, append=False, mode=0o644)
         paths[single_path.name] = single_path
     else:
         # Dual-agent separate instructions
@@ -407,7 +410,7 @@ def scaffold_agent_instructions(
                 f"Role: `prompt_and_audit`.\n\n"
                 + DEFAULT_AGENT1_INSTRUCTIONS_MD[DEFAULT_AGENT1_INSTRUCTIONS_MD.find("## Purpose"):]
             )
-            a1_path.write_text(a1_content, encoding="utf-8")
+            write_text_nofollow(a1_path, a1_content, append=False, mode=0o644)
         paths[a1_path.name] = a1_path
 
         a2_path = instructions_dir / f"{norm_a2}_code_implementation.md"
@@ -417,7 +420,7 @@ def scaffold_agent_instructions(
                 f"Role: `code_implementation`.\n\n"
                 + DEFAULT_AGENT2_INSTRUCTIONS_MD[DEFAULT_AGENT2_INSTRUCTIONS_MD.find("## Purpose"):]
             )
-            a2_path.write_text(a2_content, encoding="utf-8")
+            write_text_nofollow(a2_path, a2_content, append=False, mode=0o644)
         paths[a2_path.name] = a2_path
 
     return paths
@@ -431,6 +434,8 @@ def scaffold_task_plan(
     """Scaffold initial specs/TASK_PLAN.json roadmap (Specs 04, 10 / GAP-05)."""
     root = Path(workspace_root).resolve()
     specs_dir = root / "specs"
+    if specs_dir.is_symlink():
+        raise ScaffoldingError(f"Security policy violation: specs directory '{specs_dir}' cannot be a symbolic link.")
     specs_dir.mkdir(parents=True, exist_ok=True)
 
     plan_file = specs_dir / "TASK_PLAN.json"
@@ -462,9 +467,7 @@ def scaffold_task_plan(
                 }
             ],
         }
-        tmp_plan = specs_dir / ".TASK_PLAN.json.tmp"
-        tmp_plan.write_text(deterministic_json_dumps(initial_plan), encoding="utf-8")
-        os.replace(str(tmp_plan), str(plan_file))
+        write_text_nofollow(plan_file, deterministic_json_dumps(initial_plan), append=False, mode=0o644)
 
     return plan_file
 
@@ -486,6 +489,8 @@ def reconcile_specs_directory(
     """
     root = Path(workspace_root).resolve()
     specs_dir = root / "specs"
+    if specs_dir.is_symlink():
+        raise ScaffoldingError(f"Security policy violation: specs directory '{specs_dir}' cannot be a symbolic link.")
     specs_dir.mkdir(parents=True, exist_ok=True)
 
     reconciled_paths: Dict[str, Path] = {}
@@ -506,9 +511,7 @@ def reconcile_specs_directory(
             "## 1. System Overview\nDocument core system modules and execution boundaries.\n\n"
             "## 2. Protocol Invariants\nDefine non-negotiable blockchain and security invariants.\n"
         )
-        tmp_arch = specs_dir / ".ARCHITECTURE.md.tmp"
-        tmp_arch.write_text(arch_content, encoding="utf-8")
-        os.replace(str(tmp_arch), str(arch_file))
+        write_text_nofollow(arch_file, arch_content, append=False, mode=0o644)
     reconciled_paths["ARCHITECTURE.md"] = arch_file
 
     # 3. Handle START_MANIFEST.md
@@ -653,6 +656,8 @@ def reconcile_controls(
     """
     root = Path(workspace_root).resolve()
     controls_dir = root / "controls"
+    if controls_dir.is_symlink():
+        raise ScaffoldingError(f"controls directory cannot be a symbolic link: '{controls_dir}'")
     controls_dir.mkdir(parents=True, exist_ok=True)
 
     descriptors = build_control_descriptors(
@@ -667,14 +672,17 @@ def reconcile_controls(
     for filename, content in descriptors.items():
         file_path = controls_dir / filename
         if not file_path.exists():
-            file_path.write_text(content, encoding="utf-8")
+            write_text_nofollow(file_path, content, append=False, mode=0o644)
             if filename.endswith(".json"):
                 data = json.loads(content)
                 validate_control_descriptor(filename, data)
         reconciled_paths[filename] = file_path
 
     # Ensure qualification directory (evals) is scaffolded
-    (root / "evals").mkdir(parents=True, exist_ok=True)
+    evals_dir = root / "evals"
+    if evals_dir.is_symlink():
+        raise ScaffoldingError(f"Security policy violation: evals directory '{evals_dir}' cannot be a symbolic link.")
+    evals_dir.mkdir(parents=True, exist_ok=True)
 
     return reconciled_paths
 
@@ -741,6 +749,8 @@ def scaffold_controls_atomic(
                 fault_injector(filename)
 
         # 2. Commit transaction: move staged files into controls/
+        if controls_dir.is_symlink():
+            raise ScaffoldingError(f"controls directory cannot be a symbolic link: '{controls_dir}'")
         controls_dir.mkdir(parents=True, exist_ok=True)
         created_in_controls = True
 
@@ -753,7 +763,10 @@ def scaffold_controls_atomic(
             final_paths[filename] = dest_file
 
         # Ensure qualification directory (evals) is scaffolded
-        (root / "evals").mkdir(parents=True, exist_ok=True)
+        evals_dir = root / "evals"
+        if evals_dir.is_symlink():
+            raise ScaffoldingError(f"Security policy violation: evals directory '{evals_dir}' cannot be a symbolic link.")
+        evals_dir.mkdir(parents=True, exist_ok=True)
 
         return final_paths
 
@@ -786,10 +799,12 @@ def scaffold_remotes_config(
 ) -> Path:
     """Scaffold or reconcile controls/remotes.json and optionally approve push URLs."""
     from stagecheck.core.paths import safe_resolve
-    from stagecheck.core.utils import pretty_json_dumps, strict_json_loads
+    from stagecheck.core.utils import load_json_file, pretty_json_dumps, strict_json_loads
 
     root = Path(workspace_root).resolve()
     controls_dir = root / "controls"
+    if controls_dir.is_symlink():
+        raise ScaffoldingError(f"controls directory cannot be a symbolic link: '{controls_dir}'")
     controls_dir.mkdir(parents=True, exist_ok=True)
     remotes_path = safe_resolve("controls/remotes.json", root, allow_symlinks=False)
 
@@ -797,7 +812,10 @@ def scaffold_remotes_config(
     if remotes_path.exists():
         if remotes_path.is_symlink() or not remotes_path.is_file():
             raise ScaffoldingError(f"Unsafe controls/remotes.json path: '{remotes_path}'")
-        parsed = strict_json_loads(remotes_path.read_text(encoding="utf-8"), source=str(remotes_path))
+        try:
+            parsed = load_json_file(remotes_path)
+        except Exception as err:
+            raise ScaffoldingError(f"Failed to read controls/remotes.json: {err}") from err
         if not isinstance(parsed, dict) or not isinstance(parsed.get("approved_push_urls", []), list):
             raise ScaffoldingError("controls/remotes.json must be a JSON object with 'approved_push_urls' list.")
         data = dict(parsed)
@@ -817,9 +835,7 @@ def scaffold_remotes_config(
 
     if changed:
         data["approved_push_urls"] = urls
-        tmp_path = controls_dir / ".remotes.json.tmp"
-        tmp_path.write_text(pretty_json_dumps(data), encoding="utf-8")
-        os.replace(str(tmp_path), str(remotes_path))
+        write_text_nofollow(remotes_path, pretty_json_dumps(data), append=False, mode=0o644)
 
     return remotes_path
 

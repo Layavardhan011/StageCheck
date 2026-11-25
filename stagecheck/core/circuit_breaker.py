@@ -25,7 +25,7 @@ from stagecheck.core.git import run_safe_git
 from stagecheck.core.locking import acquire_runtime_lock
 from stagecheck.core.paths import find_workspace_root, resolve_task_dir
 from stagecheck.core.permissions import controlled_write_transaction
-from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps
+from stagecheck.core.utils import canonical_json_dumps, load_json_file, pretty_json_dumps
 
 MAX_DEFAULT_ATTEMPTS = 3
 
@@ -54,11 +54,10 @@ class CircuitBreakerEvaluation:
 
 def _get_defects_from_verdict(verdict_path: Path) -> Set[str]:
     """Extract set of defect_ids from a verdict.json file."""
-    if not verdict_path.is_file():
+    if not verdict_path.is_file() or verdict_path.is_symlink():
         return set()
     try:
-        with open(verdict_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = load_json_file(verdict_path)
         return {d.get("defect_id") for d in data.get("defects", []) if d.get("defect_id") and d.get("mode") == "blocking"}
     except Exception:
         return set()
@@ -68,28 +67,26 @@ def _detect_timeout_masking(workspace_root: Path, task_id: str, attempt: int) ->
     """Detect if the only code modification made was increasing timeouts or sleep delays."""
     attempt_dir = resolve_task_attempt_dir(workspace_root, task_id, attempt)
     review_file = attempt_dir / "Phase-2A" / "pre_commit_review.json"
-    if not review_file.is_file():
+    if not review_file.is_file() or review_file.is_symlink():
         return False
 
     # Check git diff in touched repositories
     prod_repos_file = workspace_root / "controls" / "PRODUCT_REPOSITORIES.json"
-    if not prod_repos_file.is_file():
+    if not prod_repos_file.is_file() or prod_repos_file.is_symlink():
         return False
 
     baseline_file = attempt_dir / "repo_baseline.json"
     repo_baseline_data: Dict[str, Any] = {}
-    if baseline_file.is_file():
+    if baseline_file.is_file() and not baseline_file.is_symlink():
         try:
-            with open(baseline_file, "r", encoding="utf-8") as bf:
-                loaded_bl = json.load(bf)
-                if isinstance(loaded_bl, dict):
-                    repo_baseline_data = loaded_bl
+            loaded_bl = load_json_file(baseline_file)
+            if isinstance(loaded_bl, dict):
+                repo_baseline_data = loaded_bl
         except Exception:
             repo_baseline_data = {}
 
     try:
-        with open(prod_repos_file, "r", encoding="utf-8") as f:
-            repo_meta = json.load(f).get("repositories", {})
+        repo_meta = load_json_file(prod_repos_file).get("repositories", {})
     except Exception:
         return False
 
@@ -106,7 +103,7 @@ def _detect_timeout_masking(workspace_root: Path, task_id: str, attempt: int) ->
         if not base_head:
             continue
 
-        res = run_safe_git(repo_dir, ["diff", "-U0", f"{base_head}..HEAD"])
+        res = run_safe_git(repo_dir, ["diff", "-U0", "--end-of-options", f"{base_head}..HEAD", "--"])
         if res.returncode != 0:
             continue
 
@@ -245,11 +242,20 @@ def write_escalation_report(
 ) -> Path:
     """Generate diagnostic escalation_report.md under evidence/tasks/<task_id>/."""
     from stagecheck.core.paths import find_workspace_root, resolve_task_dir, safe_resolve, write_text_nofollow
+    from stagecheck.core.permissions import _safe_chmod
     ws_root = Path(workspace_root).resolve()
-    safe_resolve(f"evidence/tasks/{task_id}", ws_root, allow_symlinks=False)
-    task_dir = resolve_task_dir(ws_root, task_id)
-    task_dir.mkdir(parents=True, exist_ok=True)
-    report_file = safe_resolve(f"evidence/tasks/{task_id}/escalation_report.md", ws_root, allow_symlinks=False)
+    evidence_dir = ws_root / "evidence"
+    is_ev_ro = evidence_dir.is_dir() and not os.access(evidence_dir, os.W_OK)
+    if is_ev_ro:
+        _safe_chmod(evidence_dir, 0o755)
+    try:
+        safe_resolve(f"evidence/tasks/{task_id}", ws_root, allow_symlinks=False)
+        task_dir = resolve_task_dir(ws_root, task_id)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        report_file = safe_resolve(f"evidence/tasks/{task_id}/escalation_report.md", ws_root, allow_symlinks=False)
+    finally:
+        if is_ev_ro:
+            _safe_chmod(evidence_dir, 0o555)
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     lines = [
@@ -310,6 +316,8 @@ def trip_circuit_breaker(
     from stagecheck.core.state import load_active_state, save_active_state
 
     controls_dir = workspace_root / "controls"
+    if controls_dir.is_symlink():
+        raise CircuitBreakerError(f"Refusing to trip breaker on symlinked controls directory: '{controls_dir}'")
     controls_dir.mkdir(parents=True, exist_ok=True)
     with acquire_runtime_lock(controls_dir):
         with controlled_write_transaction(controls_dir):
@@ -362,11 +370,19 @@ def reset_circuit_breaker(
         raise ResetAttemptsError("ACTIVE_STATE.json not found in controls directory.")
 
     if require_tty and not confirmed:
-        if not sys.stdin.isatty():
+        if not sys.stdin.isatty() or "pytest" in sys.modules or "unittest" in sys.modules:
             raise ResetAttemptsError(
                 "Non-interactive reset-attempts blocked: resetting circuit breaker requires an "
                 "interactive terminal or explicit human confirmation (--yes)."
             )
+        try:
+            choice = input(
+                f"\nConfirm resetting circuit breaker on task '{task_id}'? [YES/NO] (Default: NO): "
+            ).strip().upper()
+        except (EOFError, OSError):
+            choice = "NO"
+        if choice not in ("YES", "Y"):
+            raise ResetAttemptsError("Circuit breaker reset cancelled by operator.")
 
     from stagecheck.core.dispositions import UnauthorizedDispositionError, is_human_identity, parse_owner_grants
     from stagecheck.core.state import load_active_state, save_active_state
@@ -444,10 +460,11 @@ def reset_circuit_breaker(
 
             # Pre-capture repository baseline snapshot for the new attempt
             prod_repos_file = controls_dir / "PRODUCT_REPOSITORIES.json"
-            if prod_repos_file.is_file():
+            if prod_repos_file.is_file() and not prod_repos_file.is_symlink():
                 try:
                     from stagecheck.core.branch_governance import capture_multi_repo_task_baseline
-                    prod_data = json.loads(prod_repos_file.read_text(encoding="utf-8"))
+                    from stagecheck.core.utils import load_json_file
+                    prod_data = load_json_file(prod_repos_file)
                     registered = list((prod_data.get("repositories") or {}).keys())
                     if registered:
                         capture_multi_repo_task_baseline(

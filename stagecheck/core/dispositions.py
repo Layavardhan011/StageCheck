@@ -29,8 +29,9 @@ from stagecheck.core.paths import (
     resolve_task_dir,
     safe_resolve,
     validate_task_id,
+    write_text_nofollow,
 )
-from stagecheck.core.permissions import controlled_write_transaction
+from stagecheck.core.permissions import _safe_chmod, controlled_write_transaction
 from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_file
 
 
@@ -107,7 +108,8 @@ def _load_active_state_safe(workspace_root: Path) -> Dict[str, Any]:
     if not state_file.is_file() or state_file.is_symlink():
         return {}
     try:
-        data = json.loads(state_file.read_text(encoding="utf-8"))
+        from stagecheck.core.utils import load_json_file
+        data = load_json_file(state_file)
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -158,7 +160,10 @@ def parse_owner_grants(workspace_root: Path) -> Dict[str, Set[str]]:
         raise UnauthorizedDispositionError("Missing controls/OWNER_GRANTS.md; cannot verify human waiver grants.")
 
     try:
-        text = grants_path.read_text(encoding="utf-8")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(grants_path), flags)
+        with os.fdopen(fd, "r", encoding="utf-8") as f:
+            text = f.read()
     except Exception as err:
         raise UnauthorizedDispositionError(f"Failed to read controls/OWNER_GRANTS.md: {err}") from err
 
@@ -239,7 +244,8 @@ def _load_replay_ledger(workspace_root: Path) -> Dict[str, Any]:
     if not path.is_file():
         return {"schema_version": "1.0", "nonces": {}, "disposition_ids": {}}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        from stagecheck.core.utils import load_json_file
+        data = load_json_file(path)
         if not isinstance(data, dict):
             raise ValueError("ledger root must be an object")
         data.setdefault("nonces", {})
@@ -250,24 +256,26 @@ def _load_replay_ledger(workspace_root: Path) -> Dict[str, Any]:
 
 
 def _save_replay_ledger(workspace_root: Path, ledger: Dict[str, Any]) -> None:
+    from stagecheck.core.permissions import _safe_chmod
+
     evidence_dir = workspace_root.resolve() / "evidence"
+    if evidence_dir.is_symlink():
+        raise DispositionReplayError(f"Security policy violation: evidence directory '{evidence_dir}' cannot be a symbolic link.")
     evidence_dir.mkdir(parents=True, exist_ok=True)
     path = _replay_ledger_path(workspace_root)
     is_ev_ro = not os.access(evidence_dir, os.W_OK)
     if is_ev_ro:
-        os.chmod(evidence_dir, 0o755)
+        _safe_chmod(evidence_dir, 0o755)
     was_file_ro = path.exists() and not os.access(path, os.W_OK)
     if was_file_ro:
-        os.chmod(path, 0o644)
+        _safe_chmod(path, 0o644)
     try:
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(pretty_json_dumps(ledger), encoding="utf-8")
-        os.replace(tmp, path)
+        write_text_nofollow(path, pretty_json_dumps(ledger), append=False, mode=0o644)
     finally:
         if was_file_ro and path.exists():
-            os.chmod(path, 0o444)
+            _safe_chmod(path, 0o444)
         if is_ev_ro:
-            os.chmod(evidence_dir, 0o555)
+            _safe_chmod(evidence_dir, 0o555)
 
 
 def record_waiver_in_replay_ledger(
@@ -572,14 +580,16 @@ def get_dispositions_path(workspace_root: Path) -> Path:
 def load_dispositions(workspace_root: Path) -> Dict[str, Any]:
     """Load or initialize controls/DISPOSITIONS.json."""
     disp_path = get_dispositions_path(workspace_root)
+    if disp_path.is_symlink():
+        raise DispositionError("controls/DISPOSITIONS.json cannot be a symbolic link.")
     if not disp_path.is_file():
         return {
             "schema_version": "2.0",
             "dispositions": [],
         }
     try:
-        with open(disp_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        from stagecheck.core.utils import load_json_file
+        return load_json_file(disp_path)
     except Exception as err:
         raise DispositionError(f"Failed to load controls/DISPOSITIONS.json: {err}") from err
 
@@ -717,11 +727,8 @@ def add_disposition(
             new_list.append(new_entry)
             disp_data["dispositions"] = new_list
 
-            # Atomic replace
-            tmp_disp = disp_path.with_suffix(".tmp")
-            with open(tmp_disp, "w", encoding="utf-8") as f:
-                f.write(pretty_json_dumps(disp_data))
-            os.replace(tmp_disp, disp_path)
+            # Atomic replace via write_text_nofollow (SEC-08)
+            write_text_nofollow(disp_path, pretty_json_dumps(disp_data), append=False, mode=0o644)
 
             # 3. Re-render AGENTS.md to update SHA-256 table binding
             write_agents_contract(ws)
@@ -738,12 +745,12 @@ def add_disposition(
     evidence_dir = ws / "evidence"
     is_ev_ro = evidence_dir.is_dir() and not os.access(evidence_dir, os.W_OK)
     if is_ev_ro:
-        os.chmod(evidence_dir, 0o755)
+        _safe_chmod(evidence_dir, 0o755)
     try:
         task_dir.mkdir(parents=True, exist_ok=True)
     finally:
         if is_ev_ro:
-            os.chmod(evidence_dir, 0o555)
+            _safe_chmod(evidence_dir, 0o555)
     history_file = safe_resolve(f"TASK_{task_id}_ISSUE_HISTORY.md", task_dir, allow_symlinks=False)
     if history_file.is_symlink():
         raise DispositionError(f"Refusing to follow symlinked issue history '{history_file}'.")
@@ -761,8 +768,8 @@ def add_disposition(
         f"- **Rationale:** {rationale}\n",
         f"- **SHA-256 Digest:** `{disp_hash}`\n",
     ]
-    with open(history_file, "a", encoding="utf-8") as f:
-        f.write("".join(event_lines))
+    with controlled_write_transaction(task_dir):
+        write_text_nofollow(history_file, "".join(event_lines), append=True, mode=0o644)
 
     update_evidence_manifest(workspace_root, [history_file])
 
@@ -852,10 +859,8 @@ def revoke_disposition(
                     f"(disposition_id={disposition_id}, defect_id={defect_id})."
                 )
 
-            tmp_disp = disp_path.with_suffix(".tmp")
-            with open(tmp_disp, "w", encoding="utf-8") as f:
-                f.write(pretty_json_dumps(disp_data))
-            os.replace(tmp_disp, disp_path)
+            # Atomic replace via write_text_nofollow (SEC-08)
+            write_text_nofollow(disp_path, pretty_json_dumps(disp_data), append=False, mode=0o644)
             write_agents_contract(ws)
 
     record_waiver_in_replay_ledger(ws, revoked_entry, status_override="REVOKED", finalized=True)
@@ -957,7 +962,8 @@ def resume_after_disposition(
                         f"Verdict file not found or symlinked for task '{task_id}' at '{verdict_file}'."
                     )
                 try:
-                    verdict = json.loads(verdict_file.read_text(encoding="utf-8"))
+                    from stagecheck.core.utils import load_json_file
+                    verdict = load_json_file(verdict_file)
                     if not isinstance(verdict, dict):
                         raise ValueError("verdict.json root must be a JSON object.")
                 except Exception as err:

@@ -6,7 +6,9 @@ Renders the root workspace governance contract AGENTS.md, embedding the
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -151,7 +153,8 @@ def write_agents_contract(workspace_root: Path) -> Path:
     contract_content = render_agents_contract(controls_dir)
 
     agents_md_path = root / "AGENTS.md"
-    agents_md_path.write_text(contract_content, encoding="utf-8")
+    from stagecheck.core.paths import write_text_nofollow
+    write_text_nofollow(agents_md_path, contract_content, append=False, mode=0o644)
     return agents_md_path
 
 
@@ -223,7 +226,19 @@ def verify_agents_contract(
     if agents_md_path.is_symlink():
         raise AgentsContractSecurityError(f"AGENTS.md at '{agents_md_path}' is a prohibited symbolic link.")
 
-    text = agents_md_path.read_text(encoding="utf-8")
+    try:
+        fd = os.open(str(agents_md_path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise AgentsContractSecurityError(f"AGENTS.md at '{agents_md_path}' is not a regular file.")
+            with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as f:
+                text = f.read()
+        finally:
+            os.close(fd)
+    except OSError as err:
+        raise AgentsContractSecurityError(f"Cannot securely read AGENTS.md: {err}") from err
+
     table = parse_agents_contract_table(text)
 
     controls_dir = root / "controls"

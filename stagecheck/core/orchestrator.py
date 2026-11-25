@@ -44,11 +44,11 @@ from stagecheck.schemas.validator import get_schema_path, load_json_file
 
 
 def _load_optional_json(path: Path) -> Dict[str, Any]:
-    if not path.is_file():
+    if not path.is_file() or path.is_symlink():
         return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        data = load_json_file(path)
+        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 

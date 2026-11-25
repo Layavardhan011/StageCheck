@@ -6,6 +6,7 @@ discovery, atomic control generation, AGENTS.md contract rendering, and POSIX pe
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -27,6 +28,7 @@ from stagecheck.core.permissions import (
     MODE_DIR_RW,
     MODE_FILE_RW,
     _is_active_task_state,
+    _safe_chmod,
     apply_at_rest_permissions,
     assert_safe_teardown_preconditions,
     controlled_write_transaction,
@@ -41,7 +43,21 @@ from stagecheck.core.scaffold import (
     scaffold_remotes_config,
     scaffold_task_plan,
 )
-from stagecheck.core.utils import AgentSlugError, pretty_json_dumps, validate_agent_slug
+from stagecheck.core.paths import SymlinkPathEscapeError, safe_resolve, write_text_nofollow
+from stagecheck.core.utils import AgentSlugError, load_json_file, pretty_json_dumps, validate_agent_slug
+
+
+def _safe_touch(path: Path, mode: int = 0o644) -> None:
+    if path.is_symlink():
+        raise SymlinkPathEscapeError(f"Refusing to touch symlinked file: '{path}'")
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(str(path), flags, mode)
+        os.close(fd)
+    except OSError as err:
+        if err.errno == errno.ELOOP:
+            raise SymlinkPathEscapeError(f"Symlink detected when creating '{path}'.") from err
+        raise
 
 
 def _prompt_for_agent(prompt_text: str) -> Optional[str]:
@@ -146,9 +162,11 @@ def run_init(
                         )
                     print("Re-initializing existing workspace (--force). Preserving prior dispositions...")
                     disp_file = controls_dir / "DISPOSITIONS.json"
+                    if disp_file.is_symlink():
+                        raise ScaffoldingError("controls/DISPOSITIONS.json is a symlink: refusing to read.")
                     if disp_file.is_file():
                         try:
-                            existing_dispositions = json.loads(disp_file.read_text(encoding="utf-8"))
+                            existing_dispositions = load_json_file(disp_file)
                         except Exception:
                             pass
                 else:
@@ -156,10 +174,10 @@ def run_init(
                     print("Reconciling existing workspace (self-healing mode)...")
 
                 # Elevate only controls/ (never evidence/tasks/ sealed subtrees)
-                os.chmod(str(controls_dir), MODE_DIR_RW)
+                _safe_chmod(controls_dir, MODE_DIR_RW)
                 for item in controls_dir.iterdir():
-                    if item.is_file() and not item.name.endswith(".lock"):
-                        os.chmod(str(item), MODE_FILE_RW)
+                    if item.is_file() and not item.is_symlink() and not item.name.endswith(".lock"):
+                        _safe_chmod(item, MODE_FILE_RW)
 
             # Step 2b: Interactive or flag-based agent selection (Spec 04)
             resolved_a1 = agent1
@@ -291,7 +309,7 @@ def run_init(
             # Preserve previous dispositions if force reinit
             if existing_dispositions:
                 disp_file = controls_dir / "DISPOSITIONS.json"
-                disp_file.write_text(pretty_json_dumps(existing_dispositions), encoding="utf-8")
+                write_text_nofollow(disp_file, pretty_json_dumps(existing_dispositions), append=False, mode=0o644)
 
             # Step 5: Render and write AGENTS.md binding contract
             print("Rendering root AGENTS.md contract with initial SHA-256 table...")
@@ -303,28 +321,30 @@ def run_init(
             if evidence_dir.exists():
                 with controlled_write_transaction(evidence_dir):
                     tasks_dir.mkdir(parents=True, exist_ok=True)
-                    (evidence_dir / "sentinel.log").touch(mode=0o644, exist_ok=True)
-                    (evidence_dir / "sentinel_daemon.log").touch(mode=0o644, exist_ok=True)
+                    _safe_touch(evidence_dir / "sentinel.log", mode=0o644)
+                    _safe_touch(evidence_dir / "sentinel_daemon.log", mode=0o644)
             else:
                 tasks_dir.mkdir(parents=True, exist_ok=True)
-                (evidence_dir / "sentinel.log").touch(mode=0o644, exist_ok=True)
-                (evidence_dir / "sentinel_daemon.log").touch(mode=0o644, exist_ok=True)
+                _safe_touch(evidence_dir / "sentinel.log", mode=0o644)
+                _safe_touch(evidence_dir / "sentinel_daemon.log", mode=0o644)
 
             # Step 6b: Pre-scaffold qualification directory (evals)
             qual_file = controls_dir / "QUALIFICATION_ROOT.json"
             qual_root_name = "evals"
-            if qual_file.is_file():
+            if qual_file.is_file() and not qual_file.is_symlink():
                 try:
-                    q_data = json.loads(qual_file.read_text(encoding="utf-8"))
-                    qual_root_name = q_data.get("qualification_root", "evals")
+                    q_data = load_json_file(qual_file)
+                    cand = str(q_data.get("qualification_root", "evals")).strip()
+                    if cand:
+                        qual_root_name = cand
                 except Exception:
                     pass
-            qual_dir = workspace_root / qual_root_name
+            qual_dir = safe_resolve(qual_root_name, workspace_root, allow_symlinks=False)
             qual_dir.mkdir(parents=True, exist_ok=True)
 
             # Step 7: Create runtime lock file at workspace root (SR-06 / SEC-05) and controls/
-            (workspace_root / ".stagecheck.lock").touch(mode=0o600, exist_ok=True)
-            (controls_dir / ".stagecheck.lock").touch(mode=0o600, exist_ok=True)
+            _safe_touch(workspace_root / ".stagecheck.lock", mode=0o600)
+            _safe_touch(controls_dir / ".stagecheck.lock", mode=0o600)
 
             # Step 8: Apply at-rest defense-in-depth POSIX security modes
             print("Enforcing defense-in-depth security modes (controls/ 0555, files 0444)...")
@@ -343,10 +363,10 @@ def run_init(
         print(f"ERROR: [init.scaffolding_failed] {err}", file=sys.stderr)
         # Clean up any partially scaffolded directories if controls was not created
         instructions_dir = workspace_root / "instructions"
-        if instructions_dir.is_dir() and not controls_dir.is_dir():
+        if instructions_dir.is_dir() and not instructions_dir.is_symlink() and not controls_dir.is_dir():
             shutil.rmtree(instructions_dir, ignore_errors=True)
         specs_dir = workspace_root / "specs"
-        if specs_dir.is_dir() and not controls_dir.is_dir():
+        if specs_dir.is_dir() and not specs_dir.is_symlink() and not controls_dir.is_dir():
             shutil.rmtree(specs_dir, ignore_errors=True)
         return 1
     except Exception as err:

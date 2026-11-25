@@ -236,7 +236,8 @@ def capture_multi_repo_task_baseline(
         }
 
     # Write record
-    baseline_file.write_text(pretty_json_dumps(baselines), encoding="utf-8")
+    from stagecheck.core.paths import write_text_nofollow
+    write_text_nofollow(baseline_file, pretty_json_dumps(baselines), append=False, mode=0o644)
     return baselines
 
 
@@ -276,14 +277,17 @@ def verify_multi_repo_governance(
     baseline_file = attempt_dir / "repo_baseline.json"
 
     baseline_data: Dict[str, Dict[str, Any]] = {}
-    if baseline_file.is_file():
+    if baseline_file.is_file() and not baseline_file.is_symlink():
         try:
-            loaded = json.loads(baseline_file.read_text(encoding="utf-8"))
+            from stagecheck.core.utils import load_json_file
+            loaded = load_json_file(baseline_file)
+            if not isinstance(loaded, dict):
+                raise BranchGovernanceError(f"Malformed repo_baseline.json at '{baseline_file}': expected JSON object.")
+            baseline_data = loaded
         except Exception as err:
             raise BranchGovernanceError(f"Malformed repo_baseline.json at '{baseline_file}': {err}") from err
-        if not isinstance(loaded, dict):
-            raise BranchGovernanceError(f"Malformed repo_baseline.json at '{baseline_file}': expected JSON object.")
-        baseline_data = loaded
+    elif baseline_file.is_symlink():
+        raise BranchGovernanceError(f"Security policy violation: repo_baseline.json at '{baseline_file}' is an insecure symbolic link.")
 
     checked_heads: Dict[str, Dict[str, Any]] = {}
     approved_diff_hashes: Dict[str, str] = {}

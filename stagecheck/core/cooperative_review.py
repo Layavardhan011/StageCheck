@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.git import SAFE_GIT_SECURITY_FLAGS, run_safe_git, run_safe_git_bytes, split_git_nul_paths
-from stagecheck.core.paths import StageCheckPathError, resolve_task_dir, safe_resolve
+from stagecheck.core.paths import StageCheckPathError, resolve_task_dir, safe_resolve, write_text_nofollow
 from stagecheck.core.utils import canonical_json_dumps, load_json_file, pretty_json_dumps, sha256_digest, validate_schema
 from stagecheck.schemas import get_schema_path
 
@@ -46,9 +46,9 @@ def resolve_governed_repo_path(root: Path, repo_name: str) -> Path:
         raise ReviewGateError(f"Invalid repository name '{repo_name}'.")
 
     prod_repos_file = root / "controls" / "PRODUCT_REPOSITORIES.json"
-    if prod_repos_file.is_file():
+    if prod_repos_file.is_file() and not prod_repos_file.is_symlink():
         try:
-            p_data = json.loads(prod_repos_file.read_text(encoding="utf-8"))
+            p_data = load_json_file(prod_repos_file)
         except Exception as err:
             raise ReviewGateError(f"Malformed PRODUCT_REPOSITORIES.json: {err}") from err
         registered = p_data.get("repositories")
@@ -181,8 +181,11 @@ def verify_precommit_scope(
     if not scope_file.is_file():
         return ["Missing Phase-1/declared_scope.json: declared scope required for pre-commit review."]
 
+    if scope_file.is_symlink():
+        return [f"Phase-1 declared_scope.json is an insecure symbolic link: '{scope_file}'"]
+
     try:
-        scope_data = json.loads(scope_file.read_text(encoding="utf-8"))
+        scope_data = load_json_file(scope_file)
     except Exception as err:
         return [f"Failed to load declared_scope.json: {err}"]
 
@@ -350,7 +353,22 @@ def submit_pre_commit_status(
     root = Path(workspace_root).resolve()
     attempt_dir = resolve_task_attempt_dir(root, task_id, attempt, ensure_exists=True)
     phase2a_dir = attempt_dir / "Phase-2A"
-    phase2a_dir.mkdir(parents=True, exist_ok=True)
+    if phase2a_dir.is_symlink():
+        raise ReviewGateError(f"Security policy violation: Phase-2A directory '{phase2a_dir}' cannot be a symbolic link.")
+    p2a_is_ro = not os.access(attempt_dir, os.W_OK)
+    if p2a_is_ro:
+        try:
+            _safe_chmod(attempt_dir, 0o755)
+        except OSError:
+            pass
+    try:
+        phase2a_dir.mkdir(parents=True, exist_ok=True)
+    finally:
+        if p2a_is_ro:
+            try:
+                _safe_chmod(attempt_dir, 0o555)
+            except OSError:
+                pass
 
     status_data = {
         "schema_version": "2.0",
@@ -364,12 +382,11 @@ def submit_pre_commit_status(
     }
 
     schema_path = get_schema_path("pre_commit_status.schema.json")
-    with schema_path.open("r", encoding="utf-8") as f:
-        schema = json.load(f)
+    schema = load_json_file(schema_path)
     validate_schema(status_data, schema)
 
     status_file = phase2a_dir / "pre_commit_status.json"
-    status_file.write_text(pretty_json_dumps(status_data), encoding="utf-8")
+    write_text_nofollow(status_file, pretty_json_dumps(status_data), append=False, mode=0o644)
     return status_file
 
 
@@ -381,8 +398,18 @@ def append_to_cumulative_issue_history(
     new_issues: List[Dict[str, Any]],
 ) -> None:
     """Append newly discovered defects to cumulative TASK_<ID>_ISSUE_HISTORY.md."""
-    task_dir = resolve_task_dir(workspace_root, task_id)
-    task_dir.mkdir(parents=True, exist_ok=True)
+    evidence_dir = workspace_root / "evidence"
+    is_ev_ro = evidence_dir.is_dir() and not os.access(evidence_dir, os.W_OK)
+    if is_ev_ro:
+        from stagecheck.core.permissions import _safe_chmod
+        _safe_chmod(evidence_dir, 0o755)
+    try:
+        task_dir = resolve_task_dir(workspace_root, task_id)
+        task_dir.mkdir(parents=True, exist_ok=True)
+    finally:
+        if is_ev_ro:
+            from stagecheck.core.permissions import _safe_chmod
+            _safe_chmod(evidence_dir, 0o555)
     history_file = safe_resolve(f"TASK_{task_id}_ISSUE_HISTORY.md", task_dir, allow_symlinks=False)
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -392,8 +419,10 @@ def append_to_cumulative_issue_history(
         desc = issue.get("description", issue.get("message", "Issue description"))
         lines.append(f"- **[{code}]**: {desc}\n")
 
-    with history_file.open("a", encoding="utf-8") as f:
-        f.writelines(lines)
+    from stagecheck.core.permissions import controlled_write_transaction
+
+    with controlled_write_transaction(task_dir):
+        write_text_nofollow(history_file, "".join(lines), append=True, mode=0o644)
 
     from stagecheck.core.evidence import update_evidence_manifest
     update_evidence_manifest(workspace_root, [history_file])
@@ -436,7 +465,22 @@ def record_pre_commit_review(
     root = Path(workspace_root).resolve()
     attempt_dir = resolve_task_attempt_dir(root, task_id, attempt, ensure_exists=True)
     phase2a_dir = attempt_dir / "Phase-2A"
-    phase2a_dir.mkdir(parents=True, exist_ok=True)
+    if phase2a_dir.is_symlink():
+        raise ReviewGateError(f"Security policy violation: Phase-2A directory '{phase2a_dir}' cannot be a symbolic link.")
+    p2a_is_ro = not os.access(attempt_dir, os.W_OK)
+    if p2a_is_ro:
+        try:
+            _safe_chmod(attempt_dir, 0o755)
+        except OSError:
+            pass
+    try:
+        phase2a_dir.mkdir(parents=True, exist_ok=True)
+    finally:
+        if p2a_is_ro:
+            try:
+                _safe_chmod(attempt_dir, 0o555)
+            except OSError:
+                pass
 
     pre_existing_issues = pre_existing_issues or []
     architectural_intents = architectural_intents or []
@@ -510,9 +554,9 @@ def record_pre_commit_review(
     }
 
     existing_review_file = phase2a_dir / "pre_commit_review.json"
-    if existing_review_file.is_file():
+    if existing_review_file.is_file() and not existing_review_file.is_symlink():
         try:
-            existing_rev = json.loads(existing_review_file.read_text(encoding="utf-8"))
+            existing_rev = load_json_file(existing_review_file)
             if isinstance(existing_rev, dict) and isinstance(existing_rev.get("agent_assisted_reviews"), dict):
                 review_data["agent_assisted_reviews"] = existing_rev["agent_assisted_reviews"]
         except Exception:
@@ -520,8 +564,7 @@ def record_pre_commit_review(
 
     # Validate against schema
     schema_path = get_schema_path("pre_commit_review.schema.json")
-    with schema_path.open("r", encoding="utf-8") as f:
-        schema = json.load(f)
+    schema = load_json_file(schema_path)
     validate_schema(review_data, schema)
 
     # 1. Write response.json for Agent 2 feedback
@@ -534,7 +577,7 @@ def record_pre_commit_review(
         "feedback": summary,
         "remediation_required": [i.get("description", str(i)) for i in new_issues],
     }
-    response_file.write_text(pretty_json_dumps(response_content), encoding="utf-8")
+    write_text_nofollow(response_file, pretty_json_dumps(response_content), append=False, mode=0o644)
 
     # 2. Append to cumulative issue history if new defects found
     if new_issues:
@@ -542,7 +585,7 @@ def record_pre_commit_review(
 
     # 3. Write pre_commit_review.json
     review_file = phase2a_dir / "pre_commit_review.json"
-    review_file.write_text(pretty_json_dumps(review_data), encoding="utf-8")
+    write_text_nofollow(review_file, pretty_json_dumps(review_data), append=False, mode=0o644)
     return review_file
 
 

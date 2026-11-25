@@ -13,6 +13,9 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from stagecheck.core.paths import read_bytes_nofollow
+from stagecheck.core.permissions import _safe_chmod
+
 # Prohibited personal or host-specific path patterns
 PROHIBITED_PATTERNS = [
     (re.compile(r"/home/magnus(?:\b|/|\\)"), "Personal author home directory (/home/magnus)"),
@@ -58,6 +61,8 @@ def audit_portability(
 
         for fname in files:
             fpath = Path(root_str) / fname
+            if fpath.is_symlink():
+                continue
             suffix = fpath.suffix.lower()
 
             if suffix not in AUDITED_EXTENSIONS and not (include_docs and suffix in {".md", ".rst", ".txt"}):
@@ -68,7 +73,8 @@ def audit_portability(
                 continue
 
             try:
-                content = fpath.read_text(encoding="utf-8", errors="ignore")
+                from stagecheck.core.paths import read_bytes_nofollow
+                content = read_bytes_nofollow(fpath, max_bytes=10 * 1024 * 1024).decode("utf-8", errors="ignore")
                 for line_num, line in enumerate(content.splitlines(), 1):
                     for pattern, description in PROHIBITED_PATTERNS:
                         if pattern.search(line):
@@ -186,10 +192,10 @@ def restore_executable_permissions(
     missing: List[str] = []
     for rel in rel_paths:
         target = root / rel
-        if not target.is_file():
+        if target.is_symlink() or not target.is_file():
             missing.append(rel)
             continue
-        os.chmod(target, target_mode)
+        _safe_chmod(target, target_mode)
         restored.append(rel)
     verification = verify_executable_permissions(root, rel_paths)
     return {
@@ -208,6 +214,8 @@ def create_source_zip_preserving_modes(
     """Create a ZIP archive that preserves UNIX POSIX file modes in ZipInfo.external_attr."""
     root = Path(source_root).resolve()
     out_zip = Path(zip_path).resolve()
+    if out_zip.parent.is_symlink():
+        raise PermissionError(f"Security policy violation: Zip parent directory '{out_zip.parent}' cannot be a symbolic link.")
     out_zip.parent.mkdir(parents=True, exist_ok=True)
 
     candidates: List[str]
@@ -226,14 +234,14 @@ def create_source_zip_preserving_modes(
         for rel in candidates:
             full = (root / rel).resolve()
             full.relative_to(root)
-            if not full.is_file():
+            if full.is_symlink() or not full.is_file():
                 continue
             st = full.lstat()
             zinfo = zipfile.ZipInfo(rel)
             zinfo.create_system = 3  # UNIX POSIX mode attributes
             file_mode = stat.S_IMODE(st.st_mode)
             zinfo.external_attr = (stat.S_IFREG | file_mode) << 16
-            zf.writestr(zinfo, full.read_bytes())
+            zf.writestr(zinfo, read_bytes_nofollow(full))
 
     return out_zip
 
@@ -246,6 +254,8 @@ def extract_zip_preserving_modes(
     """Extract a ZIP archive safely and restore recorded POSIX executable modes."""
     archive = Path(zip_path).resolve()
     dest = Path(dest_dir).resolve()
+    if dest.is_symlink():
+        raise PermissionError(f"Security policy violation: Destination directory '{dest}' cannot be a symbolic link.")
     dest.mkdir(parents=True, exist_ok=True)
     extracted: List[Path] = []
     req_set = set(required_executables)
@@ -255,14 +265,31 @@ def extract_zip_preserving_modes(
             if info.is_dir():
                 continue
             target = (dest / info.filename).resolve()
-            target.relative_to(dest)
+            try:
+                target.relative_to(dest)
+            except ValueError:
+                raise PermissionError(f"Archive entry '{info.filename}' attempts path traversal outside destination.")
             target.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info, "r") as src, open(target, "wb") as dst:
-                dst.write(src.read())
+            if target.is_symlink():
+                raise PermissionError(f"Refusing to extract into symbolic link target '{target}'.")
+
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(str(target), flags, 0o644)
+            try:
+                with zf.open(info, "r") as src, os.fdopen(fd, "wb", closefd=False) as dst:
+                    total_written = 0
+                    max_file_size = 50 * 1024 * 1024  # 50 MB limit per entry to prevent decompression bombs
+                    while chunk := src.read(64 * 1024):
+                        total_written += len(chunk)
+                        if total_written > max_file_size:
+                            raise ValueError(f"Decompression bomb detected: file '{info.filename}' exceeds limit.")
+                        dst.write(chunk)
+            finally:
+                os.close(fd)
 
             posix_mode = (info.external_attr >> 16) & 0o777
             if info.create_system == 3 and posix_mode:
-                os.chmod(target, posix_mode)
+                _safe_chmod(target, posix_mode)
             elif info.filename in req_set:
                 raise PermissionError(
                     f"Archive entry '{info.filename}' lacks preserved POSIX executable permissions."

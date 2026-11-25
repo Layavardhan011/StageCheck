@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,64 +61,76 @@ def get_last_relevant_filesystem_timestamp(
     chunk_size = 65536
     now_ref = datetime.datetime.now(datetime.timezone.utc)
     try:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(str(log_file), flags)
-        with os.fdopen(fd, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            file_size = f.tell()
-            pos = file_size
-            scanned = 0
-            remainder = b""
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return None
+            try:
+                os.set_blocking(fd, True)
+            except (OSError, AttributeError):
+                pass
+            with os.fdopen(fd, "rb", closefd=False) as f:
+                f.seek(0, os.SEEK_END)
+                file_size = f.tell()
+                pos = file_size
+                scanned = 0
+                remainder = b""
 
-            while pos > 0 and scanned < max_scan_bytes:
-                read_len = min(chunk_size, pos, max_scan_bytes - scanned)
-                pos -= read_len
-                f.seek(pos, os.SEEK_SET)
-                buf = f.read(read_len) + remainder
-                scanned += read_len
+                while pos > 0 and scanned < max_scan_bytes:
+                    read_len = min(chunk_size, pos, max_scan_bytes - scanned)
+                    pos -= read_len
+                    f.seek(pos, os.SEEK_SET)
+                    buf = f.read(read_len) + remainder
+                    scanned += read_len
 
-                if pos > 0 and b"\n" in buf:
-                    remainder, block = buf.split(b"\n", 1)
-                else:
-                    remainder, block = b"", buf
-
-                lines = block.decode("utf-8", errors="replace").split("\n")
-                for line in reversed(lines):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if _has_unsafe_log_control_chars(line):
-                        continue
-
-                    ts_str: Optional[str] = None
-                    rel_path: Optional[str] = None
-                    if line.startswith("{"):
-                        try:
-                            obj = json.loads(line)
-                            if isinstance(obj, dict):
-                                ts_val = obj.get("ts")
-                                path_val = obj.get("path")
-                                if isinstance(ts_val, str) and isinstance(path_val, str):
-                                    ts_str = ts_val
-                                    rel_path = path_val
-                        except Exception:
-                            continue
+                    if pos > 0 and b"\n" in buf:
+                        remainder, block = buf.split(b"\n", 1)
                     else:
-                        # Legacy Format: [2026-11-06T12:00:00+00:00] [Tier 1] [MODIFIED] repos/core/app.py
-                        parts = line.split("] ", 3)
-                        if len(parts) >= 4:
-                            ts_str = parts[0].lstrip("[")
-                            rel_path = parts[3].strip()
+                        remainder, block = b"", buf
 
-                    if ts_str and rel_path and is_relevant_sentinel_path(rel_path):
-                        try:
-                            parsed = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                            if parsed.tzinfo is None:
-                                parsed = parsed.replace(tzinfo=datetime.timezone.utc)
-                            if parsed <= now_ref:
-                                return parsed
-                        except Exception:
-                            pass
+                    lines = block.decode("utf-8", errors="replace").split("\n")
+                    for line in reversed(lines):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if _has_unsafe_log_control_chars(line):
+                            continue
+
+                        ts_str: Optional[str] = None
+                        rel_path: Optional[str] = None
+                        if line.startswith("{"):
+                            try:
+                                obj = json.loads(line)
+                                if isinstance(obj, dict):
+                                    ts_val = obj.get("ts")
+                                    path_val = obj.get("path")
+                                    if isinstance(ts_val, str) and isinstance(path_val, str):
+                                        ts_str = ts_val
+                                        rel_path = path_val
+                            except Exception:
+                                continue
+                        else:
+                            # Legacy Format: [2026-11-06T12:00:00+00:00] [Tier 1] [MODIFIED] repos/core/app.py
+                            parts = line.split("] ", 3)
+                            if len(parts) >= 4:
+                                ts_str = parts[0].lstrip("[")
+                                rel_path = parts[3].strip()
+
+                        if ts_str and rel_path and is_relevant_sentinel_path(rel_path):
+                            try:
+                                parsed = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                                if parsed.tzinfo is None:
+                                    parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+                                if parsed <= now_ref:
+                                    return parsed
+                            except Exception:
+                                pass
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
     except Exception:
         pass
     return None

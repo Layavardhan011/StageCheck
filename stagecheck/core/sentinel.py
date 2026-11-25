@@ -14,10 +14,8 @@ import contextlib
 import ctypes
 import datetime
 import fcntl
-import html
 import json
 import os
-import re
 import select
 import signal
 import stat
@@ -25,10 +23,12 @@ import struct
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 
 class SentinelError(Exception):
@@ -153,6 +153,9 @@ def send_desktop_notification(
     and terminates CLI options with '--'.
     Fails silently if notify-send or desktop environment is absent.
     """
+    import html
+    import subprocess
+
     safe_urgency = urgency if urgency in _ALLOWED_URGENCY else "normal"
     safe_icon = icon if isinstance(icon, str) and not icon.startswith("-") else "dialog-information"
     safe_title = html.escape(str(title), quote=True)
@@ -239,6 +242,8 @@ def _is_path_in_scope(rel_path: str, declared_scope: Dict[str, Any]) -> bool:
 
 def get_process_rss_mib(pid: int) -> float:
     """Return current resident memory (RSS) for a process in MiB."""
+    if pid <= 0:
+        return 0.0
     statm_path = Path(f"/proc/{pid}/statm")
     if not statm_path.is_file():
         return 0.0
@@ -355,6 +360,22 @@ def classify_event_path(
     return 4, "UNCLASSIFIED_EVENT"
 
 
+def _is_sentinel_process(pid: int) -> bool:
+    """Verify that the target process is a legitimate StageCheck Sentinel daemon (SEC-16)."""
+    if pid <= 1:
+        return False
+    proc_cmd = Path(f"/proc/{pid}/cmdline")
+    if proc_cmd.is_file():
+        try:
+            cmdline = proc_cmd.read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="ignore").lower()
+            return "sentinel" in cmdline and ("stagecheck" in cmdline or "_sentinel_entry" in cmdline)
+        except (OSError, PermissionError):
+            return False
+    if not Path("/proc").is_dir():
+        return True
+    return False
+
+
 class SentinelDaemon:
     """Continuous background supervisor managing inotify watches and PID state."""
 
@@ -362,6 +383,7 @@ class SentinelDaemon:
         self.root = Path(workspace_root).resolve()
         self.pid_file = self.root / ".stagecheck_sentinel.pid"
         self._daemon_lock_file = self.root / ".stagecheck_sentinel.lock"
+        self._runtime_lock_file = self.root / ".stagecheck.lock"
         self.log_file = self.root / "evidence" / "sentinel.log"
         self._libc: Optional[ctypes.CDLL] = None
         self._inotify_fd: Optional[int] = None
@@ -373,7 +395,8 @@ class SentinelDaemon:
         state_file = self.root / "controls" / "ACTIVE_STATE.json"
         if state_file.is_file() and not state_file.is_symlink():
             try:
-                state = json.loads(state_file.read_text(encoding="utf-8"))
+                from stagecheck.core.state import load_active_state
+                state = load_active_state(self.root)
                 last_ts_str = state.get("watchdog", {}).get("last_active_timestamp")
                 if last_ts_str:
                     last_ts = datetime.datetime.fromisoformat(last_ts_str.replace("Z", "+00:00"))
@@ -385,12 +408,13 @@ class SentinelDaemon:
 
     def _init_libc(self) -> None:
         if self._libc is None:
-            import ctypes.util
-            libc_name = ctypes.util.find_library("c") or "libc.so.6"
             try:
-                self._libc = ctypes.CDLL(libc_name, use_errno=True)
+                self._libc = ctypes.CDLL("libc.so.6", use_errno=True)
             except OSError:
                 self._libc = ctypes.CDLL(None, use_errno=True)
+            if hasattr(self._libc, "malloc_trim"):
+                self._libc.malloc_trim.argtypes = [ctypes.c_size_t]
+                self._libc.malloc_trim.restype = ctypes.c_int
 
     @contextlib.contextmanager
     def _acquire_daemon_lock(self):
@@ -443,7 +467,9 @@ class SentinelDaemon:
             raise SentinelError("Security violation: .stagecheck_sentinel.pid is a symbolic link.")
 
         try:
-            content = self.pid_file.read_text(encoding="utf-8").strip()
+            from stagecheck.core.paths import read_bytes_nofollow
+            raw = read_bytes_nofollow(self.pid_file, max_bytes=64)
+            content = raw.decode("utf-8", errors="replace").strip()
             return int(content) if content.isdigit() else None
         except Exception:
             return None
@@ -454,7 +480,9 @@ class SentinelDaemon:
         if not pid or pid <= 1:
             if self.pid_file.is_file() and not self.pid_file.is_symlink():
                 try:
-                    content = self.pid_file.read_text(encoding="utf-8").strip()
+                    from stagecheck.core.paths import read_bytes_nofollow
+                    raw = read_bytes_nofollow(self.pid_file, max_bytes=64)
+                    content = raw.decode("utf-8", errors="replace").strip()
                     if not content.isdigit():
                         self.pid_file.unlink(missing_ok=True)
                 except Exception:
@@ -471,7 +499,10 @@ class SentinelDaemon:
     def start(self, daemon: bool = True, timeout: float = 10.0, ready_fd: Optional[int] = None) -> int:
         """Start the Sentinel daemon in background or foreground with IPC readiness protocol."""
         self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / "evidence").mkdir(parents=True, exist_ok=True)
+        ev_dir = self.root / "evidence"
+        if ev_dir.is_symlink():
+            raise SentinelError(f"Security policy violation: evidence directory '{ev_dir}' cannot be a symbolic link.")
+        ev_dir.mkdir(parents=True, exist_ok=True)
 
         if not daemon:
             lock_stack = contextlib.ExitStack()
@@ -485,7 +516,8 @@ class SentinelDaemon:
             state_file = self.root / "controls" / "ACTIVE_STATE.json"
             if state_file.is_file() and not state_file.is_symlink():
                 try:
-                    state_data = json.loads(state_file.read_text(encoding="utf-8"))
+                    from stagecheck.core.state import load_active_state
+                    state_data = load_active_state(self.root)
                     agents = (
                         state_data.get("protected", {}).get("registered_agents")
                         or state_data.get("registered_agents")
@@ -520,7 +552,8 @@ class SentinelDaemon:
             state_file = self.root / "controls" / "ACTIVE_STATE.json"
             if state_file.is_file() and not state_file.is_symlink():
                 try:
-                    state_data = json.loads(state_file.read_text(encoding="utf-8"))
+                    from stagecheck.core.state import load_active_state
+                    state_data = load_active_state(self.root)
                     agents = (
                         state_data.get("protected", {}).get("registered_agents")
                         or state_data.get("registered_agents")
@@ -575,6 +608,8 @@ class SentinelDaemon:
                 env.pop(key, None)
 
             env["PYTHONNOUSERSITE"] = "1"
+            env["PYTHONNODEBUGRANGES"] = "1"
+            env["MALLOC_ARENA_MAX"] = "2"
 
             cmd = [
                 python_bin,
@@ -586,6 +621,8 @@ class SentinelDaemon:
                 "--ready-fd",
                 str(w_pipe),
             ]
+
+            import subprocess
 
             process: Optional[subprocess.Popen] = None
             try:
@@ -688,6 +725,12 @@ class SentinelDaemon:
                 print("Sentinel daemon is not running.")
                 return 0
 
+            # SEC-16: Reject termination signals if PID does not match a verified Sentinel process
+            if not _is_sentinel_process(pid):
+                print(f"Warning: Process {pid} is not a verified StageCheck Sentinel daemon. Refusing to signal.")
+                self.pid_file.unlink(missing_ok=True)
+                return 0
+
             print(f"Stopping Sentinel daemon (PID {pid})...")
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -730,7 +773,8 @@ class SentinelDaemon:
         state_file = self.root / "controls" / "ACTIVE_STATE.json"
         if state_file.is_file() and not state_file.is_symlink():
             try:
-                state_data = json.loads(state_file.read_text(encoding="utf-8"))
+                from stagecheck.core.state import load_active_state
+                state_data = load_active_state(self.root)
                 active_task = state_data.get("task_id", "None")
                 agents = (
                     state_data.get("protected", {}).get("registered_agents")
@@ -870,7 +914,8 @@ class SentinelDaemon:
                 state_file = self.root / "controls" / "ACTIVE_STATE.json"
                 if state_file.is_file() and not state_file.is_symlink():
                     try:
-                        st_data = json.loads(state_file.read_text(encoding="utf-8"))
+                        from stagecheck.core.state import load_active_state
+                        st_data = load_active_state(self.root)
                         phase = st_data.get("phase", "IDLE")
                     except Exception:
                         phase = "IDLE"
@@ -954,18 +999,22 @@ class SentinelDaemon:
                                 processed_any = True
                             except BlockingIOError:
                                 break
-                        if processed_any and self._libc and hasattr(self._libc, "malloc_trim"):
-                            try:
-                                self._libc.malloc_trim(0)
-                            except Exception:
-                                pass
+                        if processed_any:
+                            import gc
+                            gc.collect()
+                            if self._libc and hasattr(self._libc, "malloc_trim"):
+                                try:
+                                    self._libc.malloc_trim(0)
+                                except Exception:
+                                    pass
 
                 # Check watchdog periodically for active agent phases
                 try:
                     state_file = self.root / "controls" / "ACTIVE_STATE.json"
                     if state_file.is_file() and not state_file.is_symlink():
                         try:
-                            st_data = json.loads(state_file.read_text(encoding="utf-8"))
+                            from stagecheck.core.state import load_active_state
+                            st_data = load_active_state(self.root)
                             phase = st_data.get("phase", "IDLE")
                         except Exception:
                             phase = "IDLE"
@@ -989,7 +1038,9 @@ class SentinelDaemon:
         """Return True if an authorized StageCheck runtime lock transaction is active or just completed."""
         if self._in_process_transaction:
             return True
-        lock_file = self.root / ".stagecheck.lock"
+        lock_file = getattr(self, "_runtime_lock_file", None)
+        if lock_file is None:
+            lock_file = self.root / ".stagecheck.lock"
         if lock_file.is_symlink() or not lock_file.is_file():
             return False
         try:
@@ -1056,17 +1107,22 @@ class SentinelDaemon:
             size = self.log_file.stat().st_size
             if size < self._MAX_LOG_BYTES:
                 return
-            with self.log_file.open("rb") as f:
-                f.seek(max(0, size - self._ROTATE_KEEP_BYTES), os.SEEK_SET)
-                tail = f.read()
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(str(self.log_file), flags)
+            try:
+                with os.fdopen(fd, "rb") as f:
+                    f.seek(max(0, size - self._ROTATE_KEEP_BYTES), os.SEEK_SET)
+                    tail = f.read()
+            except Exception:
+                return
             if b"\n" in tail:
                 tail = tail.split(b"\n", 1)[1]
             flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(str(self.log_file), flags)
+            w_fd = os.open(str(self.log_file), flags)
             try:
-                os.write(fd, tail)
+                os.write(w_fd, tail)
             finally:
-                os.close(fd)
+                os.close(w_fd)
         except OSError:
             pass
 

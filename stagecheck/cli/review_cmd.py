@@ -21,7 +21,7 @@ from stagecheck.core.cooperative_review import (
 )
 from stagecheck.core.gate_engine import GateId, get_gate_receipt_path, normalize_phase
 from stagecheck.core.state import load_active_state
-from stagecheck.core.utils import sha256_file, validate_schema
+from stagecheck.core.utils import load_json_file, sha256_file, validate_schema
 from stagecheck.schemas import get_schema_path
 
 
@@ -33,7 +33,7 @@ def _validate_and_bind_precommit_status(
 ) -> tuple[list[str], dict[str, str], int]:
     """Validate pre_commit_status.json against schema and authoritative PRODUCT_REPOSITORIES.json baselines."""
     schema_path = get_schema_path("pre_commit_status.schema.json")
-    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema = load_json_file(schema_path)
     validate_schema(data, schema)
 
     if data.get("task_id") != task or int(data.get("attempt", 0)) != attempt:
@@ -53,9 +53,9 @@ def _validate_and_bind_precommit_status(
     cycle = int(data.get("cycle", 1))
 
     prod_repos_file = workspace_root / "controls" / "PRODUCT_REPOSITORIES.json"
-    if not prod_repos_file.is_file():
+    if not prod_repos_file.is_file() or prod_repos_file.is_symlink():
         raise ReviewGateError("Missing controls/PRODUCT_REPOSITORIES.json: cannot verify authoritative baselines.")
-    prod_data = json.loads(prod_repos_file.read_text(encoding="utf-8"))
+    prod_data = load_json_file(prod_repos_file)
     registered = prod_data.get("repositories")
     if not isinstance(registered, dict) or not registered:
         raise ReviewGateError("controls/PRODUCT_REPOSITORIES.json has no registered repositories.")
@@ -64,9 +64,9 @@ def _validate_and_bind_precommit_status(
     attempt_dir = resolve_task_attempt_dir(workspace_root, task, attempt)
     baseline_file = attempt_dir / "repo_baseline.json"
     repo_baseline_data: dict[str, dict] = {}
-    if baseline_file.is_file():
+    if baseline_file.is_file() and not baseline_file.is_symlink():
         try:
-            loaded_bl = json.loads(baseline_file.read_text(encoding="utf-8"))
+            loaded_bl = load_json_file(baseline_file)
             if isinstance(loaded_bl, dict):
                 repo_baseline_data = loaded_bl
         except Exception:
@@ -175,7 +175,7 @@ def run_review_precommit(
     phase2a_dir = attempt_dir / "Phase-2A"
     status_file = phase2a_dir / "pre_commit_status.json"
 
-    if not status_file.is_file():
+    if not status_file.is_file() or status_file.is_symlink():
         print(
             f"ERROR: [review.missing_status] No pre_commit_status.json found at '{status_file}'. "
             "Agent 2 must submit pre-commit status before review can execute.",
@@ -184,7 +184,7 @@ def run_review_precommit(
         return 1
 
     try:
-        data = json.loads(status_file.read_text(encoding="utf-8"))
+        data = load_json_file(status_file)
         touched_repos, base_commits, cycle = _validate_and_bind_precommit_status(
             workspace_root, task, attempt, data
         )
@@ -306,7 +306,7 @@ def run_approve_review(
     phase2a_dir = attempt_dir / "Phase-2A"
     status_file = phase2a_dir / "pre_commit_status.json"
 
-    if not status_file.is_file():
+    if not status_file.is_file() or status_file.is_symlink():
         print(
             f"ERROR: [approve.missing_status] Cannot approve review: pre_commit_status.json missing at '{status_file}'.",
             file=sys.stderr,
@@ -322,7 +322,7 @@ def run_approve_review(
     )
 
     try:
-        status_data = json.loads(status_file.read_text(encoding="utf-8"))
+        status_data = load_json_file(status_file)
         touched_repos, base_commits, cycle = _validate_and_bind_precommit_status(
             workspace_root, task, attempt, status_data
         )
@@ -366,9 +366,9 @@ def run_approve_review(
         arch_intents = []
         new_issues = []
         code_quality_obs = []
-        if agent_reviews_file.is_file():
+        if agent_reviews_file.is_file() and not agent_reviews_file.is_symlink():
             try:
-                ar_data = json.loads(agent_reviews_file.read_text(encoding="utf-8"))
+                ar_data = load_json_file(agent_reviews_file)
                 arch_intents = ar_data.get("architectural_intents_approved", [])
                 new_issues = ar_data.get("new_issues_found", [])
                 code_quality_obs = ar_data.get("code_quality_observations", [])

@@ -53,26 +53,28 @@ def run_stage7_qual_naming(ctx: AuditContext) -> StageResult:
     defects: List[Defect] = []
     errors: List[str] = []
 
-    # 1. Resolve qualification root path from controls/QUALIFICATION_ROOT.json
+    # 1. Resolve qualification root path from controls/QUALIFICATION_ROOT.json (SEC-22)
     qual_config_path = ctx.workspace_root / "controls" / "QUALIFICATION_ROOT.json"
     qual_root_rel = "evals"
     requires_qualification_tests = False
 
-    if qual_config_path.is_file():
+    if qual_config_path.is_file() and not qual_config_path.is_symlink():
         try:
-            with open(qual_config_path, "r", encoding="utf-8") as f:
-                qual_data = json.load(f)
+            from stagecheck.core.utils import load_json_file
+            qual_data = load_json_file(qual_config_path)
             qual_root_rel = qual_data.get("qualification_root", "evals")
             requires_qualification_tests = bool(qual_data.get("require_qualification_tests", False))
         except Exception as err:
             errors.append(f"Failed to read controls/QUALIFICATION_ROOT.json: {err}")
+    elif qual_config_path.is_symlink():
+        errors.append(f"controls/QUALIFICATION_ROOT.json is an insecure symbolic link: '{qual_config_path}'")
     else:
         # Fall back to checking specs/TASK_PLAN.json if present
         task_plan_path = ctx.workspace_root / "specs" / "TASK_PLAN.json"
-        if task_plan_path.is_file():
+        if task_plan_path.is_file() and not task_plan_path.is_symlink():
             try:
-                with open(task_plan_path, "r", encoding="utf-8") as f:
-                    plan_data = json.load(f)
+                from stagecheck.core.utils import load_json_file
+                plan_data = load_json_file(task_plan_path)
                 requires_qualification_tests = bool(plan_data.get("requires_qualification_tests", False))
             except Exception:
                 pass

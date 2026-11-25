@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from stagecheck.core.agents import resolve_task_attempt_dir
 from stagecheck.core.paths import StageCheckPathError, is_path_contained, read_bytes_nofollow, safe_resolve, sha256_file_nofollow, write_text_nofollow
-from stagecheck.core.utils import canonical_json_dumps, pretty_json_dumps, sha256_file, strict_json_loads, validate_schema
+from stagecheck.core.utils import canonical_json_dumps, load_json_file, pretty_json_dumps, sha256_file, strict_json_loads, validate_schema
 from stagecheck.schemas import get_schema_path
 
 
@@ -58,17 +58,17 @@ def _resolve_target_repositories(root: Path) -> List[str]:
 
     if controls_dir.is_dir() and (state_file.is_file() or prod_file.is_file()):
         targets: List[str] = []
-        if state_file.is_file():
+        if state_file.is_file() and not state_file.is_symlink():
             try:
-                raw_targets = json.loads(state_file.read_text(encoding="utf-8")).get("target_repositories", [])
+                raw_targets = load_json_file(state_file).get("target_repositories", [])
                 if isinstance(raw_targets, list):
                     targets = [str(r) for r in raw_targets if isinstance(r, str) and r]
             except Exception as err:
                 raise ScopeValidationError(f"Failed to read target_repositories from ACTIVE_STATE.json: {err}") from err
-        if prod_file.is_file():
+        if prod_file.is_file() and not prod_file.is_symlink():
             try:
                 registered = set(
-                    json.loads(prod_file.read_text(encoding="utf-8")).get("repositories", {}).keys()
+                    load_json_file(prod_file).get("repositories", {}).keys()
                 )
             except Exception as err:
                 raise ScopeValidationError(f"Failed to read PRODUCT_REPOSITORIES.json: {err}") from err
@@ -106,8 +106,7 @@ def validate_declared_scope(
 
     # 1. Validate against schema
     schema_path = get_schema_path("declared_scope.schema.json")
-    with schema_path.open("r", encoding="utf-8") as f:
-        schema = json.load(f)
+    schema = load_json_file(schema_path)
     try:
         validate_schema(declared_scope_data, schema)
     except Exception as err:
@@ -258,20 +257,16 @@ def freeze_prompt_and_scope(
 
     # Validate against schema
     schema_path = get_schema_path("prompt_verified.schema.json")
-    with schema_path.open("r", encoding="utf-8") as f:
-        rec_schema = json.load(f)
+    rec_schema = load_json_file(schema_path)
     validate_schema(record_data, rec_schema)
 
     # Write atomically without following symlinks
     write_text_nofollow(verified_record_path, pretty_json_dumps(record_data), append=False, mode=0o644)
 
     # Apply read-only mode to frozen regular Phase-1 files (defense-in-depth)
+    from stagecheck.core.permissions import _safe_chmod
     for p in [prompt_path, scope_path, verified_record_path]:
-        if not p.is_symlink():
-            try:
-                os.chmod(str(p), 0o444)
-            except OSError:
-                pass
+        _safe_chmod(p, 0o444)
 
     return verified_record_path
 
